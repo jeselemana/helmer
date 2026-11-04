@@ -197,9 +197,10 @@ app.get("/manifest.json", (req, res) => {
 
 // 🩺 Health & Storage Diagnostics
 app.get("/api/health", (req, res) => {
-  if (process.env.NODE_ENV === "production" && process.env.REDIS_URL && !redis?.isReady) res.status(503);
+  const redisRequired = Boolean(process.env.REDIS_URL || process.env.REQUIRE_REDIS === "true");
+  if (process.env.NODE_ENV === "production" && redisRequired && !redis?.isReady) res.status(503);
   return res.json({
-    status: process.env.NODE_ENV !== "production" || !process.env.REDIS_URL || redis?.isReady ? "ok" : "unavailable",
+    status: process.env.NODE_ENV !== "production" || !redisRequired || redis?.isReady ? "ok" : "unavailable",
     app: "Helmer",
     storage: {
       r2Configured: isR2Configured(),
@@ -356,6 +357,32 @@ const askAuthJsonParser = express.json({ limit: '25mb' });
 app.use('/api/ask', (req, res, next) => (req.user ? askAuthJsonParser(req, res, next) : askGuestJsonParser(req, res, next)));
 app.use(express.json({ limit: '256kb' }));
 app.use(express.urlencoded({ limit: '64kb', extended: false }));
+const MAX_JSON_ARRAY_LENGTH = 250;
+const MAX_JSON_OBJECT_KEYS = 250;
+const MAX_JSON_DEPTH = 14;
+function hasOversizedJsonCollection(value, depth = 0) {
+  if (!value || typeof value !== 'object') return false;
+  if (depth > MAX_JSON_DEPTH) return true;
+  if (Array.isArray(value)) {
+    if (value.length > MAX_JSON_ARRAY_LENGTH) return true;
+    for (let i = 0; i < value.length; i += 1) {
+      if (hasOversizedJsonCollection(value[i], depth + 1)) return true;
+    }
+    return false;
+  }
+  const keys = Object.keys(value);
+  if (keys.length > MAX_JSON_OBJECT_KEYS) return true;
+  for (let i = 0; i < keys.length; i += 1) {
+    if (hasOversizedJsonCollection(value[keys[i]], depth + 1)) return true;
+  }
+  return false;
+}
+app.use((req, res, next) => {
+  if (req.body && typeof req.body === 'object' && hasOversizedJsonCollection(req.body)) {
+    return res.status(400).json({ error: 'Sorğu parametrləri həddi aşır.', code: 'VALIDATION_ERROR' });
+  }
+  next();
+});
 app.use(aiPolicy.middleware());
 app.get('/api/security/config', (req, res) => {
   const guestLimit = guestDailyLimit();
@@ -937,9 +964,10 @@ app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
   const status = httpStatusOf(error);
   if (status >= 500) console.error("Unhandled request error", { method: req.method, path: req.path, name: error?.name, code: error?.code });
+  const isSyntaxErr = error instanceof SyntaxError || error?.type === "entity.parse.failed" || error?.name === "SyntaxError";
   return res.status(status).json({
     error: publicErrorMessage(error, "Sorğunu tamamlamaq mümkün olmadı."),
-    code: error?.code && typeof error.code === "string" ? error.code : "INTERNAL_ERROR",
+    code: isSyntaxErr ? "INVALID_JSON" : (error?.code && typeof error.code === "string" ? error.code : "INTERNAL_ERROR"),
   });
 });
 

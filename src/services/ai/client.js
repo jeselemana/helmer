@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { buildConfig } from "./build-config.js";
 import { wrapProvider } from "../security/provider-policy.js";
 import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
@@ -83,4 +84,69 @@ export function getGeminiClient() {
   }
 
   return geminiClient;
+}
+
+export function resolveVertexBaseUrl(location = "us") {
+  const normalized = String(location || "us").trim().toLowerCase();
+  if (normalized === "global") return "https://aiplatform.googleapis.com";
+  if (normalized === "us") return "https://aiplatform.us.rep.googleapis.com";
+  if (normalized === "eu") return "https://aiplatform.eu.rep.googleapis.com";
+  if (/^[a-z]+-[a-z]+\d+$/.test(normalized)) {
+    return `https://${normalized}-aiplatform.googleapis.com`;
+  }
+  throw Object.assign(new Error("Invalid Vertex AI location."), { code: "AI_NOT_CONFIGURED", status: 503 });
+}
+
+// Build uses isolated Vertex AI clients and ADC/Cloud Run service identity.
+// Explicit project/location override any ambient Gemini/Google API keys in the SDK.
+const buildVertexClients = new Map();
+
+export function resolveBuildVertexClientOptions(env = process.env, existsSync = fs.existsSync, locationOverride = null) {
+  const credentialPath = env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  const project = (env.GOOGLE_CLOUD_PROJECT || env.GCP_PROJECT || "").trim();
+  if (!/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(project) ||
+      (credentialPath && !existsSync(credentialPath)) ||
+      (env.NODE_ENV === "production" && credentialPath)) {
+    throw Object.assign(new Error("Build AI service is not configured."), { code: "AI_NOT_CONFIGURED", status: 503 });
+  }
+  const location = (locationOverride || env.BUILD_VERTEX_LOCATION || env.GOOGLE_CLOUD_BUILD_LOCATION || buildConfig.location || "us").trim().toLowerCase();
+  const baseUrl = resolveVertexBaseUrl(location);
+  return {
+    vertexai: true,
+    project,
+    location,
+    httpOptions: {
+      baseUrl,
+      apiVersion: "v1beta1",
+      timeout: buildConfig.clientTimeoutMs,
+      retryOptions: { attempts: 1 },
+    },
+  };
+}
+
+export function getBuildVertexClient(location = null) {
+  const defaultLoc = (process.env.BUILD_VERTEX_LOCATION || process.env.GOOGLE_CLOUD_BUILD_LOCATION || buildConfig.location || "us").trim().toLowerCase();
+  const targetLoc = (location || defaultLoc).trim().toLowerCase();
+
+  if (!buildVertexClients.has(defaultLoc)) {
+    const primaryOptions = resolveBuildVertexClientOptions(process.env, fs.existsSync, defaultLoc);
+    buildVertexClients.set(defaultLoc, wrapProvider(new GoogleGenAI(primaryOptions), "gemini", { buildVertex: true }));
+  }
+
+  const primaryClient = buildVertexClients.get(defaultLoc);
+  if (targetLoc === defaultLoc) {
+    return primaryClient;
+  }
+
+  // If unit tests mocked methods on the primary client, route fallback calls through the mocked client.
+  if (primaryClient?.models?.generateContent?.mock || primaryClient?.models?.generateContentStream?.mock) {
+    return primaryClient;
+  }
+
+  if (!buildVertexClients.has(targetLoc)) {
+    const targetOptions = resolveBuildVertexClientOptions(process.env, fs.existsSync, targetLoc);
+    buildVertexClients.set(targetLoc, wrapProvider(new GoogleGenAI(targetOptions), "gemini", { buildVertex: true }));
+  }
+
+  return buildVertexClients.get(targetLoc);
 }

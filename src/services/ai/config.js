@@ -8,6 +8,7 @@ function positiveInteger(value, fallback) {
 export const aiConfig = Object.freeze({
   upModel: "gpt-6-luna",
   upMaxOutputTokens: 3000,
+  // Legacy shared structured/artifact router. Build uses build-config.js exclusively.
   strategyModel: "gemini-3.8-flash",
   strategyFallbackModel: "gpt-6.1-sol",
   strategyThinkingLevel: "HIGH",

@@ -491,6 +491,73 @@ export class TelemetryService {
     });
   }
 
+  async trackStrategyFeedback({
+    ownerId = null,
+    sessionId = null,
+    strategyId = null,
+    strategyTitle = null,
+    brief = "",
+    feedback = "like",
+    onlyNecessaryData = false,
+    modelImprovement = true,
+  } = {}) {
+    const isRestricted = onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
+    const isLike = feedback === "like";
+    const feedbackLabel = isLike ? "Razı qaldı (Like 👍)" : "Razı qalmadı (Dislike 👎)";
+    const safeTitle = isRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : redactSensitiveText(strategyTitle || brief || "Strategiya", 80);
+
+    const explanation = isRestricted
+      ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]"
+      : (isLike
+          ? `İstifadəçi "${safeTitle}" nəticəsindən RAZI QALDI (Like 👍).`
+          : `İstifadəçi "${safeTitle}" nəticəsindən RAZI QALMADI (Dislike 👎).`);
+
+    const event = {
+      id: `evt_fbk_${randomUUID()}`,
+      eventType: "strategy_feedback",
+      mode: "build",
+      maskedUserId: maskIdentifier(ownerId || sessionId),
+      marketMode: null,
+      category: isRestricted ? "Zəruri Əməliyyat" : "Strategiya Rəyi",
+      model: "user-feedback",
+      latencyMs: null,
+      tokens: null,
+      costUsd: 0,
+      costAzn: 0,
+      status: isLike ? "success" : "warning",
+      onlyNecessaryData: isRestricted,
+      modelImprovement: !isRestricted,
+      summary: isRestricted
+        ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]"
+        : `Nəticə Rəyi: [${feedbackLabel}] "${safeTitle}"`,
+      metadata: isRestricted
+        ? {
+            strategyId,
+            feedback,
+            rating: isLike ? "positive" : "negative",
+            onlyNecessaryData: true,
+            dataRestricted: true,
+            izahat: "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]",
+            explanation: "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]",
+          }
+        : redactPayload({
+            strategyId,
+            feedback,
+            rating: isLike ? "positive" : "negative",
+            strategyTitle: safeTitle,
+            brief: redactSensitiveText(brief, 120),
+            izahat: explanation,
+            explanation,
+          }),
+      timestamp: new Date().toISOString(),
+    };
+
+    return this.persistEvent(event, ownerId).catch((err) => {
+      console.warn("⚠️ Telemetry strategy feedback logging error:", err.message);
+      return null;
+    });
+  }
+
   async syncHistoricalIfEmpty({ strategyRepository, chatRepository, aiLearningRepository } = {}) {
     try {
       const store = await this.repository.readStore();

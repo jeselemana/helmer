@@ -34,7 +34,7 @@ export function createAskExecutionGuard({
       });
     }
 
-    if (process.env.NODE_ENV === 'production' && process.env.REDIS_URL && !redis?.isReady) return res.status(503).json({ code: 'EXECUTION_UNAVAILABLE' });
+    if (process.env.NODE_ENV === 'production' && (process.env.REDIS_URL || process.env.REQUIRE_REDIS === 'true') && !redis?.isReady) return res.status(503).json({ code: 'EXECUTION_UNAVAILABLE' });
     const key = `helmer:ask-lock:${req.ownerId}`;
     const token = randomUUID();
     activeOwners.add(req.ownerId);

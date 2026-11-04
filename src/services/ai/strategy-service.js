@@ -7,10 +7,12 @@ import {
   PlannerTaskPriorityOutputSchema,
   serializeStrategyContext,
   analyzeBriefSignals,
+  evaluateBriefSufficiency,
+  stripInlineGroundingRedirectUrls,
   validateAssessment,
 } from "../../domain/strategy.js";
-import { aiConfig, hasOpenAIConfiguration, hasGeminiConfiguration } from "./config.js";
-import { getOpenAIClient, getGeminiClient } from "./client.js";
+import { aiConfig, hasOpenAIConfiguration } from "./config.js";
+import { getOpenAIClient } from "./client.js";
 import { LLMProviderError, extractJsonFromText } from "./llm-router.js";
 import { runBuildOrchestration } from "./build-orchestrator.js";
 import { buildRoutingInput } from "./build-estimate.js";
@@ -159,11 +161,12 @@ export function alignNextStepsLogic(nextSteps = [], language = "az") {
   });
 }
 
-export async function estimateBuildPreparation({ brief, ownerId, signal }) {
-  const routingInput = buildRoutingInput({ brief });
+export async function estimateBuildPreparation({ brief, buildMode = "auto", fasterThinkingLevel = "medium", ownerId, signal }) {
+  const routingInput = buildRoutingInput({ brief, buildMode, fasterThinkingLevel });
   return runBuildOrchestration({
     schema: StrategyAssessmentSchema, assessment: true, estimateOnly: true,
     name: "build_estimate", instructions: "", input: routingInput, routingInput, ownerId, signal,
+    buildMode, fasterThinkingLevel,
   });
 }
 
@@ -172,6 +175,8 @@ export async function assessBrief({
   answers = [],
   round = 0,
   language = "az",
+  buildMode = "auto",
+  fasterThinkingLevel = "medium",
   ownerId,
   signal,
   personalizationContext = "",
@@ -180,7 +185,18 @@ export async function assessBrief({
   onEstimate,
 }) {
   const isEn = language === "en";
-  const signals = analyzeBriefSignals(brief);
+  const sufficiency = evaluateBriefSufficiency(brief, { round, answers });
+  if (sufficiency.sufficient && round === 0 && (!answers || answers.length === 0)) {
+    return {
+      status: "ready",
+      understanding: isEn
+        ? "The brief provides sufficient business, market, execution scope, and operational parameters to proceed directly to strategy generation."
+        : "Təqdim edilən brif biznes hədəfi, bazar konteksti, icra miqyası və əməliyyat parametrləri baxımından birbaşa strategiya generasiyası üçün tam kifayətdir.",
+      questions: [],
+      assumptions: [],
+    };
+  }
+  const signals = sufficiency.signals || analyzeBriefSignals(brief);
   const forceDecision = round >= aiConfig.maxClarificationRounds;
   const languageDirective = isEn
     ? "IMPORTANT LANGUAGE REQUIREMENT: The user has selected ENGLISH as the UI language. All generated outputs (understanding, every question, reason, options, and assumptions) MUST BE WRITTEN IN ENGLISH, even if the brief is in Azerbaijani or discusses Azerbaijani topics."
@@ -201,8 +217,9 @@ export async function assessBrief({
   const data = await runBuildOrchestration({
     schema: StrategyAssessmentSchema, name: "strategy_assessment",
     instructions, input, personalizationContext, ownerId, signal, onChunk, onUsage,
-    routingInput: buildRoutingInput({ brief, answers }), onEstimate,
+    routingInput: buildRoutingInput({ brief, answers, buildMode, fasterThinkingLevel }), onEstimate,
     assessment: true,
+    buildMode, fasterThinkingLevel,
   });
 
   const assessment = validateAssessment(data);
@@ -237,88 +254,13 @@ export function extractGroundingSources(metadata) {
   return sources;
 }
 
-export async function conductGeminiGroundedResearch({
-  brief,
-  answers = [],
-  language = "az",
-  signal = null,
-}) {
-  if (!hasGeminiConfiguration()) return null;
-
-  const isEn = language === "en";
-  const gemini = getGeminiClient();
-  const searchPrompt = `Conduct rapid, factual market and competitor research for this strategy intake:
-Brief: ${brief}
-Context answers: ${clarificationContext(answers)}
-
-Find and extract:
-1. Real active competitors (local or global relevant to the niche).
-2. Verifiable market dynamics, pricing benchmarks, or industry metrics.
-3. Current consumer trends and relevant operational realities.
-Provide concise, purely factual findings (2-3 short bullet points, no corporate boilerplate).`;
-
-  const systemInstruction = isEn
-    ? "You are Helmer's real-time factual intelligence engine. Extract verified facts, real competitor names, current pricing ranges, and active trends using live Google Search. Never invent statistics."
-    : "Sən Helmer-in faktiki bazar intellekti sistemisən. Google Search vasitəsilə aktiv rəqibləri, real qiymət aralıqlarını və aktual bazar faktlarını topla. Əsla uydurma rəqəm yazma.";
-
-  const executeSearch = async (modelToUse) => {
-    return await gemini.models.generateContent(
-      {
-        model: modelToUse,
-        contents: searchPrompt,
-        config: {
-          systemInstruction,
-          tools: [{ googleSearch: {} }],
-          maxOutputTokens: 1024,
-          abortSignal: signal,
-          thinkingConfig: { thinkingLevel: "HIGH" },
-        },
-      },
-      signal ? { signal } : undefined,
-    );
-  };
-
-  try {
-    const response = await executeSearch(aiConfig.strategyModel);
-
-    const text = response?.text?.trim() || "";
-    let usage = null;
-    if (response?.usageMetadata) {
-      const promptTokens = response.usageMetadata.promptTokenCount || 0;
-      const candidateTokens = response.usageMetadata.candidatesTokenCount || 0;
-      const thoughtsTokens = response.usageMetadata.thoughtsTokenCount || 0;
-      const completionTokens = candidateTokens + thoughtsTokens;
-      usage = {
-        prompt_tokens: promptTokens || null,
-        completion_tokens: completionTokens || null,
-        thoughts_tokens: thoughtsTokens || 0,
-        total_tokens: response.usageMetadata.totalTokenCount || (promptTokens + completionTokens) || null,
-      };
-    }
-    const metadata = response?.candidates?.[0]?.groundingMetadata || response?.groundingMetadata;
-    const sources = extractGroundingSources(metadata);
-    const searchQueries = Array.isArray(metadata?.webSearchQueries)
-      ? metadata.webSearchQueries
-          .map((q) => (typeof q === "string" ? q.trim().slice(0, 160) : ""))
-          .filter(Boolean)
-          .slice(0, 10)
-      : [];
-    const searchEntryPoint = typeof metadata?.searchEntryPoint?.renderedContent === "string"
-      ? { renderedContent: metadata.searchEntryPoint.renderedContent.slice(0, 50000) }
-      : null;
-    return text ? { text, usage, sources, searchQueries, searchEntryPoint } : null;
-  } catch (error) {
-    assertExecutionActive(error, signal);
-    console.warn("⚠️ [Build Grounding Xətası]:", error?.message || error);
-    return null;
-  }
-}
-
 export async function generateStrategy({
   brief,
   answers = [],
   assumptions = [],
   language = "az",
+  buildMode = "auto",
+  fasterThinkingLevel = "medium",
   ownerId,
   signal,
   personalizationContext = "",
@@ -326,19 +268,24 @@ export async function generateStrategy({
   onUsage,
 }) {
   const isEn = language === "en";
+  const normalizedMode = buildMode === "faster" ? "faster" : "auto";
+  const normalizedFasterThinking = fasterThinkingLevel === "high" ? "high" : "medium";
   const languageDirective = isEn
     ? "\n\nLanguage Directive: The user has selected English. Generate the entire strategy in clear, professional English."
     : "\n\nLanguage Directive: Strategiyanı təmiz, peşəkar Azərbaycan dilində hazırla.";
 
   const input = JSON.stringify({ brief, answers, assumptions, languageDirective });
-  const instructions = buildStrategyPrompt({ brief, answers });
-  const strategyData = await runBuildOrchestration({
+  const instructions = buildStrategyPrompt({ brief, answers, buildMode: normalizedMode });
+  const rawStrategyData = await runBuildOrchestration({
     schema: StrategySchema, name: "helmer_strategy", instructions, input,
     personalizationContext, ownerId, signal, onChunk, onUsage,
-    routingInput: buildRoutingInput({ brief, answers, assumptions }),
+    routingInput: buildRoutingInput({ brief, answers, assumptions, buildMode: normalizedMode, fasterThinkingLevel: normalizedFasterThinking }),
     onEstimate: preparationEstimate => onChunk?.({ preparationEstimate }),
+    buildMode: normalizedMode,
+    fasterThinkingLevel: normalizedFasterThinking,
   });
 
+  const strategyData = stripInlineGroundingRedirectUrls(rawStrategyData);
   if (Array.isArray(strategyData?.nextSteps)) {
     strategyData.nextSteps = alignNextStepsLogic(strategyData.nextSteps, language);
   }
@@ -347,17 +294,31 @@ export async function generateStrategy({
 }
 
 export async function refineStrategy(payload, ownerId, signal, personalizationContext = "", onChunk, onUsage) {
+  const effectiveBuildMode = (payload.buildMode || payload.strategy?.orchestration?.buildMode || "auto") === "faster" ? "faster" : "auto";
+  const effectiveFasterThinking = (
+    payload.fasterThinkingLevel ||
+    payload.strategy?.orchestration?.fasterThinkingLevel ||
+    (effectiveBuildMode === "faster" && String(payload.strategy?.orchestration?.thinkingLevel || "").toUpperCase() === "HIGH" ? "high" : "medium")
+  ) === "high" ? "high" : "medium";
   const languageDirective = payload.language === "en"
     ? "Generate the refined strategy in professional English."
     : "Strategiyanı peşəkar Azərbaycan dilində hazırla.";
-  const instructions = buildRefinementPrompt({ brief: payload.brief, answers: payload.answers, strategy: payload.strategy });
-  const strategyData = await runBuildOrchestration({
-    schema: StrategySchema, name: "helmer_refined_strategy", instructions,
+  const instructions = buildRefinementPrompt({
+    brief: payload.brief,
+    answers: payload.answers,
+    strategy: payload.strategy,
+    buildMode: effectiveBuildMode,
+  });
+  const rawStrategyData = await runBuildOrchestration({
+    schema: StrategySchema, name: "helmer_refined_strategy", instructions, refinement: true,
     input: `${buildRefinementInput(payload)}\n${languageDirective}`,
     routingInput: JSON.stringify({ brief: payload.brief, answers: payload.answers, action: payload.action, request: payload.request,
       summary: payload.strategy?.summary, objective: payload.strategy?.context?.objective }),
     personalizationContext, ownerId, signal, onChunk, onUsage,
+    buildMode: effectiveBuildMode,
+    fasterThinkingLevel: effectiveFasterThinking,
   });
+  const strategyData = stripInlineGroundingRedirectUrls(rawStrategyData);
   if (Array.isArray(strategyData?.nextSteps)) {
     strategyData.nextSteps = alignNextStepsLogic(strategyData.nextSteps, payload.language || "az");
   }

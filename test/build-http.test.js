@@ -11,52 +11,42 @@ import { FileStrategyRepository } from '../src/repositories/file-strategy-reposi
 import { AiPolicy } from '../src/services/security/ai-policy.js';
 import { PrivacyPolicy } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
-import { getGeminiClient } from '../src/services/ai/client.js';
-import { getBuildOpenAIClient } from '../src/services/ai/build-openai-client.js';
+import { getBuildVertexClient } from '../src/services/ai/client.js';
 
 async function fixture(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'helmer-build-http-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  process.env.OPENAI_API_KEY ||= 'test-build-openai'; process.env.GEMINI_API_KEY ||= 'test-build-google';
+  process.env.GOOGLE_CLOUD_PROJECT ||= 'test-helmer-project';
   const ownerA = randomUUID(), ownerB = randomUUID();
   const users = new Map([ownerA, ownerB].map(id => [id, { id, status: 'active', emailVerifiedAt: 'now', authVersion: 1, privacyEpoch: 0,
     settings: { modelImprovement: false, personalIntelligence: true, strategyPersonalization: true, industry: 'Software', brandName: 'UnneededSecretBrand' } }]));
-  const f = { ownerA, ownerB, users, calls: [], learning: [], route: { complexity: 'complex', reasoning: 'high', googleSearch: true, solWebSearch: false, profileFields: ['industry'] }, hold: null, background: null, failure: null };
+  const f = { ownerA, ownerB, users, calls: [], learning: [], route: { needs_search: true, argon_thinking_level: 'High', facts: ['Reported evidence'], focus_area: 'Launch' }, hold: null, background: null, failure: null };
   const policy = new AiPolicy({ redis: null, env: { NODE_ENV: 'test' } });
   f.policy = policy;
   configureProviderPolicy(policy); t.after(() => configureProviderPolicy(undefined));
-  const finalResponse = () => ({ status: 'completed', output_text: JSON.stringify(strategyFixture()), usage: { input_tokens: 20, output_tokens: 20 } });
-  const openai = wrapProvider({ responses: { create: async (params, options) => {
-    f.calls.push({ params, options });
-    if (params.model === 'gpt-6-luna') return { status: 'completed', output_text: JSON.stringify(f.route), usage: { input_tokens: 20, output_tokens: 20 } };
-    if (f.failure) throw f.failure;
-    if (f.hold) await f.hold;
-    if (!params.stream) return finalResponse();
-    return (async function* () {
-      const text = JSON.stringify(strategyFixture());
-      yield { type: 'response.output_text.delta', delta: text.slice(0, 50) };
-      yield { type: 'response.output_text.delta', delta: text.slice(50) };
-      yield { type: 'response.completed', response: finalResponse() };
-    })();
-  } } }, 'openai');
   const googleResponse = params => {
-    if (f.googleFailure) throw f.googleFailure;
-    return { text: JSON.stringify(params.config.responseSchema.properties.title ? strategyFixture() : {
-      objective: 'Launch', context: ['Existing user context'], plan: ['Pilot'], constraints: ['Budget'], acceptanceCriteria: ['10 teams'],
-      findings: [{ fact: 'Reported evidence', sourceUrl: 'https://reuters.com/report' }], uncertainties: [] }),
-      candidates: [{ finishReason: 'STOP', groundingMetadata: { groundingChunks: [{ web: { uri: 'https://reuters.com/report', title: 'Report' } }] } }],
+    const scout = params.config.responseSchema.properties.needs_search;
+    if (scout && f.googleFailure) throw f.googleFailure;
+    if (!scout && f.failure) throw f.failure;
+    const assessment = params.config.responseSchema.properties.status;
+    return { text: JSON.stringify(scout ? f.route : assessment ? { status: 'ready', understanding: 'Clear brief', questions: [], assumptions: [] } : f.invalidFinal || strategyFixture()),
+      candidates: [{ finishReason: 'STOP', ...(scout && f.route.needs_search ? { groundingMetadata: { groundingChunks: [{ web: { uri: 'https://reuters.com/report', title: 'Report' } }], webSearchQueries: ['Market launch evidence'] } } : {}) }],
       usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 20 } };
   };
   const gemini = wrapProvider({ models: {
-    generateContent: async params => { f.calls.push({ params }); return googleResponse(params); },
+    generateContent: async params => { f.calls.push({ params }); if (params.model === 'gemini-4-argon' && f.hold) await f.hold; return googleResponse(params); },
     generateContentStream: async params => {
       f.calls.push({ params });
-      return (async function* () { yield googleResponse(params); })();
+      if (f.hold) await f.hold;
+      return (async function* () {
+        const response = googleResponse(params), text = response.text;
+        yield { text: text.slice(0, 50) };
+        yield { ...response, text: text.slice(50) };
+      })();
     },
-  } }, 'gemini');
-  t.mock.method(getBuildOpenAIClient().responses, 'create', openai.responses.create);
-  t.mock.method(getGeminiClient().models, 'generateContent', gemini.models.generateContent);
-  t.mock.method(getGeminiClient().models, 'generateContentStream', gemini.models.generateContentStream);
+  } }, 'gemini', { buildVertex: true });
+  t.mock.method(getBuildVertexClient().models, 'generateContent', gemini.models.generateContent);
+  t.mock.method(getBuildVertexClient().models, 'generateContentStream', gemini.models.generateContentStream);
   const repository = new FileStrategyRepository(path.join(directory, 'strategies.json'), null, { cloud: false });
   f.repository = repository;
   const app = express(); app.use(express.json());
@@ -70,13 +60,14 @@ async function fixture(t) {
   await new Promise(resolve => server.once('listening', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   const base = `http://127.0.0.1:${server.address().port}/api/strategy`;
+  f.baseUrl = base;
   f.post = (url, body, options = {}) => fetch(`${base}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': body.idempotencyKey || randomUUID(), ...options.headers }, body: JSON.stringify(body), signal: options.signal });
   f.get = (url, owner = ownerA) => fetch(`${base}${url}`, { headers: { 'X-Test-Owner': owner } });
   f.payload = () => ({ brief: 'Prepare a secure technical launch strategy', answers: [], assumptions: ['Limited budget'], idempotencyKey: randomUUID(), language: 'en' });
   return f;
 }
 
-test('Build HTTP: complex SSE ends at Sol, saves one tenant record, preserves sources and redacts private logs', async t => {
+test('Build HTTP: SSE ends at Argon, saves one tenant record, preserves sources and redacts private logs', async t => {
   const f = await fixture(t), payload = f.payload();
   const response = await f.post('/generate-stream', payload);
   assert.equal(response.status, 200);
@@ -85,26 +76,29 @@ test('Build HTTP: complex SSE ends at Sol, saves one tenant record, preserves so
   const done = events.find(event => event.done);
   assert.equal(done.strategy.title, 'Launch brief'); assert.ok(done.savedId);
   assert.equal(done.strategy.orchestration.sources[0].url, 'https://reuters.com/report');
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gpt-6-luna', 'gemini-3.8-flash', 'gpt-6.1-sol']);
-  assert.equal(f.calls[2].params.reasoning.effort, 'high');
-  assert.equal(JSON.parse(f.calls[1].params.contents).untrustedBusinessProfile, 'Industry: Software');
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash', 'gemini-4-argon']);
+  assert.equal(f.calls[1].params.config.thinkingConfig.thinkingLevel, 'HIGH');
+  assert.match(JSON.parse(f.calls[1].params.contents).untrustedBusinessProfile, /Industry: Software/);
+  assert.match(JSON.parse(f.calls[1].params.contents).untrustedBusinessProfile, /UnneededSecretBrand/);
   assert.equal(events.filter(event => event.chunk).map(event => event.chunk).join(''), JSON.stringify(strategyFixture()));
   assert.equal((await f.repository.list(f.ownerA)).length, 1);
   assert.equal((await f.get(`/${done.savedId}`, f.ownerB)).status, 404);
-  const replay = await f.post('/generate', payload); assert.equal(replay.status, 200); assert.equal(f.calls.length, 3);
+  const replay = await f.post('/generate', payload); assert.equal(replay.status, 200); assert.equal(f.calls.length, 2);
   const conflict = await f.post('/generate', { ...payload, brief: 'A completely different requirement' }); assert.equal(conflict.status, 409);
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(f.learning[0].onlyNecessaryData, true);
   assert.equal(f.learning[0].modelResponse, '[Zəruri əməliyyat qeydi - Məzmun ötürülmür]');
+  assert.equal(f.learning[0].usage.prompt_tokens, 40);
+  assert.equal(f.learning[0].usage.completion_tokens, 40);
   assert.doesNotMatch(JSON.stringify(f.learning), /Prepare a secure|Launch brief/);
 });
 
-test('Build HTTP: disabled profile consent sends no profile; Google Search requires router authorization', async t => {
-  const f = await fixture(t); f.users.get(f.ownerA).settings.strategyPersonalization = false; f.route.googleSearch = false;
+test('Build HTTP: disabled profile consent sends no profile; a no-search decision does not ground synthesis', async t => {
+  const f = await fixture(t); f.users.get(f.ownerA).settings.strategyPersonalization = false; f.route.needs_search = false;
   const response = await f.post('/generate', f.payload()); assert.equal(response.status, 200);
   assert.equal(JSON.parse(f.calls[1].params.contents).untrustedBusinessProfile, undefined);
+  assert.deepEqual(f.calls[0].params.config.tools, [{ googleSearch: {} }]);
   assert.equal(f.calls[1].params.config.tools, undefined);
-  assert.equal(f.calls[2].params.tools, undefined);
   const result = await response.json(); assert.equal(result.strategy.orchestration.searchGrounded, false);
 });
 
@@ -123,8 +117,8 @@ test('Build HTTP: concurrent generation returns EXECUTION_BUSY; provider failure
   const f = await fixture(t); let release;
   f.hold = new Promise(resolve => { release = resolve; });
   const pending = f.post('/generate', f.payload());
-  for (let i = 0; i < 100 && f.calls.length < 3; i++) await new Promise(resolve => setTimeout(resolve, 5));
-  assert.equal(f.calls.length, 3);
+  for (let i = 0; i < 100 && f.calls.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(f.calls.length, 2);
   const second = await f.post('/generate', f.payload()); assert.equal(second.status, 429);
   release(); assert.equal((await pending).status, 200); f.hold = null;
   const before = (await f.repository.list(f.ownerA)).length;
@@ -139,8 +133,8 @@ test('Build HTTP: consent revocation during generation prevents saving or publis
   const f = await fixture(t); let release;
   f.hold = new Promise(resolve => { release = resolve; });
   const pending = f.post('/generate', f.payload());
-  for (let i = 0; i < 100 && f.calls.length < 3; i++) await new Promise(resolve => setTimeout(resolve, 5));
-  assert.equal(f.calls.length, 3);
+  for (let i = 0; i < 100 && f.calls.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(f.calls.length, 2);
   const user = f.users.get(f.ownerA); user.settings.strategyPersonalization = false; user.privacyEpoch++;
   release();
   const response = await pending;
@@ -150,36 +144,32 @@ test('Build HTTP: consent revocation during generation prevents saving or publis
   assert.equal((await f.repository.list(f.ownerA)).length, 0);
 });
 
-
-test('Build HTTP: Gemini 429 recovers through Sol and persists exactly one successful strategy', async t => {
-  const f = await fixture(t), payload = f.payload();
+test('Build HTTP: scout failure returns sanitized SSE error without fallback or persistence', async t => {
+  const f = await fixture(t);
   f.googleFailure = Object.assign(new Error('private account capacity'), { status: 429 });
-  const response = await f.post('/generate-stream', payload);
-  assert.equal(response.status, 200);
+  const response = await f.post('/generate-stream', f.payload());
   const body = await response.text();
   const events = body.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
-  const done = events.find(event => event.done);
-  assert.equal(done.strategy.title, 'Launch brief');
-  assert.equal(events.some(event => event.error), false);
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gpt-6-luna', 'gemini-3.8-flash', 'gpt-6.1-sol']);
-  assert.equal((await f.repository.list(f.ownerA)).length, 1);
-  assert.equal((await f.post('/generate', payload)).status, 200);
-  assert.equal(f.calls.length, 3);
+  assert.equal(events.find(event => event.error).code, 'AI_RATE_LIMITED');
+  assert.equal(events.some(event => event.done), false);
+  assert.ok(f.calls.length >= 1 && f.calls.every(call => call.params.model === 'gemini-3.8-flash'));
+  assert.equal((await f.repository.list(f.ownerA)).length, 0);
 });
 
-test('Build HTTP: Sol 503 recovers through Gemini without publishing an error or duplicate record', async t => {
+test('Build HTTP: Argon failure cannot trigger fallback or save an invalid strategy', async t => {
   const f = await fixture(t);
-  f.failure = Object.assign(new Error('provider unavailable'), { status: 503 });
+  f.failure = Object.assign(new Error('private provider failure'), { status: 503 });
   const response = await f.post('/generate-stream', f.payload());
   const text = await response.text();
   const events = text.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
-  assert.equal(events.some(event => event.error), false);
-  assert.equal(events.find(event => event.done).strategy.title, 'Launch brief');
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gpt-6-luna', 'gemini-3.8-flash', 'gpt-6.1-sol', 'gemini-3.8-flash']);
-  assert.equal((await f.repository.list(f.ownerA)).length, 1);
+  assert.equal(events.find(event => event.error).code, 'AI_PROVIDER_UNAVAILABLE');
+  assert.equal(events.some(event => event.done), false);
+  assert.equal(f.calls[0].params.model, 'gemini-3.8-flash');
+  assert.ok(f.calls.slice(1).length >= 1 && f.calls.slice(1).every(call => call.params.model === 'gemini-4-argon'));
+  assert.equal((await f.repository.list(f.ownerA)).length, 0);
 });
 
-test('Build HTTP: exhaustion of both providers returns a safe, correlated SSE error without saving', async t => {
+test('Build HTTP: provider failure returns a safe, correlated SSE error without saving', async t => {
   const f = await fixture(t);
   f.googleFailure = Object.assign(new Error('secret Google error'), { status: 429 });
   f.failure = Object.assign(new Error('secret OpenAI error'), { status: 429 });
@@ -194,13 +184,13 @@ test('Build HTTP: exhaustion of both providers returns a safe, correlated SSE er
   assert.equal((await f.repository.list(f.ownerA)).length, 0);
 });
 
-test('Build estimate endpoint is strict, private, Luna-only and shares a tenant-scoped route with assessment input', async t => {
+test('Build estimate endpoint is strict, private, Flash-only and caches only tenant-scoped no-search estimates', async t => {
   const f = await fixture(t), brief = 'Prepare a secure technical launch strategy';
   const response = await f.post('/estimate', { brief });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.deepEqual(await response.json(), { preparationEstimate: { minMinutes: 5, maxMinutes: 13, bufferMinutes: 3 } });
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gpt-6-luna']);
+  assert.deepEqual(await response.json(), { preparationEstimate: { minMinutes: 4, maxMinutes: 11, bufferMinutes: 3 } });
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash']);
   assert.doesNotMatch(JSON.stringify(f.calls), /Software|UnneededSecretBrand/);
   const again = await f.post('/estimate', { brief });
   assert.equal(again.status, 200); assert.equal(f.calls.length, 1);
@@ -215,7 +205,6 @@ test('Build estimate endpoint is strict, private, Luna-only and shares a tenant-
   assert.equal(f.learning.length, 0);
 });
 
-
 test('Build estimate rejects idempotency mismatches and does not spend guest message or brief allowance', async t => {
   const f = await fixture(t), guest = `guest_${randomUUID()}`, key = randomUUID();
   const headers = { 'X-Test-Owner': guest, 'Idempotency-Key': key };
@@ -229,4 +218,139 @@ test('Build estimate rejects idempotency mismatches and does not spend guest mes
   assert.equal(again.status, 200);
   assert.equal(f.calls.length, 1);
   assert.equal(f.policy.inMemoryGuestUsage?.size || 0, 0);
+});
+
+test('Build HTTP: assessment is Flash-only and a simple refinement still uses Flash → Argon', async t => {
+  const f = await fixture(t);
+  const assessment = await f.post('/assess', { brief: 'Prepare a safe business launch strategy', language: 'en' });
+  assert.equal(assessment.status, 200);
+  assert.equal((await assessment.json()).assessment.status, 'ready');
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash']);
+  assert.equal(f.calls[0].params.config.tools, undefined);
+  f.calls.length = 0;
+  f.route = { needs_search: false, argon_thinking_level: 'Low', facts: [], focus_area: 'Shorten' };
+  const refinement = await f.post('/refine', { brief: 'Prepare a safe business launch strategy', strategy: strategyFixture(), action: 'shorten', language: 'en', idempotencyKey: randomUUID() });
+  assert.equal(refinement.status, 200);
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash', 'gemini-4-argon']);
+  assert.equal(f.calls[1].params.config.thinkingConfig.thinkingLevel, 'LOW');
+});
+
+test('Build HTTP: invalid streamed final JSON never receives done or creates a saved strategy', async t => {
+  const f = await fixture(t);
+  f.invalidFinal = { ...strategyFixture(), protectedField: 'untrusted' };
+  const response = await f.post('/generate-stream', f.payload());
+  const body = await response.text();
+  const events = body.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+  assert.ok(events.some(event => event.chunk));
+  assert.equal(events.find(event => event.error).code, 'AI_INVALID_OUTPUT');
+  assert.equal(events.some(event => event.done), false);
+  assert.equal((await f.repository.list(f.ownerA)).length, 0);
+  assert.equal(f.calls.length, 2);
+});
+
+for (const [upstream, expected] of [
+  [{ code: 'ENOENT' }, 'AI_NOT_CONFIGURED'],
+  [{ status: 400 }, 'AI_PROVIDER_CONFIG_ERROR'],
+  [{ status: 404 }, 'AI_MODEL_UNAVAILABLE'],
+]) test(`Build HTTP: ${expected} is sanitized and never labelled provider overload`, async t => {
+  const f = await fixture(t);
+  f.failure = Object.assign(new Error('private ADC file and credential detail'), upstream);
+  const response = await f.post('/assess', { brief: 'Prepare a safe launch strategy', language: 'en' });
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.equal(body.code, expected);
+  assert.doesNotMatch(JSON.stringify(body), /yüksək yüklənmə|private|ADC file|credential detail/);
+  assert.equal((await f.repository.list(f.ownerA)).length, 0);
+});
+
+test('Build HTTP: guest generation never auto-saves to repository; user autoSaveStrategies=false is respected when autoSave is omitted', async t => {
+  const f = await fixture(t);
+  const guestOwner = `guest_${randomUUID()}`;
+  const guestRes = await f.post('/generate', { ...f.payload(), autoSave: true }, { headers: { 'X-Test-Owner': guestOwner } });
+  assert.equal(guestRes.status, 200);
+  const guestBody = await guestRes.json();
+  assert.equal(guestBody.isGuest, true);
+  assert.equal(guestBody.savedId, null);
+  assert.equal(guestBody.savedStrategy, null);
+  assert.equal((await f.repository.list(guestOwner)).length, 0);
+
+  // User with autoSaveStrategies: false and omitted autoSave in request body
+  f.users.get(f.ownerA).settings.autoSaveStrategies = false;
+  const userRes = await f.post('/generate', f.payload());
+  assert.equal(userRes.status, 200);
+  const userBody = await userRes.json();
+  assert.equal(userBody.savedId, null);
+  assert.equal((await f.repository.list(f.ownerA)).length, 0);
+});
+
+test('Build HTTP: malformed JSON body is sanitized and never leaks V8 parser internals', async t => {
+  const f = await fixture(t);
+  const rawRes = await fetch(`${f.baseUrl}/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+    body: '{"brief": "unterminated secret_token_123',
+  });
+  assert.equal(rawRes.status, 400);
+  const errBody = await rawRes.json();
+  assert.equal(errBody.code, 'INVALID_JSON');
+  assert.doesNotMatch(JSON.stringify(errBody), /secret_token_123|Unexpected|position/);
+});
+
+test('Build HTTP: Faster mode (Medium & High) executes direct Flash, preserves mode across refine, and enforces idempotency conflicts on mode mismatch', async t => {
+  const f = await fixture(t);
+  const key = randomUUID();
+  const basePayload = {
+    ...f.payload(),
+    idempotencyKey: key,
+    buildMode: 'faster',
+    fasterThinkingLevel: 'high',
+  };
+  const genRes = await f.post('/generate-stream', basePayload);
+  assert.equal(genRes.status, 200);
+  const events = (await genRes.text()).split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+  const done = events.find(e => e.done);
+  assert.ok(done);
+  assert.equal(done.strategy.orchestration.buildMode, 'faster');
+  assert.equal(done.strategy.orchestration.generatorModel, 'gemini-3.8-flash');
+  assert.equal(done.strategy.orchestration.thinkingLevel, 'HIGH');
+  assert.equal(done.strategy.orchestration.fasterThinkingLevel, 'high');
+  assert.deepEqual(f.calls.map(c => c.params.model), ['gemini-3.8-flash']);
+  assert.equal(f.calls[0].params.config.thinkingConfig.thinkingLevel, 'HIGH');
+
+  // Replaying with different fasterThinkingLevel or buildMode must return 409 IDEMPOTENCY_CONFLICT
+  const conflictMode = await f.post('/generate', { ...basePayload, buildMode: 'auto' });
+  assert.equal(conflictMode.status, 409);
+  const conflictThinking = await f.post('/generate', { ...basePayload, fasterThinkingLevel: 'medium' });
+  assert.equal(conflictThinking.status, 409);
+
+  // Refine on a Faster High strategy preserves Faster High on Flash without calling Argon
+  f.calls.length = 0;
+  const refineRes = await f.post(`/${done.savedId}/refine`, {
+    brief: basePayload.brief,
+    answers: [],
+    strategy: done.strategy,
+    action: 'shorten',
+    request: '',
+    language: 'en',
+    idempotencyKey: randomUUID(),
+  });
+  assert.equal(refineRes.status, 200);
+  const refinedBody = await refineRes.json();
+  assert.deepEqual(f.calls.map(c => c.params.model), ['gemini-3.8-flash']);
+  assert.equal(f.calls[0].params.config.thinkingConfig.thinkingLevel, 'HIGH');
+  assert.equal(refinedBody.strategy.strategy.orchestration.buildMode, 'faster');
+  assert.equal(refinedBody.strategy.strategy.orchestration.thinkingLevel, 'HIGH');
+});
+
+test('Build HTTP: oversized array/object collections are rejected before Zod parsing (GHSA-mrhx-c7xc-m3w5 mitigation)', async t => {
+  const f = await fixture(t);
+  const oversizedAnswers = Array.from({ length: 1000 }, (_, i) => ({ questionId: `q_${i}`, answer: 'x' }));
+  const res = await f.post('/generate', {
+    ...f.payload(),
+    answers: oversizedAnswers,
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.code, 'VALIDATION_ERROR');
+  assert.equal(f.calls.length, 0);
 });

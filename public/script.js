@@ -1794,19 +1794,31 @@ function createAskModelSelector(isEn) {
   return menu;
 }
 
-// Build Auto uses the existing strategy pipeline; Faster is not yet selectable.
-function createBuildModelSelector(isEn) {
+// Build model selector: Auto (Flash -> Argon) and Faster (Flash Direct with Medium/High Thinking).
+function createBuildModelSelector(isEn, { onSelect = null } = {}) {
+  const isFaster = state.buildModel === "faster";
+  const currentFasterThinking = state.buildFasterThinkingLevel === "high" ? "high" : "medium";
+  const getTriggerLabel = () => {
+    if (state.buildModel === "faster") {
+      return state.buildFasterThinkingLevel === "high" ? "Faster · High" : "Faster · Med";
+    }
+    return "Auto";
+  };
+
   const menu = element("details", "ask-model-selector-menu build-model-selector-menu");
   const trigger = element("summary", "ask-model-selector-trigger");
   trigger.setAttribute("aria-label", isEn ? "Build model selection" : "Build model seçimi");
   trigger.setAttribute("role", "button");
+  const nameSpan = element("span", "ask-model-name", getTriggerLabel());
   const chevron = element("span", "ask-model-chevron-icon");
   chevron.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
-  trigger.append(element("span", "ask-model-name", "Auto"), chevron);
+  trigger.append(nameSpan, chevron);
   const popover = element("div", "ask-model-selector-popover");
-  const makeOption = (name, description, iconPath) => {
-    const option = element("button", "ask-model-option");
+
+  const makeOption = (name, description, iconPath, active, chipText = "", trailingEl = null) => {
+    const option = element("button", `ask-model-option${active ? " is-active" : ""}`);
     option.type = "button";
+    option.setAttribute("aria-pressed", String(Boolean(active)));
     const leading = element("div", "ask-model-option-leading");
     const badge = element("div", "ask-model-option-badge");
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -1816,21 +1828,143 @@ function createBuildModelSelector(isEn) {
     svg.append(path);
     badge.append(svg);
     const info = element("div", "ask-model-option-info");
-    info.append(element("strong", "", name), element("small", "", description));
+    const titleRow = element("div", "ask-model-title-row");
+    titleRow.append(element("strong", "", name));
+    if (chipText) {
+      titleRow.append(element("span", "ask-model-chip", chipText));
+    }
+    info.append(titleRow, element("small", "", description));
     leading.append(badge, info);
     option.append(leading);
+
+    const trailing = element("div", "ask-model-option-trailing");
+    if (trailingEl) {
+      trailing.append(trailingEl);
+    }
+    if (active) {
+      const check = element("span", "ask-model-check");
+      check.textContent = "✓";
+      trailing.append(check);
+    }
+    option.append(trailing);
     return option;
   };
-  const auto = makeOption("Auto", isEn ? "Smarter routing" : "Daha ağıllı yönləndirmə", "m12 3-3 6-6 3 6 3 3 6 3-6 6-3-6-3Z");
-  auto.classList.add("is-active");
-  auto.setAttribute("aria-pressed", "true");
-  const check = element("span", "ask-model-check");
-  check.textContent = "✓";
-  auto.append(check);
-  auto.addEventListener("click", () => { menu.open = false; trigger.focus(); });
-  const faster = makeOption("Faster", isEn ? "Workhorse · Coming soon" : "İşçi model · Tezliklə", "m13 2-9 12h7l-1 8 10-12h-7Z");
-  faster.disabled = true;
-  popover.append(auto, element("div", "ask-model-popover-divider"), faster);
+
+  const syncSelectionUi = () => {
+    const isFaster = state.buildModel === "faster";
+    const thinkingLvl = state.buildFasterThinkingLevel === "high" ? "high" : "medium";
+    const isFasterMed = isFaster && thinkingLvl === "medium";
+    const isFasterHigh = isFaster && thinkingLvl === "high";
+    const isAuto = !isFaster;
+
+    nameSpan.textContent = getTriggerLabel();
+
+    const updateRow = (row, active) => {
+      row.classList.toggle("is-active", active);
+      row.setAttribute("aria-pressed", String(active));
+      const check = row.querySelector(".ask-model-check, .mobile-model-card-check");
+      if (active && !check) {
+        const c = element("span", "ask-model-check");
+        c.textContent = "✓";
+        const trailing = row.querySelector(".ask-model-option-trailing") || row;
+        trailing.append(c);
+      } else if (!active && check) {
+        check.remove();
+      }
+    };
+
+    updateRow(auto, isAuto);
+    updateRow(fasterMed, isFasterMed);
+    updateRow(fasterHigh, isFasterHigh);
+
+    thinkingSection.hidden = !isFaster;
+    for (const [lvl, btn] of pillButtons.entries()) {
+      const pillActive = isFaster && lvl === thinkingLvl;
+      btn.classList.toggle("is-active", pillActive);
+      btn.setAttribute("aria-checked", String(pillActive));
+    }
+  };
+
+  const triggerEstimateRefresh = () => {
+    state.buildEstimateBrief = "";
+    state.buildPreparationEstimate = null;
+    if (typeof scheduleBuildEstimate === "function") scheduleBuildEstimate();
+  };
+
+  const auto = makeOption("Auto", isEn ? "Smarter routing" : "Daha ağıllı yönləndirmə", "m12 3-3 6-6 3 6 3 3 6 3-6 6-3-6-3Z", !isFaster);
+  auto.addEventListener("click", () => {
+    state.buildModel = "auto";
+    try { localStorage.setItem("helmer_build_model", "auto"); } catch {}
+    syncSelectionUi();
+    triggerEstimateRefresh();
+    menu.open = false;
+    if (typeof onSelect === "function") onSelect("auto");
+  });
+
+  const selectFasterLevel = (lvl) => {
+    state.buildModel = "faster";
+    state.buildFasterThinkingLevel = lvl;
+    try {
+      localStorage.setItem("helmer_build_model", "faster");
+      localStorage.setItem("helmer_build_faster_thinking", lvl);
+    } catch {}
+    syncSelectionUi();
+    triggerEstimateRefresh();
+    menu.open = false;
+    if (typeof onSelect === "function") onSelect("faster", lvl);
+  };
+
+  const isFasterMedActive = isFaster && currentFasterThinking === "medium";
+  const isFasterHighActive = isFaster && currentFasterThinking === "high";
+
+  const fasterMed = makeOption(
+    isEn ? "Faster · Medium" : "Faster · Medium",
+    isEn ? "Your essential assistant for daily workflow" : "Gündəlik iş axını zamanı əsas köməkçiniz",
+    "m13 2-9 12h7l-1 8 10-12h-7Z",
+    isFasterMedActive,
+    isEn ? "~3x faster" : "~3x daha sürətli"
+  );
+  fasterMed.disabled = false;
+  fasterMed.addEventListener("click", () => selectFasterLevel("medium"));
+
+  const fasterHigh = makeOption(
+    isEn ? "Faster · High" : "Faster · High",
+    isEn ? "Faster generation with deeper analytical thinking" : "Daha dərin analitik düşüncə ilə sürətli nəticə",
+    "m13 2-9 12h7l-1 8 10-12h-7Z",
+    isFasterHighActive,
+    isEn ? "Deep analysis" : "Dərin analiz"
+  );
+  fasterHigh.disabled = false;
+  fasterHigh.addEventListener("click", () => selectFasterLevel("high"));
+
+  // Hidden backward-compatibility node for legacy selectors/tests
+  const thinkingSection = element("div", "ask-thinking-card build-faster-thinking-card");
+  thinkingSection.hidden = !isFaster;
+  thinkingSection.style.display = "none";
+
+  const pillButtons = new Map();
+  ["medium", "high"].forEach((lvl) => {
+    const btn = element("button", `ask-thinking-pill-btn${currentFasterThinking === lvl ? " is-active" : ""}`, lvl === "high" ? "High" : "Medium");
+    btn.type = "button";
+    btn.setAttribute("role", "radio");
+    btn.setAttribute("aria-checked", String(currentFasterThinking === lvl));
+    btn.dataset.thinkingLevel = lvl;
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      selectFasterLevel(lvl);
+    });
+    pillButtons.set(lvl, btn);
+    thinkingSection.appendChild(btn);
+  });
+
+  popover.append(
+    auto,
+    element("div", "ask-model-popover-divider"),
+    fasterMed,
+    fasterHigh,
+    thinkingSection
+  );
   menu.append(trigger, popover);
   trigger.addEventListener("click", (event) => {
     if (window.innerWidth <= 767) {
@@ -1899,15 +2033,23 @@ function openMobileModelSheet(mode = "ask") {
   const options = element("div", "mobile-model-options");
 
   if (mode === "build") {
-    const selector = createBuildModelSelector(isEn);
+    const selector = createBuildModelSelector(isEn, {
+      onSelect: () => {
+        closeMobileModelSheet();
+        render();
+      },
+    });
     for (const option of selector.querySelectorAll(".ask-model-option")) {
       option.classList.replace("ask-model-option", "mobile-model-option-card");
       option.querySelector(".ask-model-option-leading")?.classList.replace("ask-model-option-leading", "mobile-model-card-leading");
       option.querySelector(".ask-model-option-badge")?.classList.replace("ask-model-option-badge", "mobile-model-card-icon");
       option.querySelector(".ask-model-option-info")?.classList.replace("ask-model-option-info", "mobile-model-card-copy");
       option.querySelector(".ask-model-check")?.classList.replace("ask-model-check", "mobile-model-card-check");
-      if (!option.disabled) option.addEventListener("click", closeMobileModelSheet);
       options.append(option);
+    }
+    const thinkingCard = selector.querySelector(".build-faster-thinking-card");
+    if (thinkingCard) {
+      options.append(thinkingCard);
     }
     body.append(options);
     sheet.append(dragArea, header, body);
@@ -2633,6 +2775,20 @@ const state = {
   askThinkingEnabled: (() => {
     try { return localStorage.getItem("helmer_ask_thinking_enabled") === "true"; }
     catch { return false; }
+  })(),
+  buildModel: (() => {
+    try {
+      const saved = localStorage.getItem("helmer_build_model");
+      if (saved === "auto" || saved === "faster") return saved;
+    } catch { }
+    return "auto";
+  })(),
+  buildFasterThinkingLevel: (() => {
+    try {
+      const saved = localStorage.getItem("helmer_build_faster_thinking");
+      if (saved === "medium" || saved === "high") return saved;
+    } catch { }
+    return "medium";
   })(),
   strategyAskOpen: false,
   refinementOpen: false,
@@ -3443,10 +3599,10 @@ async function setDefaultWorkspaceMode(mode) {
 }
 
 function isAutoSaveStrategiesEnabled() {
-  if (!state.currentUser || state.currentUser?.settings?.personalIntelligence !== true) {
+  if (!state.currentUser) {
     return false;
   }
-  if (typeof state.currentUser.settings.autoSaveStrategies === "boolean") {
+  if (typeof state.currentUser.settings?.autoSaveStrategies === "boolean") {
     return state.currentUser.settings.autoSaveStrategies;
   }
   const cookieVal = getCookie("helmer_auto_save_strategies");
@@ -4522,7 +4678,7 @@ let buildEstimateLastStarted = 0;
 function validBuildEstimate(value) {
   return value && Number.isInteger(value.minMinutes) && Number.isInteger(value.maxMinutes)
     && value.minMinutes >= 1 && value.maxMinutes > value.minMinutes && value.maxMinutes <= 60
-    && [2, 3].includes(value.bufferMinutes);
+    && [1, 2, 3].includes(value.bufferMinutes);
 }
 
 function updateBuildEstimate(value, brief = state.brief.trim()) {
@@ -4644,7 +4800,12 @@ function scheduleBuildEstimate() {
     buildEstimateRequest = request;
     request.promise = api("/api/strategy/estimate", {
       method: "POST", signal: controller.signal,
-      headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ brief }),
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(
+        state.buildModel === "faster"
+          ? { brief, buildMode: "faster", fasterThinkingLevel: state.buildFasterThinkingLevel === "high" ? "high" : "medium" }
+          : { brief }
+      ),
     }).then(data => {
       if (sequence === buildEstimateSequence && state.brief.trim() === brief) updateBuildEstimate(data.preparationEstimate, brief);
     }).catch(error => {
@@ -9185,6 +9346,26 @@ function showLoadingAskModal(initialQuery) {
   }
 }
 
+function isBuildBriefSufficientClient(brief, round = 0, answers = []) {
+  const text = String(brief || "").trim();
+  if (!text) return false;
+  if (round >= 2 || (Array.isArray(answers) && answers.length > 0 && round >= 1)) return true;
+  const hasBusiness = /(?:^|[^\p{L}\p{N}])(restoran\p{L}*|restaurant\p{L}*|cafe\p{L}*|kafe\p{L}*|brand\p{L}*|brend\p{L}*|saas|fintech|app\p{L}*|tətbiq\p{L}*|məhsul\p{L}*|product\p{L}*|xidmət\p{L}*|service\p{L}*|e-?commerce|mağaza\p{L}*|shop\p{L}*|şirkət\p{L}*|company|platforma\p{L}*|platform\p{L}*)(?:$|[^\p{L}\p{N}])/iu.test(text);
+  const hasObjective = /(?:^|[^\p{L}\p{N}])(artır\p{L}*|artım\p{L}*|increase\p{L}*|launch\p{L}*|satış\p{L}*|sales|growth|böyü\p{L}*|repeat|təkrar|lead\p{L}*|conversion\p{L}*|konversiya\p{L}*|awareness|tanınma\p{L}*|qazan\p{L}*|icra\s+strategiya\p{L}*)(?:$|[^\p{L}\p{N}])/iu.test(text);
+  if (/(əlavə\s+sual\s+verm[əe]\S*|sual\s+verm[əe]\S*|suallarsız|birbaşa\s+strategiyanı\s+hazırla|birbaşa\s+generasiya|\bdo\s+not\s+ask\s+(?:any\s+)?(?:clarifying\s+)?questions\b|\bno\s+clarifying\s+questions\b|\bskip\s+questions\b|\bproceed\s+directly\b)/iu.test(text) && hasBusiness && hasObjective) {
+    return true;
+  }
+  const hasAudience = /(?:^|[^\p{L}\p{N}])(auditoriya\p{L}*|target|müştəri\p{L}*|customer\p{L}*|müəssisə\p{L}*|korporativ\p{L}*|enterprise\p{L}*|women|men|qadın\p{L}*|kişi\p{L}*|yaş\p{L}*|aged|b2b|b2c|student\p{L}*|tələbə\p{L}*|seqment\p{L}*)(?:$|[^\p{L}\p{N}])/iu.test(text);
+  const hasMarket = /(?:^|[^\p{L}\p{N}])(bakı\p{L}*|baku\p{L}*|azərbaycan\p{L}*|azerbaijan\p{L}*|market\p{L}*|bazar\p{L}*|region\p{L}*|badamdar\p{L}*|sumqayıt\p{L}*|gəncə\p{L}*)(?:$|[^\p{L}\p{N}])/iu.test(text);
+  const hasTimeline = /(?:^|[^\p{L}\p{N}])(gün\p{L}*|days?|weeks?|həftə\p{L}*|months?|ay\p{L}*|quarter\p{L}*|rüb\p{L}*|20\d{2})(?:$|[^\p{L}\p{N}])/iu.test(text);
+  const hasBudget = /(?:^|[^\p{L}\p{N}])(azn|manat\p{L}*|budget\p{L}*|büdcə\p{L}*|usd|eur)(?:$|[^\p{L}\p{N}])|[₼$€]/iu.test(text);
+  const score = [hasBusiness, hasObjective, hasAudience, hasMarket, hasTimeline, hasBudget].filter(Boolean).length;
+  const hasScopeAndConstraints = /(?:^|[^\p{L}\p{N}])(kpi\p{L}*|cac|ltv|mrr|arr|arpu|arpa|marja\p{L}*|margin\p{L}*|roi|kanal\p{L}*|channel\p{L}*|mərhələ\p{L}*|phase\p{L}*|struktur\p{L}*|arxitektura\p{L}*|architecture|komanda\p{L}*|team|qiymət\p{L}*|pricing|paket\p{L}*|tier\p{L}*|konversiya\p{L}*|conversion|məhdudiyyət\p{L}*|constraint\p{L}*|risk\p{L}*|hədəf\p{L}*|target\p{L}*|unit\s+ekonomika\p{L}*|unit\s+economics)(?:$|[^\p{L}\p{N}])/iu.test(text);
+  const hasUnresolvedPlaceholders = /\b(tbd|todo|naməlum|hələ\s+bilinmir|qərarlaşdırılmayıb)\b|\?\?\?/i.test(text);
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  return score >= 5 && hasBusiness && hasObjective && hasAudience && hasMarket && (hasTimeline || hasBudget) && hasScopeAndConstraints && !hasUnresolvedPlaceholders && wordCount >= 35;
+}
+
 async function startAssessment() {
   if (!state.currentUser && state.remainingGuestBriefs === 0) {
     const isEn = getLanguage() === "en";
@@ -9195,21 +9376,17 @@ async function startAssessment() {
   const expectedUserId = state.currentUser?.id || null;
   if (state.round === 0 && state.answers.length === 0) trackEvent("strategy_started");
   clearError();
+  cancelBuildEstimate();
+  if (state.round === 0 && state.answers.length === 0 && isBuildBriefSufficientClient(state.brief, state.round, state.answers)) {
+    await startGeneration();
+    return;
+  }
   currentAbortController?.abort();
   const controller = new AbortController();
   currentAbortController = controller;
   setStatus("analyzing");
   render();
   try {
-    clearTimeout(buildEstimateTimer);
-    const pendingEstimate = buildEstimateRequest;
-    if (pendingEstimate) {
-      const signal = controller.signal;
-      const cancel = () => pendingEstimate.controller.abort();
-      signal.addEventListener("abort", cancel, { once: true });
-      try { await pendingEstimate.promise; } finally { signal.removeEventListener("abort", cancel); }
-      signal.throwIfAborted();
-    }
     const data = await api("/api/strategy/assess", {
       method: "POST",
       signal: controller.signal,
@@ -9218,6 +9395,10 @@ async function startAssessment() {
         answers: state.answers,
         round: state.round,
         language: getLanguage(),
+        ...(state.buildModel === "faster" ? {
+          buildMode: "faster",
+          fasterThinkingLevel: state.buildFasterThinkingLevel === "high" ? "high" : "medium",
+        } : {}),
       }),
     });
     if (currentAbortController === controller) currentAbortController = null;
@@ -9407,6 +9588,7 @@ async function startGeneration() {
           "Accept-Language": getLanguage() === "en" ? "en" : "az",
           "X-Helmer-Language": getLanguage(),
           "X-Helmer-Model-Improvement": String(isModelImprovementActive()),
+          "Idempotency-Key": generationKey,
         },
         body: JSON.stringify({
           brief: state.brief,
@@ -9415,6 +9597,10 @@ async function startGeneration() {
           idempotencyKey: state.clientSaveId,
           language: getLanguage(),
           autoSave: autoSaveActive,
+          ...(state.buildModel === "faster" ? {
+            buildMode: "faster",
+            fasterThinkingLevel: state.buildFasterThinkingLevel === "high" ? "high" : "medium",
+          } : {}),
         }),
         signal: controller.signal,
       });
@@ -9463,6 +9649,10 @@ async function startGeneration() {
               }
 
               if (evt.preparationEstimate) updateBuildEstimate(evt.preparationEstimate);
+              if (evt.resetStream) {
+                state.buildStreamingText = "";
+                state.buildStreamingFinishReason = null;
+              }
               if (evt.chunk) {
                 state.buildStreamingText = (state.buildStreamingText || "") + evt.chunk;
               }
@@ -9512,6 +9702,7 @@ async function startGeneration() {
       const data = await api("/api/strategy/generate", {
         method: "POST",
         signal: controller.signal,
+        headers: { "Idempotency-Key": generationKey },
         body: JSON.stringify({
           brief: state.brief,
           answers: state.answers,
@@ -9519,6 +9710,10 @@ async function startGeneration() {
           idempotencyKey: state.clientSaveId,
           language: getLanguage(),
           autoSave: autoSaveActive,
+          ...(state.buildModel === "faster" ? {
+            buildMode: "faster",
+            fasterThinkingLevel: state.buildFasterThinkingLevel === "high" ? "high" : "medium",
+          } : {}),
         }),
       });
       if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
@@ -9712,6 +9907,181 @@ function buildFormatSwitcher() {
   return container;
 }
 
+function getBriefFeedbackIdentifiers(strategy) {
+  const keys = [];
+  if (state.savedId) keys.push(`id_${state.savedId}`);
+  if (strategy?.id && strategy.id !== state.savedId) keys.push(`id_${strategy.id}`);
+  if (state.brief && state.brief.trim()) {
+    let hash = 0;
+    const s = state.brief.trim();
+    for (let i = 0; i < s.length; i++) {
+      hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+    }
+    keys.push(`b_${Math.abs(hash).toString(36)}`);
+  }
+  if (strategy?.title && strategy.title.trim()) {
+    let hash = 0;
+    const s = strategy.title.trim();
+    for (let i = 0; i < s.length; i++) {
+      hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+    }
+    keys.push(`t_${Math.abs(hash).toString(36)}`);
+  }
+  return keys;
+}
+
+function isBriefFeedbackDismissed(strategy) {
+  try {
+    const keys = getBriefFeedbackIdentifiers(strategy);
+    return keys.some((k) => localStorage.getItem(`helmer_brief_fb_dismissed_${k}`) === "1");
+  } catch {
+    return false;
+  }
+}
+
+function markBriefFeedbackDismissed(strategy) {
+  try {
+    const keys = getBriefFeedbackIdentifiers(strategy);
+    for (const k of keys) {
+      localStorage.setItem(`helmer_brief_fb_dismissed_${k}`, "1");
+    }
+  } catch {}
+}
+
+function getBriefFeedbackVote(strategy) {
+  try {
+    const keys = getBriefFeedbackIdentifiers(strategy);
+    for (const k of keys) {
+      const v = localStorage.getItem(`helmer_brief_fb_vote_${k}`);
+      if (v) return v;
+    }
+  } catch {}
+  return null;
+}
+
+function setBriefFeedbackVote(strategy, vote) {
+  try {
+    const keys = getBriefFeedbackIdentifiers(strategy);
+    for (const k of keys) {
+      if (vote) {
+        localStorage.setItem(`helmer_brief_fb_vote_${k}`, vote);
+      } else {
+        localStorage.removeItem(`helmer_brief_fb_vote_${k}`);
+      }
+    }
+  } catch {}
+}
+
+function buildBriefFeedbackCard(strategy, isEn) {
+  if (isBriefFeedbackDismissed(strategy)) {
+    return null;
+  }
+
+  const card = element("div", "brief-feedback-card");
+  card.setAttribute("role", "group");
+  card.setAttribute("aria-label", isEn ? "Feedback" : "Rəy");
+
+  const promptText = element(
+    "span",
+    "brief-feedback-text",
+    isEn ? "Satisfied with the result?" : "Nəticədən razı qaldın?"
+  );
+
+  const actions = element("div", "brief-feedback-actions");
+
+  const currentVote = getBriefFeedbackVote(strategy);
+
+  // Like button
+  const likeBtn = document.createElement("button");
+  likeBtn.type = "button";
+  likeBtn.className = `brief-feedback-btn is-like${currentVote === "like" ? " is-active" : ""}`;
+  const likeLabel = isEn ? "Helpful" : "Bəyəndim";
+  likeBtn.setAttribute("aria-label", likeLabel);
+  likeBtn.title = likeLabel;
+  likeBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>';
+
+  // Dislike button
+  const dislikeBtn = document.createElement("button");
+  dislikeBtn.type = "button";
+  dislikeBtn.className = `brief-feedback-btn is-dislike${currentVote === "dislike" ? " is-active" : ""}`;
+  const dislikeLabel = isEn ? "Not helpful" : "Bəyənmədim";
+  dislikeBtn.setAttribute("aria-label", dislikeLabel);
+  dislikeBtn.title = dislikeLabel;
+  dislikeBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/></svg>';
+
+  const sendBriefFeedback = (vote) => {
+    fetch("/api/strategy/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        strategyId: (state.savedId && /^[0-9a-f-]{36}$/i.test(state.savedId)) ? state.savedId : null,
+        feedback: vote,
+        brief: state.brief?.slice(0, 500) || "",
+        title: strategy?.title?.slice(0, 200) || "",
+      }),
+    }).catch((err) => {
+      console.warn("Brief feedback could not be logged:", err?.message || err);
+    });
+  };
+
+  likeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const active = likeBtn.classList.contains("is-active");
+    const nextVote = active ? null : "like";
+    likeBtn.classList.toggle("is-active", nextVote === "like");
+    dislikeBtn.classList.remove("is-active");
+    setBriefFeedbackVote(strategy, nextVote);
+    sendBriefFeedback(nextVote);
+    if (nextVote === "like") {
+      showToast(isEn ? "Feedback recorded ✓" : "Rəyiniz qeydə alındı ✓", "info");
+      trackEvent("brief_feedback", { rating: "positive", strategyId: state.savedId || strategy?.id });
+    }
+  });
+
+  dislikeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const active = dislikeBtn.classList.contains("is-active");
+    const nextVote = active ? null : "dislike";
+    dislikeBtn.classList.toggle("is-active", nextVote === "dislike");
+    likeBtn.classList.remove("is-active");
+    setBriefFeedbackVote(strategy, nextVote);
+    sendBriefFeedback(nextVote);
+    if (nextVote === "dislike") {
+      showToast(isEn ? "Feedback recorded ✓" : "Rəyiniz qeydə alındı ✓", "info");
+      trackEvent("brief_feedback", { rating: "negative", strategyId: state.savedId || strategy?.id });
+    }
+  });
+
+  const divider = element("span", "brief-feedback-divider");
+  divider.setAttribute("aria-hidden", "true");
+
+  // Close 'X' button
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "brief-feedback-close";
+  const closeLabel = isEn ? "Dismiss" : "Bağla";
+  closeBtn.setAttribute("aria-label", closeLabel);
+  closeBtn.title = closeLabel;
+  closeBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+  closeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    markBriefFeedbackDismissed(strategy);
+    card.classList.add("is-dismissing");
+    setTimeout(() => {
+      card.remove();
+    }, 180);
+  });
+
+  actions.append(likeBtn, dislikeBtn, divider, closeBtn);
+  card.append(promptText, actions);
+
+  return card;
+}
+
 function buildStrategyHeader(strategy) {
   const isEn = getLanguage() === "en";
   const header = element("header", "strategy-overview");
@@ -9733,6 +10103,11 @@ function buildStrategyHeader(strategy) {
     readingTime,
   );
   topRow.appendChild(meta);
+
+  const feedbackCard = buildBriefFeedbackCard(strategy, isEn);
+  if (feedbackCard) {
+    topRow.appendChild(feedbackCard);
+  }
 
   const title = element("h1", "strategy-title", strategy.title);
 
@@ -10547,11 +10922,11 @@ function buildOrchestrationMetaPanel(strategy, isEn) {
   const sources = Array.isArray(strategy?.orchestration?.sources)
     ? strategy.orchestration.sources.filter((source) => source?.url && /^https?:\/\//i.test(source.url))
     : [];
-  if (!sources.length) return null;
   const searchSuggestions = extractGroundingSearchSuggestions({
     webSearchQueries: strategy?.orchestration?.searchQueries,
     searchEntryPoint: strategy?.orchestration?.searchEntryPoint,
   });
+  if (!sources.length && !searchSuggestions.length) return null;
 
   const panel = element("section", "strategy-sources-card");
   panel.setAttribute("aria-label", isEn ? "Research sources" : "Araşdırma mənbələri");
@@ -11686,6 +12061,8 @@ async function requestRefinement(action, request) {
   setStatus("refining");
   render();
   const path = state.savedId ? `/api/strategy/${state.savedId}/refine` : "/api/strategy/refine";
+  const activeBuildMode = state.strategy?.orchestration?.buildMode || (state.buildModel === "faster" ? "faster" : "auto");
+  const activeFasterThinking = state.strategy?.orchestration?.fasterThinkingLevel || (state.buildFasterThinkingLevel === "high" ? "high" : "medium");
   try {
     const data = await api(path, {
       method: "POST",
@@ -11697,6 +12074,10 @@ async function requestRefinement(action, request) {
         action,
         request,
         language: getLanguage(),
+        ...(activeBuildMode === "faster" ? {
+          buildMode: "faster",
+          fasterThinkingLevel: activeFasterThinking,
+        } : {}),
       }),
     });
     if (currentAbortController === controller) currentAbortController = null;
@@ -12089,6 +12470,12 @@ function clearUserScopedWorkspaceState() {
   state.changeSummary = "";
   state.strategyAskOpen = false;
   state.refinementOpen = false;
+  state.buildModel = "auto";
+  state.buildFasterThinkingLevel = "medium";
+  try {
+    localStorage.removeItem("helmer_build_model");
+    localStorage.removeItem("helmer_build_faster_thinking");
+  } catch {}
 
   // Clear Ask state
   state.askChatId = null;

@@ -158,6 +158,41 @@ Rules:
 - Epistemic Humility & Architectural Discipline: Never hallucinate unstated business facts or invented numbers. If context is missing, ask concise questions or state disciplined working assumptions with benchmark ranges, and proactively provide next steps. Do not rely on legacy models or unverified production stats.
 ${HELMER_BUILD_ARCHITECT_RULES}`;
 
+export const HELMER_BUILD_SHARED_QUALITY_POLICY = `
+### HELMER BUILD — SHARED EPISTEMIC, ANALYTICAL & STRATEGIC QUALITY POLICY:
+
+1. FAKT VƏ FƏRZİYYƏ AYRIMI (FACT VS. ASSUMPTION SEPARATION):
+- Sıfır Uydurma Fakt: Uydurma fakt, mənbə, sitat, rəsmi statistika və ya keçirilməmiş bazar/istehsalat göstəricisi qəti qadağandır.
+- Faiz (%) və Metrika İntizamı: Canlı grounding mənbəyi və ya istifadəçi brifi ilə təsdiqlənməmiş heç bir faiz göstəricisi (%), konversiya dərəcəsi, bazar payı və ya ROI fakt kimi yazıla bilməz. Sübut olmadıqda bütün belə rəqəmlər mütləq açıq etiketlənməlidir:
+  * [Hədəf KPI / Proyeksiya] — hədəflənən nəticə və ya performans göstəriciləri üçün.
+  * [İşçi Fərziyyə] — modelləşdirmə, diapazon və ilkin hesablama fərziyyələri üçün.
+- Mənbə Мənşəyinin Ayrımı: İstifadəçinin brifdə verdiyi giriş rəqəmlərini ([Brif Məlumatı]) modelin düsturla hesabladığı proyeksiyalardan ([Hesablanmış Proyeksiya / İşçi Fərziyyə]) aydın fərqləndir.
+- Grounding Dürüstlüyü: Əgər təsdiqlənmiş grounding mənbələri (providerSourceLinks) boşdursa, heç vaxt "rəsmi statistikaya əsasən", "təsdiqlənmiş mənbələrə görə" və ya "aparılan bazar araşdırması göstərir ki" kimi ifadələr işlətmə.
+- Xam URL Qadağası: Mətn sahələrinin (summary, content, bullets və s.) daxilinə heç vaxt xam URL (https://... və ya vertexaisearch.cloud.google.com/grounding-api-redirect/...) yapışdırma. Mənbəyə istinad edərkən yalnız qurumun və ya domenin adını mətndə qeyd et.
+
+2. STRATEJİ TON VƏ QƏRARVERMƏ (DECISIVE STRATEGIC TONE):
+- Qəti, Cəsarətli və İcra Yönümlü: Baş Məhsul və Sistem Arxitektoru kimi birbaşa, kəsərli, analitik və icra yönümlü qərarlar ver.
+- Sıfır Klişe və Sıfır Qorxaq Dil: Şablon korporativ klişelərdən ("müasir rəqabətli dövrdə", "oyun dəyişdirici") və tərəddüdlü ifadələrdən ("bəlkə", "ola bilər ki", "tövsiyə edilə bilər") tam imtina et.
+- Fərziyyə Üzərindən Qəti Qərar: Faktiki sübut çatışmadıqda tərəddüd etmə; açıq [İşçi Fərziyyə] müəyyən et və onun üzərindən konkret icra qərarı (və ya həssaslıq yüksəkdirsə Ssenari A / Ssenari B qərar ağacı) qur. Strateji qətiyyəti heç vaxt uydurma faktiki əminliklə qarışdırma.
+
+3. ANALİTİK VƏ RİYAZİ BÜTÖVLÜK (CROSS-SECTION MATHEMATICAL CONSISTENCY & ANTI-DUPLICATION):
+- Vahid Riyazi Model: Büdcə, CAC, ARPA/ARPU, MRR/ARR, COGS, Gross Margin, komanda/infrastruktur xərcləri və KPI hədəfləri sənədin bütün bölmələrində (summary, sections, priorities, actionPlan, kpis, risks, assumptions, nextSteps) bir-biri ilə 100% uzlaşmalıdır:
+  * Kanal və kateqoriya xərclərinin cəmi ümumi büdcəyə bərabər olmalıdır (Σ Xərc Bölgüsü = Ümumi Büdcə).
+  * Müştəri qazanma: Yeni Müştəri Sayı = Marketinq/Satış Büdcəsi ÷ CAC (və ya Orqanik + Ödənişli qıf cəmi).
+  * Gəlir uzlaşması: MRR = Aktiv Ödənişli Müştəri × ARPA; Gross Margin = (Gəlir - COGS) ÷ Gəlir.
+  * Bir bölmədə yazılan CAC, büdcə və ya müştəri hədəfi digər bölmədə və ya KPI cədvəlində fərqli rəqəmlə təkrarlanmamalıdır.
+- Təkrarlanmanın Qarşısının Alınması (Zero Redundancy Across JSON Fields):
+  * summary: Yalnız yüksək səviyyəli icra tezisi, əsas iqtisadi çərçivə və strateji seçimin xülasəsi.
+  * sections[].summary: Həmin bölmənin 1–2 cümləlik əsas qərar tezisi (content sahəsinin ilk cümlələrini kopyalama).
+  * sections[].content: Dərin arxitektura, iqtisadi mexanizm, səbəb-nəticə əsaslandırması və əməliyyat detalları.
+  * sections[].bullets: Yalnız konkret texniki/əməliyyat spesifikasiyaları, düsturlar, hədlər və yoxlama meyarları (content-dəki abzasların sözbəsöz təkrarı qadağandır).
+`;
+
+export const BUILD_MODE_DIRECTIVES = Object.freeze({
+  auto: `\n\n[BUILD EXECUTION MODE: AUTO — DEEP ARCHITECTURAL SYNTHESIS (Gemini 4 Argon). Deliver deep multi-layered architectural reasoning, explicit scenario trade-offs, unit-economics sensitivity analysis, and comprehensive operational dependency mapping while strictly avoiding repetitive filler.]`,
+  faster: `\n\n[BUILD EXECUTION MODE: FASTER — HIGH-VELOCITY FOCUSED SYNTHESIS (Gemini 3.8 Flash). Deliver sharp, high-density, execution-ready strategic and architectural decisions across all required sections. Maximize signal-to-noise ratio, keep prose tight and concrete, and maintain 100% mathematical, financial, and epistemic rigor.]`,
+});
+
 export const STRATEGY_PROMPT = `You are Helmer Build, the Head Product & Systems Architect within the Helmer ecosystem. Create an actionable, commercially realistic marketing and business strategy from the supplied brief and clarification context.
 
 Core System Rules:
@@ -170,6 +205,7 @@ Core System Rules:
 - Immediate Action Items (nextSteps): Formulate 6 concrete sequential tasks strictly complying with IMMEDIATE_ACTION_ITEMS_RULES (2 triggers for Today/24h, 2 prep steps for Next 48h, 2 pilot launch steps for This Week; never demand multi-week interviews in 48 hours or retention analysis before pilot launch).
 - Return complete structured strategy data only.
 ${HELMER_BUILD_ARCHITECT_RULES}
+${HELMER_BUILD_SHARED_QUALITY_POLICY}
 ${EPISTEMIC_HUMILITY_RULES}
 ${IMMEDIATE_ACTION_ITEMS_RULES}
 ${MARKET_DETECTION_INSTRUCTIONS}
@@ -189,6 +225,7 @@ Rules:
 - Never invent factual claims or statistics.
 - Return complete structured strategy data only.
 ${HELMER_BUILD_ARCHITECT_RULES}
+${HELMER_BUILD_SHARED_QUALITY_POLICY}
 ${EPISTEMIC_HUMILITY_RULES}
 ${IMMEDIATE_ACTION_ITEMS_RULES}`;
 
@@ -231,7 +268,7 @@ export function detectTargetMarket({ brief = "", answers = [], strategy = null }
   return "auto";
 }
 
-export function buildStrategyPrompt({ brief = "", answers = [], personalizationContext = "", marketOverride = null } = {}) {
+export function buildStrategyPrompt({ brief = "", answers = [], personalizationContext = "", marketOverride = null, buildMode = "auto" } = {}) {
   const detected = marketOverride || detectTargetMarket({ brief, answers });
   let marketDirective = "";
 
@@ -243,7 +280,8 @@ export function buildStrategyPrompt({ brief = "", answers = [], personalizationC
     marketDirective = "\n\n[MARKET CONTEXT DIRECTIVE: Dynamic detection required. Analyze the user's brief and context: if targeted at Azerbaijan/Baku/local consumers, activate [LOCAL_AZ_MODE]; if global/foreign, use standard global strategic frameworks.]";
   }
 
-  return `${STRATEGY_PROMPT}${marketDirective}${personalizationContext || ""}`;
+  const modeDirective = BUILD_MODE_DIRECTIVES[buildMode] || BUILD_MODE_DIRECTIVES.auto;
+  return `${STRATEGY_PROMPT}${modeDirective}${marketDirective}${personalizationContext || ""}`;
 }
 
 export function buildAssessorPrompt({ brief = "", answers = [], personalizationContext = "", marketOverride = null } = {}) {
@@ -259,7 +297,7 @@ export function buildAssessorPrompt({ brief = "", answers = [], personalizationC
   return `${ASSESSOR_PROMPT}${marketDirective}${personalizationContext || ""}`;
 }
 
-export function buildRefinementPrompt({ brief = "", answers = [], strategy = null, personalizationContext = "", marketOverride = null } = {}) {
+export function buildRefinementPrompt({ brief = "", answers = [], strategy = null, personalizationContext = "", marketOverride = null, buildMode = "auto" } = {}) {
   const detected = marketOverride || detectTargetMarket({ brief, answers, strategy });
   let marketDirective = "";
 
@@ -269,7 +307,8 @@ export function buildRefinementPrompt({ brief = "", answers = [], strategy = nul
     marketDirective = "\n\n[MARKET CONTEXT DIRECTIVE: The active strategy is for GLOBAL / INTERNATIONAL market. Do not force local Azerbaijani constraints.]";
   }
 
-  return `${REFINEMENT_PROMPT}${marketDirective}${personalizationContext || ""}`;
+  const modeDirective = BUILD_MODE_DIRECTIVES[buildMode] || BUILD_MODE_DIRECTIVES.auto;
+  return `${REFINEMENT_PROMPT}${modeDirective}${marketDirective}${personalizationContext || ""}`;
 }
 
 export function buildRefinementInput({ brief, answers, strategy, action, request }) {

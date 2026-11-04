@@ -200,7 +200,7 @@ test("strategy router POST /generate returns existing saved strategy if clientSa
   assert.equal(response.body?.strategy?.title, "Pre-existing Strategy");
 });
 
-test("build mode defaults to gemini-3.8-flash with High thinking and gpt-6.1-sol fallback", async () => {
+test("shared artifact router retains Gemini High and its existing OpenAI fallback", async () => {
   const { aiConfig } = await import("../src/services/ai/config.js");
   assert.equal(aiConfig.strategyModel, "gemini-3.8-flash");
   assert.equal(aiConfig.strategyFallbackModel, "gpt-6.1-sol");
@@ -373,7 +373,7 @@ test("buildAssessorPrompt and buildRefinementPrompt correctly apply context-awar
   assert.match(localAzInst, /İlk 7 gün/);
 });
 
-test("Build configuration uses Gemini High with GPT-6.1 Sol fallback and no Opus orchestration", async () => {
+test("shared structured-generation configuration remains isolated from the Build-only migration", async () => {
   const { aiConfig } = await import("../src/services/ai/config.js");
   const { getPricingForModel } = await import("../src/services/telemetry/pricing.js");
   assert.equal(aiConfig.strategyModel, "gemini-3.8-flash");
@@ -445,7 +445,7 @@ test("StrategySchema validates orchestration metadata and defaults correctly", a
 test("Brief source card is conditional and renders safe links", async () => {
   const fs = (await import("node:fs/promises")).default;
   const script = await fs.readFile("public/script.js", "utf8");
-  assert.match(script, /if \(!sources\.length\) return null/);
+  assert.match(script, /if \(!sources\.length && !searchSuggestions\.length\) return null/);
   assert.match(script, /link\.rel = "noopener noreferrer"/);
   assert.match(script, /if \(metaPanel\) container\.appendChild\(metaPanel\)/);
 });

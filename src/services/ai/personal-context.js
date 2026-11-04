@@ -96,6 +96,8 @@ const BUILD_TONE_LABELS = Object.freeze({
   data_driven: "Nəticə və satış yönümlü",
 });
 
+// Authenticated settings are already loaded: no LLM, history, or profile repository lookup.
+// Consent must be checked before reading any brand or tone value.
 export function buildStrategyPersonalizationContext({ user }) {
   if (!user) return "";
   const settings = user.settings && typeof user.settings === "object" ? user.settings : {};

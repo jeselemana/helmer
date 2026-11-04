@@ -10,6 +10,7 @@ import {
   GenerateRequestSchema,
   RefineRequestSchema,
   SaveStrategyRequestSchema,
+  StrategyFeedbackSchema,
   UpdateStrategyTitleSchema,
   formatValidationError,
 } from "../domain/strategy.js";
@@ -22,6 +23,7 @@ import {
 import { buildStrategyPersonalizationContext } from "../services/ai/personal-context.js";
 import { detectTargetMarket, getGuestBuildCtaNotice, GUEST_BUILD_EXHAUSTED_MESSAGE } from "../services/ai/prompts.js";
 import { BuildEstimateRequestSchema } from "../services/ai/build-estimate.js";
+import { buildConfig } from "../services/ai/build-config.js";
 import { aiConfig } from "../services/ai/config.js";
 import { logWithoutBlocking } from "../services/learning/learning-loop-service.js";
 import { isModelImprovementEnabled } from "./auth-middleware.js";
@@ -62,6 +64,8 @@ export function computePayloadFingerprint(operation, payload, resourceId = null)
     language: payload?.language || null,
     autoSave: payload?.autoSave !== undefined ? Boolean(payload.autoSave) : null,
     strategy: payload?.strategy && typeof payload.strategy === "object" ? canonicalize(payload.strategy) : null,
+    ...(payload?.buildMode !== undefined ? { buildMode: payload.buildMode } : {}),
+    ...(payload?.fasterThinkingLevel !== undefined ? { fasterThinkingLevel: payload.fasterThinkingLevel } : {}),
   };
   return createHash("sha256").update(JSON.stringify(canonicalize(norm))).digest("hex");
 }
@@ -89,6 +93,10 @@ const requestWindows = new Map();
 
 function publicBuildFailure(error) {
   const messages = {
+    AI_NOT_CONFIGURED: "AI bağlantısının server konfiqurasiyası tamamlanmayıb.",
+    AI_AUTH_ERROR: "AI bağlantısı doğrulanmadı. Serverin giriş icazələrini yoxlayın.",
+    AI_PROVIDER_CONFIG_ERROR: "AI bağlantısının server konfiqurasiyasını yoxlamaq lazımdır.",
+    AI_MODEL_UNAVAILABLE: "Seçilmiş AI modeli layihə və ya region üçün əlçatan deyil.",
     AI_TIMEOUT: "Strategiyanın hazırlanması vaxt limitinə çatdı. Yenidən cəhd edin.",
     AI_RATE_LIMITED: "AI xidmətlərində hazırda sorğu sıxlığı var. Bir az sonra yenidən cəhd edin.",
     AI_INVALID_OUTPUT: "Strategiyanın cavab formatını tamamlamaq mümkün olmadı. Yenidən cəhd edin.",
@@ -140,7 +148,35 @@ function rateLimit(limit, windowMs = 10 * 60 * 1000, scope = "generation") {
   };
 }
 
+const MAX_BODY_ARRAY_LENGTH = 250;
+const MAX_BODY_OBJECT_KEYS = 250;
+const MAX_BODY_DEPTH = 14;
+
+function hasOversizedCollection(value, depth = 0) {
+  if (!value || typeof value !== "object") return false;
+  if (depth > MAX_BODY_DEPTH) return true;
+  if (Array.isArray(value)) {
+    if (value.length > MAX_BODY_ARRAY_LENGTH) return true;
+    for (let i = 0; i < value.length; i += 1) {
+      if (hasOversizedCollection(value[i], depth + 1)) return true;
+    }
+    return false;
+  }
+  const keys = Object.keys(value);
+  if (keys.length > MAX_BODY_OBJECT_KEYS) return true;
+  for (let i = 0; i < keys.length; i += 1) {
+    if (hasOversizedCollection(value[keys[i]], depth + 1)) return true;
+  }
+  return false;
+}
+
 function parse(schema, body) {
+  if (body && typeof body === "object" && hasOversizedCollection(body)) {
+    const error = new Error("Invalid request: collection size limit exceeded.");
+    error.code = "VALIDATION_ERROR";
+    error.details = [{ field: "body", message: "Collection size limit exceeded." }];
+    throw error;
+  }
   const result = schema.safeParse(body);
   if (!result.success) {
     const error = new Error("Invalid request");
@@ -195,10 +231,49 @@ async function runTrackedBuild({
   if (!learningLoop && !telemetryService) return { result: await execute(() => {}), interactionId: null };
   const interactionId = learningLoop ? learningLoop.createInteractionId() : null;
   const startedAt = Date.now();
-  let providerMeta = { provider: "google", model: aiConfig.strategyModel, usage: null };
+  let providerMeta = { provider: "google", model: buildConfig.strategistModel, usage: null, stageMetrics: [] };
   const isRestricted = onlyNecessaryData || modelImprovement === false;
   try {
-    const result = await execute((meta) => { providerMeta = { ...providerMeta, ...meta }; });
+    const result = await execute((meta) => {
+      const prevUsage = providerMeta.usage;
+      const stageMetrics = [
+        ...(Array.isArray(providerMeta.stageMetrics) ? providerMeta.stageMetrics : []),
+        ...(meta?.phase ? [{
+          phase: meta.phase,
+          model: meta.model,
+          thinkingLevel: meta.thinkingLevel || null,
+          latencyMs: meta.latencyMs ?? 0,
+          firstChunkMs: meta.firstChunkMs ?? null,
+          usageStatus: meta.usageStatus || (meta?.usage ? "measured" : "unavailable"),
+          estimatedUsdMicros: meta.estimatedUsdMicros ?? null,
+          groundingActive: Boolean(meta.groundingActive),
+          verifiedSourcesCount: Number(meta.verifiedSourcesCount || 0),
+          attempt: meta.attempt || 1,
+          location: meta.location || null,
+          fallbackUsed: Boolean(meta.fallbackUsed),
+          usage: meta.usage || null,
+        }] : []),
+      ];
+      let nextUsage = prevUsage;
+      if (meta?.usage) {
+        const prompt_tokens = (prevUsage?.prompt_tokens || 0) + (meta.usage.prompt_tokens || 0);
+        const visible_output_tokens = (prevUsage?.visible_output_tokens || 0) + (meta.usage.visible_output_tokens ?? meta.usage.completion_tokens ?? 0);
+        const thoughts_tokens = (prevUsage?.thoughts_tokens || 0) + (meta.usage.thoughts_tokens || 0);
+        const completion_tokens = (prevUsage?.completion_tokens || 0) + (meta.usage.completion_tokens || 0);
+        const total_tokens = (prevUsage?.total_tokens || 0) + (meta.usage.total_tokens || 0);
+        const estimatedUsdMicros = (prevUsage?.estimatedUsdMicros || 0) + (meta.estimatedUsdMicros || 0);
+        nextUsage = {
+          prompt_tokens,
+          visible_output_tokens,
+          thoughts_tokens,
+          completion_tokens,
+          total_tokens,
+          estimatedUsdMicros,
+          usageStatus: "measured",
+        };
+      }
+      providerMeta = { ...providerMeta, ...meta, usage: nextUsage, stageMetrics };
+    });
     const groundingActive = Boolean(result?.orchestration?.searchGrounded || providerMeta?.searchGrounded);
     if (learningLoop) {
       logWithoutBlocking(learningLoop.recordInteraction({
@@ -314,7 +389,13 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     res.on("close", onResponseClose);
     res.setHeader("Cache-Control", "no-store");
     try {
-      const preparationEstimate = await estimateBuildPreparation({ brief: payload.brief, ownerId: req.ownerId, signal: controller.signal });
+      const preparationEstimate = await estimateBuildPreparation({
+        brief: payload.brief,
+        buildMode: payload.buildMode,
+        fasterThinkingLevel: payload.fasterThinkingLevel,
+        ownerId: req.ownerId,
+        signal: controller.signal,
+      });
       await assertExecutionAuthorized(controller.signal);
       if (!res.writableEnded) res.json({ preparationEstimate });
     } finally {
@@ -539,9 +620,13 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         await distLock.assertOwned();
         await assertExecutionAuthorized(generationSignal);
         const strategy = tracked.result;
-        const shouldAutoSave = payload.autoSave !== undefined
-          ? payload.autoSave
-          : (user?.settings?.autoSaveStrategies !== false);
+        const isGuest = !user && (Boolean(req?.securityContext?.guest) || String(ownerId || "").startsWith("guest_"));
+        const explicitAutoSave = typeof req?.body?.autoSave === "boolean" ? req.body.autoSave : undefined;
+        const shouldAutoSave = isGuest
+          ? false
+          : explicitAutoSave !== undefined
+            ? explicitAutoSave
+            : (user?.settings?.autoSaveStrategies !== false);
 
         let savedRecord = null;
         if (shouldAutoSave) {
@@ -695,7 +780,12 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           req,
           subscriberId,
           onEntry: (entry) => { generationEntry = entry; if (disconnected) onClose(); },
-          onChunk: ({ chunk, finishReason, preparationEstimate }) => sendEvent({ chunk, finishReason, preparationEstimate }),
+          onChunk: ({ chunk, finishReason, preparationEstimate, resetStream }) => sendEvent({
+            chunk,
+            finishReason,
+            preparationEstimate,
+            ...(resetStream ? { resetStream: true } : {}),
+          }),
         });
         const strategy = tracked.result;
         const savedRecord = tracked.savedRecord || null;
@@ -813,13 +903,62 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             ownerId: req.ownerId,
             modificationRequest: latestVersion.changeRequest,
             response: latestVersion.data,
-            modelProvider: aiConfig.strategyModel.startsWith("gemini") ? "google" : "openai",
-            modelName: aiConfig.strategyModel,
+            modelProvider: "google",
+            modelName: buildConfig.strategistModel,
             finalAccepted: true,
           }) : null);
         logWithoutBlocking(learningUpdate, "Build acceptance logging");
       }
       res.status(201).json({ strategy: publicRecord(record) });
+    }),
+  );
+
+  router.post(
+    "/feedback",
+    asyncRoute(async (req, res) => {
+      const payload = parse(StrategyFeedbackSchema, req.body);
+      const { strategyId, feedback, brief, title } = payload;
+
+      let interactionId = null;
+      let strategyTitle = title || "";
+
+      if (strategyId) {
+        const existing = await repository.getById(strategyId, req.ownerId);
+        if (existing) {
+          interactionId = existing.learningInteractionId || null;
+          strategyTitle = existing.strategy?.title || existing.title || strategyTitle;
+        }
+      }
+
+      const modelImprovement = isModelImprovementEnabled(req);
+
+      if (learningLoop && interactionId && feedback) {
+        logWithoutBlocking(
+          learningLoop.recordSignal(interactionId, req.ownerId, {
+            explicitRating: feedback === "like" ? "positive" : "negative",
+            accepted: feedback === "like",
+          }),
+          "Strategy learning signal"
+        );
+      }
+
+      if (telemetryService && feedback && typeof telemetryService.trackStrategyFeedback === "function") {
+        logWithoutBlocking(
+          telemetryService.trackStrategyFeedback({
+            ownerId: req.ownerId,
+            sessionId: req.guestOwnerId,
+            strategyId: strategyId || null,
+            strategyTitle,
+            brief: brief || "",
+            feedback,
+            onlyNecessaryData: !modelImprovement,
+            modelImprovement,
+          }),
+          "Strategy telemetry feedback"
+        );
+      }
+
+      return res.json({ success: true, feedback });
     }),
   );
 
@@ -1021,6 +1160,13 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
 export function strategyErrorHandler(error, req, res, next) {
   if (res.headersSent) return next(error);
 
+  if (error instanceof SyntaxError || error?.type === "entity.parse.failed" || error?.name === "SyntaxError") {
+    return res.status(400).json({
+      error: "Sorğu formatı yanlışdır (JSON sintaksis xətası).",
+      code: "INVALID_JSON",
+    });
+  }
+
   if (["AI_TIMEOUT", "AI_CONTENT_BLOCKED"].includes(error.code)) {
     return res.status(httpStatusOf(error)).json(publicBuildFailure(error));
   }
@@ -1055,7 +1201,7 @@ export function strategyErrorHandler(error, req, res, next) {
 
   if (error.status === 401 || error.code === "invalid_api_key" || error.code === "AI_AUTH_ERROR") {
     return res.status(503).json({
-      error: "AI bağlantısı doğrulanmadı. Serverdəki API açarını yoxla.",
+      error: "AI bağlantısı doğrulanmadı. Serverin giriş icazələrini yoxlayın.",
       code: "AI_AUTH_ERROR",
     });
   }
@@ -1067,9 +1213,13 @@ export function strategyErrorHandler(error, req, res, next) {
     });
   }
 
+  if (["AI_PROVIDER_CONFIG_ERROR", "AI_MODEL_UNAVAILABLE"].includes(error.code)) {
+    return res.status(503).json(publicBuildFailure(error));
+  }
+
   if (error.status === 503 || error.code === "AI_PROVIDER_UNAVAILABLE") {
     return res.status(503).json({
-      error: "Seçilmiş AI xidməti hazırda yüksək yüklənmə altındadır (503). Zəhmət olmasa bir az sonra yenidən cəhd edin.",
+      error: "AI xidməti ilə əlaqə yaratmaq mümkün olmadı. Yenidən cəhd edin.",
       code: "AI_PROVIDER_UNAVAILABLE",
     });
   }
@@ -1094,7 +1244,6 @@ export function strategyErrorHandler(error, req, res, next) {
     code: error.code,
     status: error.status,
     name: error.name,
-    message: error.message,
   });
   return res.status(httpStatusOf(error)).json({
     error: publicErrorMessage(error, "Helmer hazırda sorğunu tamamlaya bilmədi. Məlumatların qorunub — yenidən cəhd et."),

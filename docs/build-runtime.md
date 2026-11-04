@@ -1,107 +1,195 @@
-# Build hybrid orchestration
+# Build on Vertex AI
 
-Build generation and refinement use `build-orchestrator.js` and a separate immutable `build-config.js` contract. Ask, Research, UP, artifacts and Planner retain their existing model routes.
+Build uses a dedicated ADC-authenticated Vertex AI client. Ask, Research, UP,
+Planner and artifacts retain their existing model routes and provider wrappers.
+The obsolete Build-only OpenAI transport and cross-provider recovery have been
+removed.
 
-## Request flow
+## Flow
 
-- Small: GPT-6 Luna → Gemini 3.8 Flash (HIGH) → final strategy.
-- Medium/complex: GPT-6 Luna → Gemini 3.8 Flash (HIGH) → GPT-6.1 Sol → final strategy. Sol receives the validated preliminary objective, context, plan, constraints, acceptance criteria, evidence and uncertainties, alongside original requirements. On success there is no subsequent model call; the bounded recovery paths below apply only after provider failure.
-- Existing intake/clarification is preserved as a separate preliminary operation: Luna → Gemini assessment, with no search or final-strategy synthesis. Generation is routed against the completed intake; routing is never accepted from the client.
+| Endpoint | Model calls (`Auto` — Default) | Model calls (`Faster` — `Medium` / `High`) |
+| --- | --- | --- |
+| `/api/strategy/generate`, `/generate-stream` | Gemini 3.8 Flash → Gemini 4 Argon | Gemini 3.8 Flash (direct final, optional Flash `LOW` grounding pass when live search is mandatory) |
+| `/api/strategy/refine`, `/:id/refine`, `/refine-stream` | Gemini 3.8 Flash → Gemini 4 Argon | Gemini 3.8 Flash (direct final, preserving user-selected `MEDIUM` or `HIGH` thinking) |
+| `/api/strategy/assess` | Gemini 3.8 Flash only (skipped when brief satisfies multi-dimensional sufficiency or explicit no-questions directive) | Gemini 3.8 Flash only (or skipped when sufficient) |
+| `/api/strategy/estimate` | Gemini 3.8 Flash only; validated estimate decisions may be reused | Deterministic preparation estimate (no model router call) |
 
-Luna returns strict enums/booleans for complexity, low/medium/high reasoning, Google Search, optional Sol search, and task-essential profile fields. Invalid/inconsistent decisions stop execution. Luna is never used as a fallback or final producer. A valid Luna route remains mandatory. Provider recovery is bounded to one cross-provider fallback:
+Flash uses `HIGH` thinking and strict structured JSON: `needs_search`,
+`argon_thinking_level` (`Low`, `Medium`, `High`), `facts`, `focus_area`. It produces
+compressed evidence and a direction, never a draft strategy. The prompt reserves
+High for maximally complex financial, legal/regulatory or international corporate
+briefs; standard, broad and difficult strategy defaults to Medium. Simple
+refinements request no search and Low. These are model classification instructions,
+not a claim that natural-language intent can be perfectly classified by code.
 
-- Gemini context/direct output failure → Sol completes the original validated task directly, without invalid partial context or raw profile data.
-- Sol final output failure → Gemini completes the final brief using original requirements and the validated handoff.
-- Both providers failing ends the request; there is no bounce loop.
+Flash alone receives Google Search, with automatic tool selection instructed to
+use it only for necessary current facts. The decision and optional search happen
+in the same provider call: requiring a separate completed classification before
+exposing the tool would require a third call for searched requests.
+`ENABLE_BUILD_SEARCH_GROUNDING=false` removes the tool and clears external facts.
+No arbitrary URL fetching, URL-context, code execution or alternative search
+provider is supplied. Argon receives no tools, uses the selected thinking level,
+and returns the complete existing `StrategySchema`.
 
-Eligible failures include upstream rate limits, availability/auth/model errors, malformed or truncated output, and timeouts reported by the provider itself. Elapsed time alone never triggers a model switch. Client disconnection, lost leases, revoked permissions/consent, budget configuration/ceilings, provenance/grounding violations and safety refusals remain terminal. A fallback obtains a fresh provider reservation and revalidates authoritative execution permission. The replacement can inherit an existing Luna external-evidence grant; it cannot enable search when Luna and the server have disabled it. No model-name guessing is used. Refinement classification uses a compact summary; full strategy context goes to the workhorse and final strategist.
+Sources come exclusively from provider grounding metadata, with URL scheme,
+credential, length, duplicate and low-quality-domain checks. High-signal sources
+are prioritized. No accepted sources means no scout factual handoff. Argon is
+instructed to cite accepted URLs inline and treat unsupported claims as
+assumptions. Source chips remain at the end of the strategy. Google Search
+Suggestions metadata is retained and shown using the existing safe DOM renderer,
+including suggestion-only results when all source URLs are filtered. Provider
+HTML never enters the main page through `innerHTML`; the existing restrictive
+frame CSP is preserved. Grounded results remain excluded from training even when
+source filtering removes every source.
 
-Google Search, when authorized, runs in the same Gemini call as context analysis/strategy generation. Gemini receives no search tool otherwise. Sol receives only hosted Responses `web_search` when Luna permits additional verification; it can make at most two calls. `ENABLE_BUILD_SEARCH_GROUNDING=false` disables both providers' search. URL-context, arbitrary HTTP fetching and executable tools are never provided.
+Argon chunks reach SSE as they arrive, after current authorization checks.
+Intermediate Flash JSON is private. Chunks are provisional: only a complete
+`STOP` response that passes JSON and strict Zod validation reaches the repository.
+The existing tenant-scoped strategy router controls atomic persistence, versioning,
+idempotent replay and payload-fingerprint conflicts. Partial, invalid, blocked or
+cancelled output cannot create a saved strategy. The UI accepts only the validated
+terminal strategy for rendering and saving; its identity-epoch checks remain.
 
-The final producer uses provider streaming where supported. Its bounded chunks are published only after complete schema validation, so failed-attempt prefixes never mix with replacement output. Build continues rendering its result on the done event. Router decisions and intermediate handoffs remain private. Final JSON must satisfy the existing strategy schema before a done event or persistence. Model-authored orchestration metadata is rejected; source attribution is authored by the server from provider metadata. Existing source chips render the safe links; internal model metadata is not presented in the UI.
+## Consent and execution security
 
-## Privacy and security
+`personal-context.js` reads brand/profile/tone only after both
+`personalIntelligence === true` and `strategyPersonalization === true`.
+Personalization is deterministic and uses the authenticated settings already
+loaded by the auth layer. It does not query history, call an LLM or ask Flash to
+select profile fields. The minimal opt-in profile reaches Argon as untrusted data,
+separate from privileged instructions; Flash scouting and estimates receive none.
+The assessment call may receive that same consent-gated profile.
 
-Both `personalIntelligence` and `strategyPersonalization` must explicitly be true. The existing profile whitelist excludes identity, email, credentials, memories and custom instructions. Luna sees no profile values. Only selected task-essential fields go to Gemini as untrusted data. Sol receives task-relevant information through the handoff. Account/privacy epoch changes invalidate in-flight execution through the existing provider authorization checks.
+Tenant execution mutexes, background-research exclusion, shared Redis capacity,
+provider-slot heartbeats, current authorization, cancellation on disconnect,
+privacy-epoch checks, strict mutation schemas and canonical idempotency
+fingerprints are preserved. Every model call passes through
+`AiPolicy.reserveProvider`. Safety settings on both models are:
 
-The HTTP path retains strict Zod schemas, canonical fingerprints, durable replay/tenant storage, distributed locks, execution leases, guest policy, rate limiting and privacy-safe logging. Build additionally passes through `createAskExecutionGuard`, including the active Research check. Client disconnection propagates cancellation through the existing controllers. Each production SDK call uses the existing `wrapProvider`/`AiPolicy.reserveProvider` budget and slot admission. No dependencies were added.
+- Hate speech and sexually explicit content: `BLOCK_LOW_AND_ABOVE`.
+- Dangerous content and harassment: `BLOCK_MEDIUM_AND_ABOVE`.
 
-At the user's explicit instruction, Build has no application-imposed model stage, router, or total generation wall-clock deadline. It waits for completion until the caller cancels, disconnects, authorization changes, a lease is lost, a policy/budget blocks execution or the provider returns an error. Other modes retain their existing 180s request deadline. Renewable ownership/provider-slot leases keep their original TTLs and heartbeats; a lease TTL is not a generation cutoff.
+Build sets no artificial `maxOutputTokens` cap on model generation while enforcing
+bounded stage-specific deadlines (`30s` estimate, `60s` assessment, `35s` scout via `BUILD_SCOUT_TIMEOUT_MS`,
+`180s`/`240s`/`360s` final `LOW`/`MEDIUM`/`HIGH`) and route-level request timeouts
+(`45s` `/estimate`, `90s` `/assess`, `600s` `/generate`, `/generate-stream`, and
+`/refine`). The existing input/output character and schema bounds protect memory
+and persistence.
 
-Build uses a dedicated OpenAI v4 SDK adapter that omits its internal deadline timer and deadline header while preserving caller cancellation before headers and during SSE. Its dedicated socket agent does not change other modes' agents. The installed SDK's `timeout:0` would immediately abort, so setting that flag on the ordinary client would be incorrect. Gemini Build calls explicitly use `httpOptions.timeout:0` and one SDK attempt. Provider/network infrastructure can still impose its own limits.
+Before Build calls, admission reserves realistic thinking-aware output token
+budgets (`16,384` for Flash and `16,384`/`24,576`/`32,768` for Argon `Low`/`Medium`/`High`).
+These are accounting reservations, not generation parameters. Reported usage settles
+the reservation; failed/aborted calls without usage refund the reservation; completed
+calls without `usageMetadata` settle estimated token usage based on observed bytes;
+and grounded search fees are charged only when Google Search grounding was actually
+executed. The default `$5`/user and `$100`/platform daily ceilings work out of the
+box. Non-global Argon prices are `$2.20`/`$11` per million input/output tokens
+through November 2026 and `$4.40`/`$22` from December 1; the code schedules this
+transition.
 
-### Cloud Run stream truncation incident (2026-10-28)
+Transient Vertex AI failures (`408`, `429`, `5xx`, timeouts) retry across Vertex AI
+multi-region endpoints (`us` → `global`) with exponential backoff, streaming-to-unary
+recovery (`resetStream`), Argon thinking step-down on `MAX_TOKENS`, and state-preserving
+`scout` research checkpoints. Flash never generates or edits a brief under any
+circumstance. Missing ADC, invalid provider parameters and unavailable models have
+distinct sanitized error codes; they are never described as provider overload. Errors are sanitized
+and correlated by a random request ID. Diagnostic records contain stage, model,
+code/status, elapsed time and bounded schema issue paths, never SDK messages,
+credentials, prompts, outputs or account IDs. Existing model-improvement opt-out
+redaction and training-candidate purging remain active.
 
-Production logs for 2026-10-27 show two `/api/strategy/generate-stream` requests lasting 300.999 seconds with HTTP 200, followed by `Truncated response body` warnings. The active Cloud Run service was configured with `timeoutSeconds: 300`. SSE headers had already been sent, so HTTP 200 did not establish successful generation. The frontend reached EOF without a terminal strategy and displayed `Strategiya generasiyası tamamlanmadı.` The nearby non-streaming retry returned HTTP 429; the available request log does not establish its specific policy code.
+## Location, identity and caching
 
-The deployment script now explicitly sets `--timeout 3600` so deployments preserve sufficient infrastructure time for the displayed preparation estimates. This is a finite infrastructure allowance, not a model stage deadline or permission to bypass cancellation, authorization, renewable leases, capacity or budget checks. Requests exceeding that allowance can still be interrupted.
+The agreed deployment is Cloud Run **`us-central1`**, Vertex generation and
+implicit caches **`us`**. This is intentional: neither requested model advertises
+`us-central1` serving support. It is a US multi-region deployment, not a guarantee
+that all model processing occurs in Iowa or on the same internal network.
 
-The frontend flushes the text decoder and processes the final buffered line at EOF. If no terminal strategy arrives, it reports `BUILD_STREAM_INCOMPLETE` with a safe connection-interrupted message and does not automatically launch another generation. Identity epoch and cancellation checks remain in place before rendering. Regression coverage includes clean premature EOF, fragmented UTF-8/final lines, identity changes, cancellation and terminal policy errors.
+Build ignores API-key, generic location and custom Vertex base-URL overrides. Its
+SDK client explicitly sets the project, `vertexai: true`, the canonical
+`https://aiplatform.us.rep.googleapis.com` multi-region endpoint and
+`v1beta1`. Cloud Run uses an attached service account and ADC. Downloaded credential
+files are rejected for Build in production. Explicit credential-file paths are
+validated before SDK construction; a missing file returns `AI_NOT_CONFIGURED`.
+For local development, use standard user ADC (`gcloud auth application-default
+login`) rather than a stale `GOOGLE_APPLICATION_CREDENTIALS` path. The scripts attach
+`CLOUD_RUN_SERVICE_ACCOUNT` (default
+`helmer-runtime@PROJECT_ID.iam.gserviceaccount.com`) and verify that the service
+account exists without mutating project IAM policy bindings on each deploy. They
+do not create service account keys. Existing secrets for unrelated modes remain
+separate.
 
-Validation on Node v24.22.1: `npm run check` passed (195 modules); `npm test` passed 722/722 with no skipped tests. The sandbox's local-port restriction required running the HTTP test suite with port access. No dependencies or security guards were changed.
+Argon supports **implicit** context caching only, not `caches.create` or an explicit
+`cachedContent` resource. Stable strategy/refinement templates and methodology
+remain at the beginning of the system prompt to make repeated prefixes eligible
+for caching. Cache hits depend on Google's eligibility/minimum-token rules and
+project configuration; the application does not promise a hit. No explicit shared
+user-data cache is created. The existing prohibition on unadmitted explicit cache
+creation remains. Implicit caching can retain customer-derived data in Google's
+project-scoped cache for up to 24 hours, including durable storage by default.
+Project administrators control cache retention; application telemetry opt-out does
+not disable Google's independent cache or abuse-monitoring retention.
 
-Deployed on 2026-10-28 with explicit source-upload approval: Cloud Build `337ef537-fe1e-4197-b396-da61a24b1a66` succeeded; revision `marketify-ai-00143-rgl` is ready with 100% traffic and `timeoutSeconds: 3600`. Only the image and request timeout were changed on the service. The existing health endpoint returned `status: ok`; the served `script.js` matched the tested local file byte for byte. These checks verify rollout and configuration, not completion of a new long-running production strategy.
+The estimate optimization is separate: a bounded, process-local, five-minute cache
+uses SHA-256(owner + task) keys and stores only the effort enum and fixed metadata.
+It retains no task-derived focus text, profile, facts or prompt. Cache hits recheck
+authorization. Generation and assessment never reuse an estimate to skip their
+required Flash call. The numeric estimate remains a heuristic, not a deadline.
 
-Follow-up security review against `AGENTS.md`, `SECURITY.md` and baseline `0eaa33a`: the Build fix preserves identity/abort checks and adds only a static public interruption message; no dynamic HTML, user URL fetch, dependency, secret, debug route or bypass flag was introduced. Build schemas, execution guards/locks, provider reservations, security services, auth/user stores, artifact code and dependency manifests are unchanged from the baseline. R2 authoritative revalidation and trusted-system-field restrictions remain intact. The 3600-second setting changes infrastructure request lifetime; application authorization, budget enforcement, provider slots, lease heartbeats and disconnect cancellation remain unchanged. Docker/cloud upload exclusions still omit environment files, credentials and tenant data. This reviews the current Build changes rather than certifying the entire application or cloud account. `npm run check`, all 722 tests, `git diff --check` and deployment-script shell syntax passed again before redeployment of the same image digest.
+## Official documentation reviewed on 2026-10-31
 
-Reviewed image redeployed as `marketify-ai-00144-qt4`: Ready/ConfigurationsReady/RoutesReady are all true, traffic is 100%, and the request timeout remains 3600 seconds. The public frontend SHA-256 matches the reviewed local file.
+- [Flash model, limits and locations](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/3-8-flash).
+- [Argon model, thinking, decoding, locations and implicit-only caching](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/4-argon).
+- [Cloud Run service identity and ADC](https://docs.cloud.google.com/run/docs/ai/authenticate-agents).
+- [Safety filter configuration](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/configure-safety-filters).
+- [Context caching and tenant boundaries](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/context-cache/context-cache-overview).
+- [Data governance and retention](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/data-governance).
+- [Google Search grounding display requirements](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/grounding-search-suggestions).
+- [Service-specific terms](https://cloud.google.com/terms/service-terms), [Cloud Data Processing Addendum](https://cloud.google.com/terms/data-processing-addendum) and [pricing](https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing).
 
-The added “about 5000 output tokens” brevity directive was also removed. Strict schemas, memory/output size caps, provider token reservations, daily budgets, rate limits, retry/attempt bounds, tenant mutexes and privacy checks remain enforced. Final chunks are published only after full validation. User cancellation and security-policy failures never cause fallback. Public errors omit SDK messages, stacks, partial text and model identifiers.
+Google does not use customer data for training without permission, but that does
+not imply zero retention. Google Search may retain derived queries/context for up
+to three days and cannot be configured for zero retention; abuse monitoring and
+Advanced AI terms may impose additional logging. IAM, billing, model access,
+request/response logging, organization policy, cache retention and applicable
+Google terms must also be verified in the actual project. Section 20(k) specifically
+restricts modification/analysis, training, storage, framing and reuse of Grounded
+Results and Search Suggestions. The requested Flash-evidence-to-Argon synthesis,
+long-lived strategy archives and Google's exact suggestion display requirements
+need separate confirmation under the project's Google agreement; this refactor
+must not be presented as certifying those contractual permissions. Repository changes
+alone cannot certify deployed compliance or grant model access.
 
-Profile, user input, model handoffs and external findings are untrusted data. Prompt rules cannot guarantee semantic immunity to every injection; enforced schemas, fixed provider/model/tool allowlists, consent gates and absence of arbitrary execution limit its authority. Source links reject unsafe schemes, credentials, excessive length, duplicates and low-quality domains, and prioritize high-signal domains. Raw provider HTML is never forwarded.
+## Verification
 
-## Verified API contracts and account probe (2026-10-25)
+Run `npm run check` and `npm test` with the declared Node 24 runtime. Coverage
+includes model-call counts, all thinking levels, consent-gated profile access,
+streaming-before-completion, malformed JSON, safety stops, no fallback, sanitization,
+provider admission and full reservations, cancellation, tenant persistence,
+idempotency, privacy revocation and safe Google Suggestions rendering.
 
-Official model pages establish [`gpt-6-luna`](https://developers.openai.com/api/docs/models/gpt-6-luna), [`gpt-6.1-sol`](https://developers.openai.com/api/docs/models/gpt-6.1-sol), and [`gemini-3.8-flash`](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash). Sol low/medium/high and Gemini HIGH are supported. OpenAI tools use Responses, with `store:false`. No deprecated Gemini sampling parameters are sent. Combining Google Search with structured output is documented as [preview for Gemini 3/4](https://ai.google.dev/gemini-api/docs/generate-content/structured-output); a bounded simple live Search + HIGH thinking + JSON Schema probe succeeded with three provider sources. The full nested final-strategy JSON Schema was subsequently rejected by Vertex streaming with HTTP 400. Build therefore uses the existing verified `formatGeminiResponseSchema` adapter and `responseSchema` transport dialect. Complete strict Zod validation, including every length/cardinality/unknown-field guard, remains mandatory before publication or persistence.
+Deployment scripts are prepared but have not been executed. No IAM mutation or
+production deployment is part of the local test suite.
 
-Read-only model metadata calls confirmed access to Luna and Sol. The initial Gemini HTTP 401 came from a model metadata GET operation that Express Mode does not support; it was incorrectly classified as an authentication problem. The same configured Express key successfully completed an actual `generateContent` request against `gemini-3.8-flash`. No credential was changed or disclosed. Express supports generation, streaming and token counting; see the [official Express REST reference](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/express-mode/api-reference).
+On 2026-10-31, separate synthetic live probes confirmed that the Vertex API is
+enabled and both requested models return `STOP` through ADC-compatible Google
+authorization at the canonical US multi-region endpoint: Flash about 3.7 seconds,
+Argon about 23.7 seconds for tiny JSON checks. These are single connectivity
+observations, not production latency guarantees. No user prompt/profile or saved
+strategy was used. Local ADC was configured from the existing Google login with
+0600 file permissions; no service-account key or additional IAM grant was created.
+A transport regression test also runs the real installed Google SDK against a
+mock transport and verifies the exact hostname, project/location path and ADC
+Authorization headers for both models.
 
-Use `node scripts/check-gemini.js` for a bounded basic real connection check; it does not certify every structured streaming schema or available capacity for long generation. It sends only a synthetic “OK” prompt through the existing SDK provider policy and prints a sanitized success/error record, never API keys, provider output, stack traces or account details. With configured Redis, provider reservations use the existing shared budget/slot ledger. No health/debug API route was added.
 
-Live synthetic probes subsequently confirmed:
+The restarted local server also completed a real no-search Flash→Argon SSE
+request with an existing `StrategySchema`-valid result: HTTP 200, 133 content
+chunks, first content after about 9.7 seconds and completion after about 66.4
+seconds. Auto-save was disabled and no strategy record was created. A local
+Flash-only estimate returned HTTP 200 in about 4.9 seconds. These are synthetic
+single-run observations, not latency guarantees. Sanitized stage timing records
+contain only a random request ID, stage, model, status and elapsed milliseconds.
 
-- Direct Gemini `generateContent`: nonempty response, `STOP` completion, six reported tokens.
-- The reusable connection diagnostic: `ok:true`, approximately 1.35s for that single run.
-- Small Build with actual providers: Luna → Gemini, valid three-section strategy, streamed output, approximately 18.7s for that single run.
-- Complex Build with actual providers: Luna → Gemini → Sol, valid three-section strategy with technical actions and measurable KPIs, streamed output, approximately 57.5s for that single run.
-- Search + HIGH thinking + JSON Schema in a direct Gemini probe: valid JSON, `STOP` completion and three provider source chunks.
-- Full Build with an external-evidence request after switching to `responseJsonSchema`: Luna → Gemini → Sol completed in approximately 127.2s. That run returned zero accepted source links and labeled the plan around missing evidence. It confirms synthesis/streaming, but is not evidence of successful grounding in that full run. Source chips are not fabricated when provider sources are absent.
-
-The earlier full search run using the legacy `responseSchema` field hit the 120s Gemini stage deadline. The full nested streaming schema now uses the existing Vertex `responseSchema` adapter. Those application deadline failures were historical; Build no longer schedules them, and only a provider-reported timeout can produce `AI_TIMEOUT`. A single successful run does not establish that schema choice caused every latency difference.
-
-These are synthetic single-run observations, not production latency guarantees or a comprehensive quality benchmark. No user profile was sent, and no strategy was persisted during these standalone live probes. Local regression tests use controlled provider responses.
-
-## Validation
-
-Run with Node 24 (the repository's declared runtime):
-
-```
-npm run check
-npm test
-```
-
-`test/build-orchestrator.test.js` covers stage counts, reasoning, consent/minimization, search grants, source provenance, malformed output, aborts, waiting without time cutoffs, reservations/releases and revoked authorization. `test/build-http.test.js` exercises the actual services, HTTP/SSE, privacy/AI policy, execution guard and tenant repository with protected provider fixtures. Existing storage/concurrency fixtures include the new Luna route and explicit Gemini completion metadata. The HTTP concurrency assertion now requires `EXECUTION_BUSY` for overlapping generation, preserving the mandatory tenant mutex.
-
-Final validation on Node v24.22.1 after provider recovery: `npm run check` passed (191 JavaScript modules); `npm test` passed 698/698, including 46 orchestration/HTTP tests, three SDK deadline/cancellation isolation tests and five Gemini diagnostic tests. `git diff --check` passed. A scoped credential/bypass scan of the changed Build implementation and new fixtures found no credential material or execution bypasses.
-
-## Incident reproduced on the supplied architecture brief
-
-Before recovery was added, the exact AI-native SaaS architecture brief was classified as `complex/high` by Luna in about 2.2s. Gemini returned HTTP 429 after approximately 108.2s; the request ended as `AI_RATE_LIMITED` before Sol ran. This is a provider capacity/rate-limit response, not evidence that the API key is invalid. The old SSE message concealed that distinction. A separate live final-strategy stream probe reproduced Vertex HTTP 400 with the full `responseJsonSchema`; the existing Vertex `responseSchema` adapter completed the same probe in about 14.3s. Those are separate failures: capacity errors require recovery, while the incompatible transport schema required correction. The exact brief later completed through Gemini fallback after Sol timed out under the former deadline policy: about 252s total, eight sections and 24,740 streamed characters, with all strategy schema checks passing. Those are historical measurements from before the user instructed removal of elapsed-time model cutoffs; Build no longer forces that timeout or switches a healthy model merely because it is slow.
-
-Provider failures now produce bounded structured diagnostics (random request ID, stage, model, normalized code/status, elapsed time and schema issue paths). No prompts, outputs, account IDs, SDK messages or credentials are logged. Exhausted SSE errors include a safe actionable message, retryability and request ID. No health/debug route or dependency was added.
-
-The no-deadline SDK adapter was also checked with real synthetic OpenAI and Gemini calls; both returned successfully. This basic transport check does not reclassify the earlier deadline-limited full-brief run as an unlimited run.
-
-No production deployment was performed.
-
-### Preparation estimate card
-
-`POST /api/strategy/estimate` accepts only `{brief}` (8–8000 trimmed characters). It invokes the mandatory Luna classifier with no search tools or profile data and returns numeric minutes only. It uses the existing privacy/auth policy, provider budget reservations, shared owner execution mutex/background-job exclusion, client disconnect cancellation and a separate 20-per-10-minute preview rate limit. Unknown fields and invalid idempotency headers are rejected; canonical payload fingerprints reject reused keys with different input (409). Preview calls do not consume guest message or brief allowance.
-
-Validated routing decisions are held in a bounded 512-entry, five-minute cache keyed by SHA-256 of owner and canonical task context. Only routing decisions are cached; raw prompts/profiles are not retained. Authorization is checked again on cache hits. Assessment reuses the preview route when task context is unchanged; added clarification answers or assumptions cause a fresh decision. Idempotency fingerprint retention is bounded to 512 entries/15 minutes. Both caches are process-local optimizations, not durable cross-replica result storage.
-
-Server-owned base minute ranges: small 1–2; medium low 2–3, medium 2–4, high 3–5; complex 4–8. An authorized search grant adds 1 to the lower and 2 to the base upper bound. The upper bound then receives exactly 2 extra minutes for small tasks or 3 for other tasks. These are conservative heuristic estimates, not measured completion promises or execution deadlines.
-
-The UI debounces typing for 1.2 seconds and spaces preview starts at least 10 seconds apart. Editing cancels stale requests and suppresses stale responses. It safely renders validated numeric ranges with textContent, uses a polite live status, shows a neutral unavailable state on failure, and sends no profile information. Placement: desktop below the input, mobile immediately above it, and on the analysis/generation screen. Final-stage SSE metadata updates the estimate if routing changes after clarification. No model names, countdown or new generation timeouts are introduced.
-
-Validation: automated coverage includes strict request validation, Luna-only calls, tenant isolation/cache reuse, idempotency conflict, background-job exclusion, guest quota preservation, numeric rendering and stale-response cancellation. Browser checks against the local server confirmed a real Luna estimate (2–7 minutes), desktop input-below placement at 1280px, mobile input-above placement at 390px without horizontal overflow, and the analysis loading card. Production deployment was not performed.
+The Flash-only local assessment also returned HTTP 200 with `ready` in about
+15.0 seconds. Final Node 24 verification passed `npm run check` and all 737 tests.

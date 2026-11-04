@@ -240,7 +240,7 @@ function renderTelemetryEvents(data) {
     const eventName = makeEl("span", "event-type-name", `${getEventIcon(event.eventType, event.mode)} ${event.eventType}`);
     const eventSub = makeEl("small", "event-type-sub", event.summary || event.category || "Hadisə");
     eventWrap.append(eventName, eventSub);
-    if (event.eventType === "task_feedback") {
+    if (event.eventType === "task_feedback" || event.eventType === "strategy_feedback") {
       const fbBadge = makeEl(
         "span",
         `feedback-indicator feedback-${event.metadata?.feedback || "like"}`,

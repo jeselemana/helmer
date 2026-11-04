@@ -1,28 +1,27 @@
 import { beforeEach } from 'node:test';
-import { getGeminiClient } from '../../src/services/ai/client.js';
-import { getBuildOpenAIClient } from '../../src/services/ai/build-openai-client.js';
+import { getGeminiClient, getBuildVertexClient } from '../../src/services/ai/client.js';
 
-// Legacy storage/concurrency tests still exercise the real Build services.
-// Supply the new first-stage decision; these fixtures route narrow edits direct.
+// Storage/concurrency regressions provide a final-result mock on the legacy
+// Gemini client. Bridge it to the isolated Build client and supply its scout.
 export function installBuildRoutingFixture() {
   beforeEach(t => {
-    const previous = process.env.OPENAI_API_KEY;
+    const previousProject = process.env.GOOGLE_CLOUD_PROJECT;
     const previousGemini = process.env.GEMINI_API_KEY;
-    process.env.OPENAI_API_KEY ||= 'test-build-router-key';
+    process.env.GOOGLE_CLOUD_PROJECT ||= 'test-helmer-project';
     process.env.GEMINI_API_KEY ||= 'test-build-workhorse-key';
-    const client = getBuildOpenAIClient();
-    t.mock.method(client.responses, 'create', async params => {
-      if (params.model !== 'gpt-6-luna') throw new Error('Unexpected strategist call in narrow-edit fixture');
-      return { status: 'completed', output_text: JSON.stringify({ complexity: 'small', reasoning: 'low', googleSearch: false, solWebSearch: false, profileFields: [] }) };
+    const legacy = getGeminiClient(), build = getBuildVertexClient();
+    t.mock.method(build.models, 'generateContent', async params => {
+      if (params.config.responseSchema.properties.needs_search) return {
+        text: JSON.stringify({ needs_search: false, argon_thinking_level: 'Low', facts: [], focus_area: 'Narrow edit' }),
+        candidates: [{ finishReason: 'STOP' }],
+      };
+      return legacy.models.generateContent(params, { signal: params.config.abortSignal });
     });
-    if (process.env.GEMINI_API_KEY) {
-      const gemini = getGeminiClient();
-      t.mock.method(gemini.models, 'generateContentStream', async params => (async function* () {
-        yield await gemini.models.generateContent(params);
-      })());
-    }
+    t.mock.method(build.models, 'generateContentStream', async params => (async function* () {
+      yield await legacy.models.generateContent(params, { signal: params.config.abortSignal });
+    })());
     t.after(() => {
-      if (previous === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous;
+      if (previousProject === undefined) delete process.env.GOOGLE_CLOUD_PROJECT; else process.env.GOOGLE_CLOUD_PROJECT = previousProject;
       if (previousGemini === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previousGemini;
     });
   });

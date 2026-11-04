@@ -1,15 +1,23 @@
 import { parseResponse } from "openai/lib/ResponsesParser.mjs";
 import { executionContext } from './privacy-policy.js';
 import { providerUsage } from './provider-usage.js';
+import { isValidBuildOutputReservation, resolveBuildOutputReservation } from "../ai/build-config.js";
 let policy;
 export function configureProviderPolicy(value) { policy = value; }
 export async function assertPlatformEnabled() { await policy?.assertEnabled?.(); }
-export function wrapProvider(client, kind) {
+export function wrapProvider(client, kind, { buildVertex = false } = {}) {
   if (client.__helmerProtected) return client;
   function protect(target, method, type) {
     if (typeof target?.[method] !== 'function') return;
     const original = target[method].bind(target);
     target[method] = async (params, options) => {
+      const outputTokenReservation = buildVertex ? resolveBuildOutputReservation(params) : undefined;
+      if (buildVertex && (!isValidBuildOutputReservation(params.model, outputTokenReservation) || params.config?.maxOutputTokens !== undefined ||
+          (params.model === 'gemini-4-argon' && params.config?.tools?.length) ||
+          (params.config?.tools && (!Array.isArray(params.config.tools) || params.config.tools.length > 1 || params.config.tools.some(tool =>
+            !tool?.googleSearch || Object.keys(tool).length !== 1 || Object.keys(tool.googleSearch).length !== 0))))) {
+        throw Object.assign(new Error('Invalid Build provider configuration'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
+      }
       if (!policy) return original(params, options);
       const context = executionContext.getStore();
       if (!context?.ownerId) throw Object.assign(new Error('Missing execution identity'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
@@ -27,7 +35,7 @@ export function wrapProvider(client, kind) {
       const enabled = () => measure('platformMs', () => assertPlatformEnabled());
       context.signal?.throwIfAborted();
       await Promise.all([enabled(), authorize()]);
-      const release = await policy.reserveProvider(context, params);
+      const release = await policy.reserveProvider(context, params, buildVertex ? { outputTokenReservation } : undefined);
       let checking = false;
       const authorizationTimer = setInterval(async () => {
         if (checking) return;
@@ -37,16 +45,47 @@ export function wrapProvider(client, kind) {
         finally { checking = false; }
       }, 1000);
       authorizationTimer?.unref();
-      let lastUsage, released = false;
-      const observe = value => { lastUsage = providerUsage(value) || lastUsage; };
+      let lastUsage, released = false, groundedSearchUsed = false, observedOutputBytes = 0, completedSuccessfully = false;
+      const observe = value => {
+        lastUsage = providerUsage(value) || lastUsage;
+        const gm = value?.candidates?.[0]?.groundingMetadata || value?.groundingMetadata;
+        if (gm && (gm.webSearchQueries?.length || gm.groundingChunks?.length || gm.searchEntryPoint)) {
+          groundedSearchUsed = true;
+        }
+        if (typeof value?.text === 'string' && value.text.length > 0) {
+          observedOutputBytes += Buffer.byteLength(value.text);
+        } else if (typeof value?.output_text === 'string' && value.output_text.length > 0) {
+          observedOutputBytes += Buffer.byteLength(value.output_text);
+        }
+      };
       const finish = async () => {
         if (released) return;
         released = true;
         clearInterval(authorizationTimer);
         try {
           if (lastUsage) {
-            await release.recordUsage?.({ ...lastUsage, searchUsageKnown: type !== 'gemini' });
-            await context.onProviderUsage?.({ provider: kind, model: params.model, ...lastUsage });
+            const usageToRecord = buildVertex && type === 'gemini'
+              ? {
+                  ...lastUsage,
+                  searchCalls: groundedSearchUsed ? Math.max(1, lastUsage.searchCalls || 0) : (lastUsage.searchCalls || 0),
+                  searchUsageKnown: true,
+                }
+              : { ...lastUsage, searchUsageKnown: type !== 'gemini' };
+            await release.recordUsage?.(usageToRecord);
+            await context.onProviderUsage?.({ provider: kind, model: params.model, ...usageToRecord });
+          } else if (completedSuccessfully && observedOutputBytes > 0) {
+            const rawInput = typeof params?.contents === 'string' ? params.contents : JSON.stringify(params?.contents || params?.input || params?.messages || '');
+            const estimatedUsage = {
+              inputTokens: Math.max(1, Math.ceil(Buffer.byteLength(rawInput) / 4)),
+              outputTokens: Math.max(1, Math.ceil(observedOutputBytes / 4)),
+              searchCalls: groundedSearchUsed ? 1 : 0,
+              searchUsageKnown: buildVertex ? true : type !== 'gemini',
+              estimated: true,
+            };
+            await release.recordUsage?.(estimatedUsage);
+            await context.onProviderUsage?.({ provider: kind, model: params.model, ...estimatedUsage });
+          } else {
+            await release.refund?.();
           }
         } catch (error) {
           const failure = /^EXECUTION_/.test(error.code || '') ? error : Object.assign(new Error('Usage settlement unavailable'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
@@ -70,7 +109,7 @@ export function wrapProvider(client, kind) {
             config: {
               ...params.config,
               ...(sanitizedThinking ? { thinkingConfig: sanitizedThinking } : {}),
-              maxOutputTokens: Math.min(params.config?.maxOutputTokens || 16384, 16384),
+              ...(buildVertex ? {} : { maxOutputTokens: Math.min(params.config?.maxOutputTokens || 16384, 16384) }),
               abortSignal: signal,
             },
           };
@@ -126,10 +165,12 @@ export function wrapProvider(client, kind) {
               }
             }
             if (prelude.length) yield* drain();
+            completedSuccessfully = true;
           }
           finally { await finish(); }
         })();
         await Promise.all([enabled(), authorize()]);
+        completedSuccessfully = true;
         await finish(); return value;
       } catch (error) {
         if (/^EXECUTION_/.test(error.code || '')) context.controller?.abort(error);

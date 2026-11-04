@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import net from 'node:net';
+import { BUILD_OUTPUT_RESERVATIONS, isValidBuildOutputReservation } from '../ai/build-config.js';
 import { guestDailyLimit, guestBuildDailyLimit } from './config.js';
 import { GUEST_EXHAUSTED_MESSAGE, GUEST_BUILD_EXHAUSTED_MESSAGE, GUEST_RESTRICTION_NOTICES, detectGuestFunctionalRestriction } from '../ai/prompts.js';
 import { resolveAskThinkingLevel } from '../ai/ask-routing.js';
@@ -8,6 +9,9 @@ import { requestFingerprint } from './request-fingerprint.js';
 const fail = (code, status = 503) => Object.assign(new Error(code), { code, status });
 
 export const DEFAULT_MODEL_PRICING = Object.freeze({
+  get 'gemini-4-argon'() {
+    return Date.now() < Date.UTC(2026, 11, 1) ? { input: 2.20, output: 11.00 } : { input: 4.40, output: 22.00 };
+  },
   'gemini-3.8-flash': { input: 0.75, output: 3.75, search: 0.035 },
   'gemini-3.8-flash-high': { input: 0.75, output: 3.75, search: 0.035 },
   'gpt-5.6-luna': { input: 0.25, output: 1.00, search: 0.030 },
@@ -48,8 +52,12 @@ export function isAiRequest(req) {
 }
 
 export function aiRequestTimeoutMs(req) {
-  return req.method === 'POST' && /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream|refine|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path)
-    ? null : 180000;
+  if (req.method === 'POST') {
+    if (/^\/api\/strategy\/estimate\/?$/i.test(req.path)) return 45000;
+    if (/^\/api\/strategy\/assess\/?$/i.test(req.path)) return 90000;
+    if (/^\/api\/strategy\/(?:generate|generate-stream|refine|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path)) return 600000;
+  }
+  return 180000;
 }
 export class AiPolicy {
   constructor({ redis, env = process.env, fetcher = fetch }) { this.redis = redis; this.env = env; this.fetcher = fetcher; }
@@ -121,21 +129,42 @@ export class AiPolicy {
         if (this.env.NODE_ENV === 'production' && (this.env.REDIS_URL || this.env.REQUIRE_REDIS === 'true')) {
           return res.status(503).json({ code: 'EXECUTION_UNAVAILABLE', error: 'Sorğu icra edilə bilmədi.' });
         }
+        try {
+          if (guest) await this.turnstile(req);
+        } catch (error) {
+          return res.status(error.status || 403).json({ code: error.code || 'BOT_VERIFICATION_FAILED', error: 'Sorğu başlana bilmədi.' });
+        }
         controller = new AbortController();
         req.securityContext.route = req.path;
         req.securityContext.controller = controller;
         req.securityContext.signal = controller.signal;
+        let memoryTimer;
+        const requestTimeout = aiRequestTimeoutMs(req);
+        if (requestTimeout !== null) {
+          memoryTimer = setTimeout(() => {
+            controller.abort(fail('EXECUTION_TIMEOUT'));
+            if (!res.headersSent) res.status(504).json({ code: 'EXECUTION_TIMEOUT' });
+            else res.end();
+          }, requestTimeout);
+          memoryTimer.unref?.();
+        }
         req.securityContext.transferToBackground = () => {
           req.securityContext.isBackgroundJob = true;
+          clearTimeout(memoryTimer);
+          memoryTimer = setTimeout(() => controller.abort(fail('EXECUTION_TIMEOUT')), 10 * 60 * 1000);
+          memoryTimer.unref?.();
           return {
             signal: controller.signal,
             assertOwned: async () => {},
-            release: async () => { controller.abort(); },
+            release: async () => { clearTimeout(memoryTimer); controller.abort(); },
           };
         };
         if (!guest) {
           const finishRequest = () => {
-            if (!req.securityContext.isBackgroundJob) controller.abort();
+            if (!req.securityContext.isBackgroundJob) {
+              clearTimeout(memoryTimer);
+              controller.abort();
+            }
           };
           res.once('finish', finishRequest);
           res.once('close', finishRequest);
@@ -172,6 +201,7 @@ export class AiPolicy {
             const release = () => {
               if (released) return;
               released = true;
+              clearTimeout(memoryTimer);
               controller.abort();
               if (!req.securityContext?.providerStarted && req.guestMemoryQuotaKeys) for (const key of req.guestMemoryQuotaKeys) {
                 this.inMemoryGuestUsage.set(key, Math.max(0, (this.inMemoryGuestUsage.get(key) || 0) - 1));
@@ -180,6 +210,7 @@ export class AiPolicy {
             res.once('finish', release);
             res.once('close', release);
           } catch (error) {
+            clearTimeout(memoryTimer);
             const isBuildRequest = /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path);
             const exhaustedMsg = isBuildRequest ? GUEST_BUILD_EXHAUSTED_MESSAGE : GUEST_EXHAUSTED_MESSAGE;
             return res.status(error.status || 429).json({ code: error.code || 'GUEST_DAILY_LIMIT', error: exhaustedMsg, reply: exhaustedMsg });
@@ -354,12 +385,8 @@ export class AiPolicy {
       }
     };
   }
-  async reserveProvider(context, params) {
+  async reserveProvider(context, params, reservation = {}) {
     await this.assertEnabled();
-    if (!this.redis?.isReady) {
-      if (this.env.NODE_ENV === 'production' && (this.env.REDIS_URL || this.env.REQUIRE_REDIS === 'true')) throw fail('EXECUTION_UNAVAILABLE', 503);
-      return async () => {};
-    }
     this.ready();
     let prices = {};
     try {
@@ -376,7 +403,7 @@ export class AiPolicy {
                   DEFAULT_MODEL_PRICING[String(modelKey).toLowerCase()] ||
                   DEFAULT_MODEL_PRICING.default;
     if (!price || !Number.isFinite(price.input) || !Number.isFinite(price.output) || price.input < 0 || price.output <= 0) throw fail('MODEL_PRICING_UNAVAILABLE');
-    const tools = params.tools || params.config?.tools || [];
+    const tools = params?.tools || params?.config?.tools || [];
     const searching = tools.some(tool => tool.googleSearch || /web_search/.test(tool.type || ''));
     const searchPrice = Number.isFinite(price.search) ? price.search : 0.035;
     if (searching && (!Number.isFinite(searchPrice) || searchPrice < 0)) throw fail('TOOL_PRICING_UNAVAILABLE');
@@ -388,14 +415,59 @@ export class AiPolicy {
       }
       return value;
     });
-    const input = Buffer.byteLength(serialized || '') + Math.ceil(inlineBase64Chars / 750), output = Math.min(params.max_output_tokens || params.max_completion_tokens || params.max_tokens || params.config?.maxOutputTokens || 16384, 16384);
-    const searchCalls = searching ? (Number.isSafeInteger(params.max_tool_calls) && params.max_tool_calls > 0 ? params.max_tool_calls : 1) : 0;
+    if (reservation?.outputTokenReservation !== undefined && !isValidBuildOutputReservation(modelKey, reservation.outputTokenReservation)) throw fail('BUDGET_CONFIGURATION_INVALID');
+    const input = Buffer.byteLength(serialized || '') + Math.ceil(inlineBase64Chars / 750);
+    const output = reservation?.outputTokenReservation ?? Math.min(params?.max_output_tokens || params?.max_completion_tokens || params?.max_tokens || params?.config?.maxOutputTokens || 16384, 16384);
+    const searchCalls = searching ? (Number.isSafeInteger(params?.max_tool_calls) && params.max_tool_calls > 0 ? params.max_tool_calls : 1) : 0;
     const micros = Math.ceil(input * price.input + output * price.output + searchCalls * searchPrice * 1000000);
-    const day = new Date().toISOString().slice(0, 10), keys = [`security:budget:${day}:${context.ownerId}`, `security:budget:${day}:global`];
+    const day = new Date().toISOString().slice(0, 10), keys = [`security:budget:${day}:${context?.ownerId}`, `security:budget:${day}:global`];
     const userLimit = Number(this.env.AI_USER_DAILY_USD || 5), globalLimit = Number(this.env.AI_PLATFORM_DAILY_USD || 100);
     if (!(Number.isFinite(userLimit) && Number.isFinite(globalLimit) && userLimit > 0 && globalLimit > 0)) throw fail('BUDGET_CONFIGURATION_INVALID');
     const maxSlots = Math.max(8, Number.parseInt(this.env.AI_MAX_PROVIDER_SLOTS || '64', 10) || 64);
     const token = randomUUID(), now = Date.now();
+    if (!this.redis?.isReady) {
+      if (!this.inMemoryBudgets) this.inMemoryBudgets = new Map();
+      if (!this.inMemorySlots) this.inMemorySlots = new Map();
+      for (const [slotToken, expiry] of this.inMemorySlots) {
+        if (expiry <= now) this.inMemorySlots.delete(slotToken);
+      }
+      if (this.inMemorySlots.size >= maxSlots) throw fail('EXECUTION_BUSY', 429);
+      const userCur = this.inMemoryBudgets.get(keys[0]) || 0;
+      const globalCur = this.inMemoryBudgets.get(keys[1]) || 0;
+      if (userCur + micros > Math.floor(userLimit * 1000000) || globalCur + micros > Math.floor(globalLimit * 1000000)) {
+        throw fail('DAILY_BUDGET_EXCEEDED', 429);
+      }
+      this.inMemoryBudgets.set(keys[0], userCur + micros);
+      this.inMemoryBudgets.set(keys[1], globalCur + micros);
+      this.inMemorySlots.set(token, now + 180000);
+      let recorded = false, released = false;
+      const release = async () => {
+        if (released) return;
+        released = true;
+        this.inMemorySlots.delete(token);
+        if (!recorded) await release.refund();
+      };
+      release.recordUsage = async usage => {
+        if (recorded) return;
+        recorded = true;
+        const observedMicros = Math.ceil(usage.inputTokens * price.input + usage.outputTokens * price.output + (usage.searchUsageKnown === false ? Math.max(searchCalls, usage.searchCalls) : usage.searchCalls) * searchPrice * 1000000);
+        const delta = observedMicros - micros;
+        const floor = Math.max(0, observedMicros);
+        for (const key of keys) {
+          const cur = this.inMemoryBudgets.get(key) ?? 0;
+          this.inMemoryBudgets.set(key, Math.max(floor, cur + delta));
+        }
+      };
+      release.refund = async () => {
+        if (recorded) return;
+        recorded = true;
+        for (const key of keys) {
+          const cur = this.inMemoryBudgets.get(key) ?? 0;
+          this.inMemoryBudgets.set(key, Math.max(0, cur - micros));
+        }
+      };
+      return release;
+    }
     const accepted = await this.redis.eval(`redis.call('zremrangebyscore',KEYS[3],'-inf',ARGV[4]); if redis.call('zcard',KEYS[3]) >= ${maxSlots} then return -1 end; if tonumber(redis.call('get',KEYS[1]) or '0') + tonumber(ARGV[1]) > tonumber(ARGV[2]) or tonumber(redis.call('get',KEYS[2]) or '0') + tonumber(ARGV[1]) > tonumber(ARGV[3]) then return 0 end; for i=1,2 do redis.call('incrby',KEYS[i],ARGV[1]); redis.call('expire',KEYS[i],172800) end; redis.call('zadd',KEYS[3],ARGV[5],ARGV[6]); return 1`, { keys: [...keys, 'security:provider-slots'], arguments: [String(micros), String(Math.floor(userLimit * 1000000)), String(Math.floor(globalLimit * 1000000)), String(now), String(now + 180000), token] });
     if (accepted !== 1) throw fail(accepted === -1 ? 'EXECUTION_BUSY' : 'DAILY_BUDGET_EXCEEDED', 429);
     const heartbeat = setInterval(async () => {
@@ -413,8 +485,12 @@ export class AiPolicy {
       const observedMicros = Math.ceil(usage.inputTokens * price.input + usage.outputTokens * price.output + (usage.searchUsageKnown === false ? Math.max(searchCalls, usage.searchCalls) : usage.searchCalls) * searchPrice * 1000000);
       const modelHash = createHash('sha256').update(modelKey).digest('hex');
       const usageKeys = keys.map(key => `${key}:usage:${modelHash}`);
-      // Settle reported usage once; retain reserved search spend when the provider does not report billable search units. Missing usage keeps the full reservation.
+      // Settle reported usage once; retain reserved search spend when the provider does not report billable search units.
       await this.redis.eval("if redis.call('exists',KEYS[5]) == 1 then return 0 end; redis.call('set',KEYS[5],1,'EX',172800); for i=1,2 do local cur = tonumber(redis.call('get',KEYS[i])); local delta = tonumber(ARGV[1]) or 0; local floor = math.max(0, tonumber(ARGV[5]) or 0); local next = cur and math.max(floor, cur + delta) or floor; redis.call('set',KEYS[i],tostring(next),'EX',172800) end; for i=3,4 do redis.call('hincrby',KEYS[i],'inputTokens',ARGV[2]); redis.call('hincrby',KEYS[i],'outputTokens',ARGV[3]); redis.call('hincrby',KEYS[i],'searchCalls',ARGV[4]); redis.call('hincrby',KEYS[i],'estimatedMicros',ARGV[5]); redis.call('hincrby',KEYS[i],'calls',1); redis.call('expire',KEYS[i],172800) end; return 1", { keys: [...keys, ...usageKeys, `security:usage-record:${token}`], arguments: [String(observedMicros - micros), String(usage.inputTokens), String(usage.outputTokens), String(usage.searchCalls), String(observedMicros)] });
+    };
+    release.refund = async () => {
+      if (recorded) return;
+      await release.recordUsage({ inputTokens: 0, outputTokens: 0, searchCalls: 0, searchUsageKnown: true });
     };
     return release;
   }

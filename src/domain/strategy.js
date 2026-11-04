@@ -119,6 +119,29 @@ export const StrategySchema = z.object({
       searchEntryPoint: z.object({
         renderedContent: z.string().max(50000).nullable().optional(),
       }).strict().nullable().optional(),
+      buildMode: z.enum(["auto", "faster"]).nullable().optional(),
+      generatorModel: z.string().trim().max(100).nullable().optional(),
+      thinkingLevel: z.string().trim().max(32).nullable().optional(),
+      fasterThinkingLevel: z.enum(["medium", "high"]).nullable().optional(),
+      stageMetrics: z.array(z.object({
+        phase: z.string().trim().max(64),
+        model: z.string().trim().max(100),
+        thinkingLevel: z.string().trim().max(32).nullable().optional(),
+        latencyMs: z.number().nonnegative(),
+        firstChunkMs: z.number().nonnegative().nullable().optional(),
+        prompt_tokens: z.number().nonnegative().nullable().optional(),
+        visible_output_tokens: z.number().nonnegative().nullable().optional(),
+        thoughts_tokens: z.number().nonnegative().nullable().optional(),
+        completion_tokens: z.number().nonnegative().nullable().optional(),
+        total_tokens: z.number().nonnegative().nullable().optional(),
+        usageStatus: z.enum(["measured", "unavailable"]).nullable().optional(),
+        estimatedUsdMicros: z.number().nonnegative().nullable().optional(),
+        groundingActive: z.boolean().nullable().optional(),
+        verifiedSourcesCount: z.number().int().nonnegative().nullable().optional(),
+        attempt: z.number().int().positive().nullable().optional(),
+        location: z.string().trim().max(64).nullable().optional(),
+        fallbackUsed: z.boolean().nullable().optional(),
+      }).strict()).max(16).nullable().optional(),
     })
     .strict()
     .nullable()
@@ -136,6 +159,8 @@ export const AssessRequestSchema = z.object({
   answers: z.array(ClarificationAnswerSchema).max(10).default([]),
   round: z.number().int().min(0).max(2).default(0),
   language: z.enum(["az", "en"]).optional(),
+  buildMode: z.enum(["auto", "faster"]).optional(),
+  fasterThinkingLevel: z.enum(["medium", "high"]).optional(),
 }).strict();
 
 export const GenerateRequestSchema = z.object({
@@ -145,6 +170,8 @@ export const GenerateRequestSchema = z.object({
   idempotencyKey: z.string().trim().min(8).max(120),
   language: z.enum(["az", "en"]).optional(),
   autoSave: z.boolean().optional().default(true),
+  buildMode: z.enum(["auto", "faster"]).optional(),
+  fasterThinkingLevel: z.enum(["medium", "high"]).optional(),
 }).strict();
 
 export const RefineRequestSchema = z
@@ -156,6 +183,8 @@ export const RefineRequestSchema = z
     request: z.string().trim().max(2000).default(""),
     language: z.enum(["az", "en"]).optional(),
     idempotencyKey: z.string().trim().max(120).optional(),
+    buildMode: z.enum(["auto", "faster"]).optional(),
+    fasterThinkingLevel: z.enum(["medium", "high"]).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -189,6 +218,13 @@ export const SaveStrategyRequestSchema = z.object({
 
 export const UpdateStrategyTitleSchema = z.object({
   title: z.string().trim().min(1, "Strategiya adı boş ola bilməz.").max(300),
+}).strict();
+
+export const StrategyFeedbackSchema = z.object({
+  strategyId: z.string().trim().regex(/^[0-9a-f-]{36}$/i).nullable().optional(),
+  feedback: z.enum(["like", "dislike"]).nullable(),
+  brief: z.string().trim().max(3000).optional(),
+  title: z.string().trim().max(300).optional(),
 }).strict();
 
 export const StrategySummaryRequestSchema = z
@@ -284,12 +320,12 @@ export function validateAssessment(value) {
 }
 
 const signalMatchers = {
-  business: /\b(restoran|restaurant|cafe|kafe|brand|brend|saas|app|məhsul|product|xidmət|service|e-?commerce|mağaza|shop|şirkət|company)\b/i,
-  objective: /\b(artır|increase|launch|satış|sales|growth|böyü|repeat|təkrar|lead|conversion|konversiya|awareness|tanınma)\b/i,
-  audience: /\b(auditoriya|target|müştəri|customer|women|men|qadın|kişi|yaş|aged|b2b|b2c|student|tələbə)\b/i,
-  market: /\b(bakı|baku|azərbaycan|azerbaijan|market|bazar|region|regional|badamdar)\b/i,
-  timeline: /\b(gün|days?|weeks?|həftə|months?|ay|quarter|rüb|20\d{2})\b/i,
-  budget: /\b(azn|manat|₼|budget|büdcə|\$|€)\b/i,
+  business: /(?:^|[^\p{L}\p{N}])(restoran\p{L}*|restaurant\p{L}*|cafe\p{L}*|kafe\p{L}*|brand\p{L}*|brend\p{L}*|saas|fintech|app\p{L}*|tətbiq\p{L}*|məhsul\p{L}*|product\p{L}*|xidmət\p{L}*|service\p{L}*|e-?commerce|mağaza\p{L}*|shop\p{L}*|şirkət\p{L}*|company|platforma\p{L}*|platform\p{L}*)(?:$|[^\p{L}\p{N}])/iu,
+  objective: /(?:^|[^\p{L}\p{N}])(artır\p{L}*|artım\p{L}*|increase\p{L}*|launch\p{L}*|satış\p{L}*|sales|growth|böyü\p{L}*|repeat|təkrar|lead\p{L}*|conversion\p{L}*|konversiya\p{L}*|awareness|tanınma\p{L}*|qazan\p{L}*|icra\s+strategiya\p{L}*)(?:$|[^\p{L}\p{N}])/iu,
+  audience: /(?:^|[^\p{L}\p{N}])(auditoriya\p{L}*|target|müştəri\p{L}*|customer\p{L}*|müəssisə\p{L}*|korporativ\p{L}*|enterprise\p{L}*|women|men|qadın\p{L}*|kişi\p{L}*|yaş\p{L}*|aged|b2b|b2c|student\p{L}*|tələbə\p{L}*|seqment\p{L}*)(?:$|[^\p{L}\p{N}])/iu,
+  market: /(?:^|[^\p{L}\p{N}])(bakı\p{L}*|baku\p{L}*|azərbaycan\p{L}*|azerbaijan\p{L}*|market\p{L}*|bazar\p{L}*|region\p{L}*|badamdar\p{L}*|sumqayıt\p{L}*|gəncə\p{L}*)(?:$|[^\p{L}\p{N}])/iu,
+  timeline: /(?:^|[^\p{L}\p{N}])(gün\p{L}*|days?|weeks?|həftə\p{L}*|months?|ay\p{L}*|quarter\p{L}*|rüb\p{L}*|20\d{2})(?:$|[^\p{L}\p{N}])/iu,
+  budget: /(?:^|[^\p{L}\p{N}])(azn|manat\p{L}*|budget\p{L}*|büdcə\p{L}*|usd|eur)(?:$|[^\p{L}\p{N}])|[₼$€]/iu,
 };
 
 export function analyzeBriefSignals(brief) {
@@ -304,6 +340,116 @@ export function analyzeBriefSignals(brief) {
     missing: Object.entries(signals)
       .filter(([, found]) => !found)
       .map(([name]) => name),
+  };
+}
+
+const explicitNoQuestionsPattern = /(əlavə\s+sual\s+verm[əe]\S*|sual\s+verm[əe]\S*|suallarsız|birbaşa\s+strategiyanı\s+hazırla|birbaşa\s+generasiya|\bdo\s+not\s+ask\s+(?:any\s+)?(?:clarifying\s+)?questions\b|\bno\s+clarifying\s+questions\b|\bskip\s+questions\b|\bproceed\s+directly\b)/iu;
+const unresolvedPlaceholderPattern = /\b(tbd|todo|naməlum|hələ\s+bilinmir|qərarlaşdırılmayıb)\b|\?\?\?/i;
+const executionScopePattern = /(?:^|[^\p{L}\p{N}])(kpi\p{L}*|cac|ltv|mrr|arr|arpu|arpa|marja\p{L}*|margin\p{L}*|roi|kanal\p{L}*|channel\p{L}*|mərhələ\p{L}*|phase\p{L}*|struktur\p{L}*|arxitektura\p{L}*|architecture|komanda\p{L}*|team|qiymət\p{L}*|pricing|paket\p{L}*|tier\p{L}*|konversiya\p{L}*|conversion|məhdudiyyət\p{L}*|constraint\p{L}*|risk\p{L}*|hədəf\p{L}*|target\p{L}*|unit\s+ekonomika\p{L}*|unit\s+economics)(?:$|[^\p{L}\p{N}])/iu;
+
+export function evaluateBriefSufficiency(brief, { round = 0, answers = [] } = {}) {
+  const text = String(brief || "").trim();
+  if (!text) {
+    return { sufficient: false, reason: "empty_brief", signals: null };
+  }
+  const signalAnalysis = analyzeBriefSignals(text);
+  if (round >= 2 || (Array.isArray(answers) && answers.length > 0 && round >= 1)) {
+    return { sufficient: true, reason: "clarification_round_completed", signals: signalAnalysis };
+  }
+  if (explicitNoQuestionsPattern.test(text) && signalAnalysis.signals.business && signalAnalysis.signals.objective) {
+    return { sufficient: true, reason: "explicit_no_questions_directive", signals: signalAnalysis };
+  }
+  const hasCoreDimensions =
+    signalAnalysis.signals.business &&
+    signalAnalysis.signals.objective &&
+    signalAnalysis.signals.audience &&
+    signalAnalysis.signals.market &&
+    (signalAnalysis.signals.timeline || signalAnalysis.signals.budget);
+  const hasScopeAndConstraints = executionScopePattern.test(text);
+  const hasUnresolvedPlaceholders = unresolvedPlaceholderPattern.test(text);
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+
+  if (
+    signalAnalysis.score >= 5 &&
+    hasCoreDimensions &&
+    hasScopeAndConstraints &&
+    !hasUnresolvedPlaceholders &&
+    wordCount >= 35
+  ) {
+    return { sufficient: true, reason: "multi_dimensional_semantic_sufficiency", signals: signalAnalysis };
+  }
+
+  return { sufficient: false, reason: "needs_assessment", signals: signalAnalysis };
+}
+
+const INLINE_GROUNDING_REDIRECT_REGEX = /\s*\(?https?:\/\/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\/[^\s)"'\]]+\)?/gi;
+
+function cleanRedirectString(str) {
+  if (typeof str !== "string" || !str.includes("vertexaisearch.cloud.google.com/grounding-api-redirect/")) {
+    return str;
+  }
+  return str.replace(INLINE_GROUNDING_REDIRECT_REGEX, "").replace(/\s{2,}/g, " ").trim();
+}
+
+export function stripInlineGroundingRedirectUrls(strategy) {
+  if (!strategy || typeof strategy !== "object") return strategy;
+  return {
+    ...strategy,
+    title: cleanRedirectString(strategy.title),
+    summary: cleanRedirectString(strategy.summary),
+    context: strategy.context
+      ? {
+          business: cleanRedirectString(strategy.context.business),
+          objective: cleanRedirectString(strategy.context.objective),
+          market: cleanRedirectString(strategy.context.market),
+          targetAudience: cleanRedirectString(strategy.context.targetAudience),
+        }
+      : strategy.context,
+    sections: Array.isArray(strategy.sections)
+      ? strategy.sections.map((s) => ({
+          ...s,
+          title: cleanRedirectString(s.title),
+          summary: cleanRedirectString(s.summary),
+          content: cleanRedirectString(s.content),
+          bullets: Array.isArray(s.bullets) ? s.bullets.map(cleanRedirectString) : s.bullets,
+        }))
+      : strategy.sections,
+    priorities: Array.isArray(strategy.priorities)
+      ? strategy.priorities.map((p) => ({
+          ...p,
+          title: cleanRedirectString(p.title),
+          description: cleanRedirectString(p.description),
+        }))
+      : strategy.priorities,
+    actionPlan: Array.isArray(strategy.actionPlan)
+      ? strategy.actionPlan.map((a) => ({
+          ...a,
+          phase: cleanRedirectString(a.phase),
+          actions: Array.isArray(a.actions) ? a.actions.map(cleanRedirectString) : a.actions,
+          expectedOutcome: cleanRedirectString(a.expectedOutcome),
+        }))
+      : strategy.actionPlan,
+    kpis: Array.isArray(strategy.kpis)
+      ? strategy.kpis.map((k) => ({
+          ...k,
+          name: cleanRedirectString(k.name),
+          reason: cleanRedirectString(k.reason),
+          target: cleanRedirectString(k.target),
+        }))
+      : strategy.kpis,
+    risks: Array.isArray(strategy.risks)
+      ? strategy.risks.map((r) => ({
+          ...r,
+          risk: cleanRedirectString(r.risk),
+          mitigation: cleanRedirectString(r.mitigation),
+        }))
+      : strategy.risks,
+    assumptions: Array.isArray(strategy.assumptions)
+      ? strategy.assumptions.map(cleanRedirectString)
+      : strategy.assumptions,
+    nextSteps: Array.isArray(strategy.nextSteps)
+      ? strategy.nextSteps.map(cleanRedirectString)
+      : strategy.nextSteps,
   };
 }
 
