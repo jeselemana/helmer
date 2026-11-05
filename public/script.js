@@ -3858,69 +3858,7 @@ function addPresetPromptPane(popover, mode, onSelect, onBack) {
 }
 
 function createMainAiHubTeaserCard(isEn) {
-  const STORAGE_KEY = "helmer_limit_policy_notice_dismissed";
-  try {
-    if (localStorage.getItem(STORAGE_KEY) === "1" || localStorage.getItem(STORAGE_KEY) === "dismissed") return null;
-  } catch { }
-
-  const card = element("aside", "main-ai-hub-teaser limit-policy-teaser-card");
-  card.id = "mainAiHubTeaser";
-  card.setAttribute("role", "region");
-  card.setAttribute("aria-label", isEn ? "Limit policy notice" : "Limit siyasəti xəbərdarlığı");
-
-  const dismissTeaser = () => {
-    try {
-      localStorage.setItem(STORAGE_KEY, "1");
-    } catch { }
-    card.classList.add("is-dismissing");
-    setTimeout(() => card.remove(), 200);
-  };
-
-  const header = element("div", "main-ai-hub-header");
-  const leftGroup = element("div", "main-ai-hub-left-group");
-
-  const badge = element(
-    "span",
-    "main-ai-hub-badge",
-    isEn ? "Notice · 24.10.2026" : "Xəbərdarlıq · 24.10.2026"
-  );
-  leftGroup.append(badge);
-
-  const closeBtn = document.createElement("button");
-  closeBtn.type = "button";
-  closeBtn.className = "main-ai-hub-close";
-  closeBtn.setAttribute("aria-label", t("limitPolicyNotice.closeAria") || (isEn ? "Close" : "Bağla"));
-  closeBtn.title = t("limitPolicyNotice.closeAria") || (isEn ? "Close" : "Bağla");
-  closeBtn.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
-  closeBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    dismissTeaser();
-  });
-
-  header.append(leftGroup, closeBtn);
-
-  const descText = t("limitPolicyNotice.body") || (isEn
-    ? "Effective October 24, 2026, we have updated the limit policy in Helmer. Please note that this change applies only to unregistered users, while limits for registered accounts remain unchanged. Thank you for your understanding!"
-    : "24.10.2026-cı il tarixindən etibarən Helmer-də limit siyasətinə dəyişiklik etdik. Bildirmək istəyirik ki, bu dəyişiklik yalnız qeydiyyatsız istifadəçilər üçün nəzərdə tutulmuşdur və qeydiyyatlı hesablarda limitlər dəyişilməz olaraq saxlanılıb. Anlayışınıza görə təşəkkür edirik!"
-  );
-  const desc = element("p", "main-ai-hub-desc", descText);
-
-  const footer = element("div", "main-ai-hub-footer");
-
-  const closeActionBtn = button(
-    t("limitPolicyNotice.closeBtn") || (isEn ? "Close" : "Bağla"),
-    "main-ai-hub-btn main-ai-hub-btn-ignore",
-    (e) => {
-      e.stopPropagation();
-      dismissTeaser();
-    }
-  );
-  closeActionBtn.type = "button";
-
-  footer.append(closeActionBtn);
-  card.append(header, desc, footer);
-
-  return card;
+  return null;
 }
 
 export function closeGuideModal() {

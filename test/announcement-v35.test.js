@@ -69,19 +69,3 @@ test("style.css: v3.5 clean release toast card styles and support notice removal
   assert.ok(css.includes(".v35-toast-progress-bar {"), "progress bar is defined for v35 toast");
   assert.ok(css.includes("[data-theme=\"dark\"] .v35-release-toast"), "Dark mode support exists for v35 toast");
 });
-
-test("limitPolicyNotice: displays exact notice text in place of SI Hub teaser and permanently dismisses via localStorage on X or Bağla", async () => {
-  assert.equal(
-    t("limitPolicyNotice.body", {}, "az"),
-    "24.10.2026-cı il tarixindən etibarən Helmer-də limit siyasətinə dəyişiklik etdik. Bildirmək istəyirik ki, bu dəyişiklik yalnız qeydiyyatsız istifadəçilər üçün nəzərdə tutulmuşdur və qeydiyyatlı hesablarda limitlər dəyişilməz olaraq saxlanılıb. Anlayışınıza görə təşəkkür edirik!"
-  );
-  assert.equal(t("limitPolicyNotice.closeBtn", {}, "az"), "Bağla");
-  assert.equal(t("limitPolicyNotice.closeAria", {}, "az"), "Bağla");
-
-  const scriptContent = await fs.readFile(path.join(process.cwd(), "public/script.js"), "utf8");
-  assert.ok(scriptContent.includes("function createMainAiHubTeaserCard(isEn)"));
-  assert.ok(scriptContent.includes('const STORAGE_KEY = "helmer_limit_policy_notice_dismissed";'));
-  assert.ok(scriptContent.includes('localStorage.setItem(STORAGE_KEY, "1")'));
-  assert.ok(!scriptContent.includes('sessionStorage.setItem("helmer_limit_policy_notice_dismissed"'));
-  assert.ok(!scriptContent.includes('"SI Hub yaxında"'));
-});
