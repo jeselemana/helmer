@@ -441,9 +441,10 @@ async function handleGoogleCredential(response) {
 }
 
 function googleButtonOptions() {
+  const isDark = document.documentElement.dataset.theme === "dark";
   return {
     type: "standard",
-    theme: document.documentElement.dataset.theme === "dark" ? "filled_black" : "outline",
+    theme: isDark ? "outline_dark" : "outline",
     size: "large",
     text: "continue_with",
     shape: "rectangular",

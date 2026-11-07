@@ -32,7 +32,6 @@ import { createPlannerRouter } from "./src/http/planner-router.js";
 import { getOpenAIClient } from "./src/services/ai/client.js";
 import { httpStatusOf, publicErrorMessage } from "./src/http/error-response.js";
 import { geminiFileCache } from "./src/services/ai/gemini-file-cache.js";
-import { evaluateSearchRoute } from "./src/services/ai/search-router.js";
 import { ASK_INSTRUCTIONS, GUEST_RESTRICTION_NOTICES } from "./src/services/ai/prompts.js";
 import { FileAiLearningRepository } from "./src/repositories/file-ai-learning-repository.js";
 import { LearningLoopService } from "./src/services/learning/learning-loop-service.js";
@@ -42,7 +41,7 @@ import { TelemetryService } from "./src/services/telemetry/telemetry-service.js"
 import { createTelemetryAdminRouter, createTelemetryClientRouter } from "./src/http/telemetry-router.js";
 import { createAdminMfaRouter } from "./src/auth/admin-mfa.js";
 import { validateSecurityConfig, guestDailyLimit, guestBuildDailyLimit } from "./src/services/security/config.js";
-import { AiPolicy } from "./src/services/security/ai-policy.js";
+import { AiPolicy, ASK_REQUESTS_PER_MINUTE } from "./src/services/security/ai-policy.js";
 import { configureProviderPolicy } from "./src/services/security/provider-policy.js";
 import { CleanupQueue } from "./src/services/security/cleanup-queue.js";
 import { DurableStore } from "./src/services/security/durable-store.js";
@@ -344,7 +343,8 @@ setInterval(() => {
 }, 60 * 60 * 1000).unref();
 
 const requireAdmin = createRequireAdmin(adminUsernames);
-const aiPolicy = new AiPolicy({ redis });
+const allowParallelAskChats = true;
+const aiPolicy = new AiPolicy({ redis, allowParallelAskChats });
 configureProviderPolicy(aiPolicy);
 
 
@@ -818,14 +818,15 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
-function askRateLimit(limit = 60, windowMs = 10 * 60 * 1000) {
+function askRateLimit(limit = 60, windowMs = 10 * 60 * 1000, scope = "ask") {
   return (req, res, next) => {
     const now = Date.now();
     const clientIp = getClientIp(req);
     const identifier = req.user?.id ? `user:${req.user.id}` : `ip:${clientIp}`;
-    const key = `ask:${identifier}`;
+    const key = `${scope}:${identifier}`;
     const history = (askRequestWindows.get(key) || []).filter((timestamp) => now - timestamp < windowMs);
     if (history.length >= limit) {
+      res.setHeader("Retry-After", String(Math.max(1, Math.ceil((history[0] + windowMs - now) / 1000))));
       return res.status(429).json({
         code: "RATE_LIMITED",
         error: "Hazırda çox sayda Ask sorğusu göndərilib. Zəhmət olmasa bir neçə dəqiqə sonra yenidən cəhd edin.",
@@ -837,18 +838,25 @@ function askRateLimit(limit = 60, windowMs = 10 * 60 * 1000) {
   };
 }
 
+const localForegroundAskRateLimit = askRateLimit(ASK_REQUESTS_PER_MINUTE, 60000, "ask-minute");
+const standardAskRateLimit = askRateLimit(60);
+function foregroundAskRateLimit(req, res, next) {
+  if (allowParallelAskChats && req.user && req.body?.mode !== "research") {
+    if (redis?.isReady) return next();
+    return localForegroundAskRateLimit(req, res, next);
+  }
+  return standardAskRateLimit(req, res, next);
+}
+
 const generateAsk = createAskService({ sanitizeGroundingMetadata: sanitizeAskGroundingMetadata });
 
 const capabilityWorkflow = new CapabilityWorkflow({
   registry: pluginRegistry, artifacts: artifactRepository,
   research: createWebResearch({
     geminiResearch: async ({ messages, instructions, signal, onChunk }) => {
-      const lastUserPrompt = Array.isArray(messages) ? messages.filter((m) => m && m.role === "user").at(-1)?.content || "" : "";
-      const routeDecision = evaluateSearchRoute({ prompt: lastUserPrompt, messages });
-      const strictGrounding = Boolean(routeDecision.requireGrounding);
       const researchInstructions = `${ASK_INSTRUCTIONS}\nResearch the user's request with live Google Search. Cite sources; never fabricate unavailable statistics.`;
       return generateAsk({ messages, instructions: researchInstructions, referenceContext: instructions,
-        enableSearch: true, requireGrounding: strictGrounding, onChunk, signal,
+        enableSearch: true, requireGrounding: true, onChunk, signal,
         ownerId: executionContext.getStore()?.ownerId,
       });
     },
@@ -865,13 +873,13 @@ const researchService = new ResearchService({
 });
 researchService.resumeOrphanedJobs().catch(() => {});
 app.use("/api/ask/research", requireAuth, createResearchRouter({ researchService, chatRepository, rateLimit: askRateLimit(20) }));
-app.use("/api/ask", createAskExecutionGuard({ redis, allowGuest: true, hasActiveJobForOwner: ownerId => researchService.hasActiveJobForOwner(ownerId) }), createCapabilityRouter({ allowGuestChat: true, registry: pluginRegistry, workflow: capabilityWorkflow, artifacts: artifactRepository, chats: chatRepository, strategies: strategyRepository, planner: plannerRepository, rateLimit: askRateLimit(60),
+app.use("/api/ask", createAskExecutionGuard({ redis, allowGuest: true, allowParallelChats: allowParallelAskChats, hasActiveJobForOwner: ownerId => researchService.hasActiveJobForOwner(ownerId) }), createCapabilityRouter({ allowGuestChat: true, registry: pluginRegistry, workflow: capabilityWorkflow, artifacts: artifactRepository, chats: chatRepository, strategies: strategyRepository, planner: plannerRepository, rateLimit: foregroundAskRateLimit,
   hydrateFile: (file, ownerId) => geminiFileCache.resolveFile(file, ownerId),
   onComplete: ({ req, result }) => telemetryService.trackAskQuery({ ownerId: req.ownerId, sessionId: req.guestOwnerId, model: result.model, latencyMs: Date.parse(result.execution.completedAt) - Date.parse(result.execution.startedAt), usage: result.usage, groundingActive: Boolean(result.groundingMetadata), status: "success", querySnippet: "", onlyNecessaryData: true, modelImprovement: false }).catch(() => {}),
 }));
 app.use("/api/artifacts", createArtifactRouter({ artifacts: artifactRepository, chats: chatRepository }));
 
-app.post("/api/ask", askRateLimit(60), createAskHandler({
+app.post("/api/ask", foregroundAskRateLimit, createAskHandler({
   chatRepository, strategyRepository, plannerRepository, researchService, learningLoop, telemetryService,
   sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
   generateAsk,

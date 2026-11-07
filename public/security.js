@@ -66,7 +66,7 @@
             });
             window.google.accounts.id.renderButton(googleSlot, {
               type: "standard",
-              theme: document.documentElement.dataset.theme === "dark" ? "filled_black" : "outline",
+              theme: document.documentElement.dataset.theme === "dark" ? "outline_dark" : "outline",
               size: "large",
               text: "continue_with",
               shape: "rectangular",

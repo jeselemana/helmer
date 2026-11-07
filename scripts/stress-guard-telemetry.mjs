@@ -7,7 +7,7 @@ import { createAskExecutionGuard } from "../src/http/ask-execution-guard.js";
 import { FileTelemetryRepository } from "../src/repositories/file-telemetry-repository.js";
 
 // Helper to create mock Express req/res
-function createMockHttp({ method = "POST", path = "/", ownerId = "tenant-1", user = { id: "user-1" } } = {}) {
+function createMockHttp({ method = "POST", path = "/", ownerId = "tenant-1", user = { id: ownerId, emailVerifiedAt: "fixture" } } = {}) {
   const req = {
     method,
     path,
@@ -364,7 +364,7 @@ async function runAllStressTests() {
     await Promise.all(writePromises);
 
     // 1. Read file directly from disk
-    const rawContent = await fs.readFile(filePath, "utf8");
+    const rawContent = await fs.readFile(path.join(repo.shardsDirectory, `${repo.tenantKey(null)}.json`), "utf8");
     assert.ok(rawContent.length > 0, "Telemetry file must not be 0 bytes");
 
     let parsed;
@@ -378,8 +378,8 @@ async function runAllStressTests() {
     assert.equal(parsed.events.length, writeCount, `Expected exactly ${writeCount} events recorded`);
 
     // 2. Check for leftover .tmp files
-    const allFiles = await fs.readdir(tempDir);
-    const tmpFiles = allFiles.filter((f) => f.includes("telemetry-50") && f.endsWith(".tmp"));
+    const allFiles = await fs.readdir(repo.shardsDirectory);
+    const tmpFiles = allFiles.filter((f) => f.endsWith(".tmp"));
     assert.equal(tmpFiles.length, 0, `No leftover .tmp files allowed, found: ${tmpFiles.join(", ")}`);
   });
 
@@ -401,14 +401,14 @@ async function runAllStressTests() {
 
     await Promise.all(writePromises);
 
-    const rawContent = await fs.readFile(filePath, "utf8");
+    const rawContent = await fs.readFile(path.join(repo.shardsDirectory, `${repo.tenantKey(null)}.json`), "utf8");
     assert.ok(rawContent.length > 0, "File must not be 0 bytes");
 
     const parsed = JSON.parse(rawContent);
     assert.equal(parsed.events.length, writeCount);
 
-    const allFiles = await fs.readdir(tempDir);
-    const tmpFiles = allFiles.filter((f) => f.includes("telemetry-100") && f.endsWith(".tmp"));
+    const allFiles = await fs.readdir(repo.shardsDirectory);
+    const tmpFiles = allFiles.filter((f) => f.endsWith(".tmp"));
     assert.equal(tmpFiles.length, 0, "Zero .tmp files remaining");
   });
 
@@ -457,8 +457,8 @@ async function runAllStressTests() {
     assert.equal(writeSuccessCount, 40);
     assert.equal(readSuccessCount, 80);
 
-    const allFiles = await fs.readdir(tempDir);
-    const tmpFiles = allFiles.filter((f) => f.includes("telemetry-interleaved") && f.endsWith(".tmp"));
+    const allFiles = await fs.readdir(repo.shardsDirectory);
+    const tmpFiles = allFiles.filter((f) => f.endsWith(".tmp"));
     assert.equal(tmpFiles.length, 0, "Zero .tmp files remaining after interleaved operations");
   });
 
@@ -528,7 +528,7 @@ async function runAllStressTests() {
   app.use((req, res, next) => {
     const userHeader = req.headers["x-test-user"];
     if (userHeader) {
-      req.auth = { user: { id: userHeader } };
+      req.auth = { user: { id: userHeader, emailVerifiedAt: "fixture" } };
       req.user = req.auth.user;
       req.ownerId = userHeader;
     }

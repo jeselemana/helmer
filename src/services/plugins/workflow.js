@@ -1,3 +1,4 @@
+import { isGroundedAssistantMessage } from '../ai/grounded-chat-retention.js';
 import { assertExecutionAuthorized } from '../security/execution-control.js';
 import { randomUUID } from "node:crypto";
 import { zodResponseFormat } from "openai/helpers/zod";
@@ -37,6 +38,7 @@ export class CapabilityWorkflow {
     const timer = setTimeout(() => controller.abort(new Error("Capability execution timed out")), this.timeoutMs);
     const execution = { id: randomUUID(), intent: plugins.some(plugin => plugin.capabilities.includes("artifact_generation")) ? "artifact_generation" : plugins.some(plugin => plugin.capabilities.includes("web_research")) ? "web_research" : "capability_execution", status: "running", steps: [], startedAt: new Date().toISOString() };
     const outputs = [], pending = [];
+    const modelMessages = messages.filter(message => !isGroundedAssistantMessage(message));
     const artifacts = [];
     let generatedModel = "", usage = null;
     const check = () => { if (controller.signal.aborted) throw controller.signal.reason || new Error("Execution canceled"); };
@@ -48,13 +50,13 @@ export class CapabilityWorkflow {
         if (plugin.permissionRequirements.some(scope => !scopes.has(scope))) throw new Error("Plugin permission denied");
         const step = { pluginId: plugin.id, status: "running", startedAt: new Date().toISOString() }; execution.steps.push(step);
         const result = await bounded(() => plugin.execute({
-          request: { prompt, ownerId, chatId, ...(plugin.permissionRequirements.includes("context:read") ? { messages, sourceContext } : {}) },
-          outputs, signal: controller.signal,
+          request: { prompt, ownerId, chatId, ...(plugin.permissionRequirements.includes("context:read") ? { messages: modelMessages, sourceContext } : {}) },
+          outputs: outputs.filter(output => output.type !== "research"), signal: controller.signal,
           research: async () => {
             if (!plugin.permissionRequirements.includes("web:search") || !scopes.has("web:search")) throw new Error("Plugin permission denied");
             report("searching", "Vebdə mənbələri araşdırıram...", "Researching web sources...");
             const streamChunks = plugins.length === 1 && typeof onChunk === "function" ? onChunk : undefined;
-            const research = await bounded(() => this.researchHandler({ messages, instructions: sourceContext, signal: controller.signal, onChunk: streamChunks }), controller.signal);
+            const research = await bounded(() => this.researchHandler({ messages: modelMessages, instructions: sourceContext, signal: controller.signal, onChunk: streamChunks }), controller.signal);
             check();
             const sources = research.groundingMetadata?.groundingChunks?.filter(chunk => /^https?:\/\//i.test(chunk.web?.uri || "")) || [];
             if (!research.text?.trim() || (!sources.length && !research.ungroundedFallback)) throw new Error("Veb mənbələri təsdiqlənmədi. Yenidən cəhd edin.");
@@ -75,11 +77,8 @@ export class CapabilityWorkflow {
             let route = resolveAskModelRoute({ requestedModel, lastUserMsg: prompt, hasStrategyContext: Boolean(sourceContext), hasAttachment: messages.some(message => message.file) });
             if ((hasGroundedResearch || !hasOpenAIConfiguration()) && hasGeminiConfiguration()) route = "gemini-3.8-flash";
             report("structuring", ...(status[definition.id] || ["Məlumatları analiz edirəm...", "Analyzing the information..."]));
-            const conversationContext = messages.slice(-20).map(({ role, content, file }) => ({ role, content, ...(file?.textContent ? { uploadedText: file.textContent } : {}) }));
-            const input = JSON.stringify({ request: prompt, sourceContext, conversation: conversationContext, previous: base?.versions.at(-1)?.spec || null, referenceArtifact: previous?.versions.at(-1)?.spec || null, priorOutputs: outputs });
-            const fallbackInput = hasGroundedResearch
-              ? JSON.stringify({ request: prompt, sourceContext, conversation: conversationContext, previous: base?.versions.at(-1)?.spec || null, referenceArtifact: previous?.versions.at(-1)?.spec || null, priorOutputs: outputs.filter(output => output.type !== "research") })
-              : undefined;
+            const conversationContext = modelMessages.slice(-20).map(({ role, content, file }) => ({ role, content, ...(file?.textContent ? { uploadedText: file.textContent } : {}) }));
+            const input = JSON.stringify({ request: prompt, sourceContext, conversation: conversationContext, previous: base?.versions.at(-1)?.spec || null, referenceArtifact: previous?.versions.at(-1)?.spec || null, priorOutputs: outputs.filter(output => output.type !== "research") });
             if (input.length > 1800000) throw new Error("Artifact context limit exceeded");
             let data;
             let repairFeedback = "";
@@ -87,7 +86,7 @@ export class CapabilityWorkflow {
             for (let attempt = 0; attempt < 2; attempt++) {
               check();
               try {
-                const response = await bounded(() => this.generate({ schema, name: "artifact_specification", instructions: instructions + repairFeedback, input, ...(fallbackInput ? { fallbackInput } : {}), ownerId, signal: controller.signal, askRoute: route, maxOutputTokens: 24576, attachments: messages.filter(message => message.file?.data && !message.file.textContent).map(message => message.file) }), controller.signal);
+                const response = await bounded(() => this.generate({ schema, name: "artifact_specification", instructions: instructions + repairFeedback, input, ownerId, signal: controller.signal, askRoute: route, maxOutputTokens: 24576, attachments: modelMessages.filter(message => message.file?.data && !message.file.textContent).map(message => message.file) }), controller.signal);
                 check(); data = schema.parse(response.data); generatedModel = response.model; usage = response.usage; break;
               } catch (error) {
                 if (attempt || controller.signal.aborted || !(error.name === "ZodError" || error.code === "AI_INVALID_OUTPUT")) throw error;
@@ -98,29 +97,6 @@ export class CapabilityWorkflow {
             }
             const spec = base ? applyArtifactEdits(base.versions.at(-1).spec, data, definition.schemas.spec) : definition.schemas.spec.parse(data);
             if (JSON.stringify(spec).length > 1500000) throw new Error("Artifact specification size limit exceeded");
-            const research = outputs.find(output => output.type === "research");
-            if (research && !spec.citations.length) {
-              spec.citations = (research.groundingMetadata?.groundingChunks || [])
-                .slice(0, 30)
-                .map(chunk => {
-                  let hostname = "";
-                  try {
-                    hostname = new URL(chunk.web?.uri || "").hostname;
-                  } catch {}
-                  return {
-                    title: (chunk.web?.title || hostname || "Source").slice(0, 180),
-                    url: chunk.web?.uri || "",
-                  };
-                })
-                .filter(c => {
-                  try {
-                    const parsed = new URL(c.url);
-                    return parsed.protocol === "http:" || parsed.protocol === "https:";
-                  } catch {
-                    return false;
-                  }
-                });
-            }
             report("rendering", "Faylı render edirəm...", "Rendering the file...");
             const buffer = await this.render(definition.extension, spec, { signal: controller.signal }); check();
             pending.push({ plugin: definition, spec, buffer, previous: base });
@@ -131,7 +107,7 @@ export class CapabilityWorkflow {
         if (!result || !plugin.outputTypes.includes(result.type) || JSON.stringify(result).length > 1800000) throw new Error("Invalid plugin output");
         outputs.push(result);
         step.status = "completed"; step.completedAt = new Date().toISOString(); step.outputType = result.type;
-        step.output = result.spec ? { type: result.type } : result;
+        step.output = result.spec || result.type === "research" ? { type: result.type } : result;
       }
       report("saving", "Faylı təhlükəsiz saxlayıram...", "Saving the file securely...");
       execution.status = "completed"; execution.completedAt = new Date().toISOString();
@@ -148,7 +124,7 @@ export class CapabilityWorkflow {
       }
       const research = outputs.find(output => output.type === "research");
       return { artifacts, execution, groundingMetadata: research?.groundingMetadata, model: generatedModel, usage,
-        reply: artifacts.length ? (language === "en" ? "Your files are ready. You can preview, download or edit them below." : "Fayllar hazırdır. Aşağıdan aça, yükləyə və redaktə edə bilərsiniz.") : research?.text || outputs.at(-1)?.text || outputs.at(-1)?.summary || (language === "en" ? "The task is complete." : "Tapşırıq tamamlandı.") };
+        reply: research?.text || (artifacts.length ? (language === "en" ? "Your files are ready. You can preview, download or edit them below." : "Fayllar hazırdır. Aşağıdan aça, yükləyə və redaktə edə bilərsiniz.") : outputs.at(-1)?.text || outputs.at(-1)?.summary || (language === "en" ? "The task is complete." : "Tapşırıq tamamlandı.")) };
     } catch (error) {
       for (const artifact of artifacts.reverse()) await this.artifacts.rollback?.(artifact, ownerId).catch(() => {});
       execution.status = "failed"; execution.completedAt = new Date().toISOString();

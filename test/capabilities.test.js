@@ -70,6 +70,7 @@ test("registry routes explicit selections before implicit intent and supports fu
   assert.equal(resolveCapabilityIntent({ registry, prompt: "Bunun təqdimatını yarat" }).plugins[0].id, "powerpoint");
   assert.equal(resolveCapabilityIntent({ registry, pluginIds: ["pdf"], prompt: "Word sənədi hazırla" }).plugins[0].id, "pdf");
   assert.equal(resolveCapabilityIntent({ registry, prompt: "What is Excel?" }).intent, "chat");
+  assert.equal(resolveCapabilityIntent({ registry, prompt: "İlk 90 gün üçün real fəaliyyət planı hazırla və 1C əvəzinə Excel/CSV ixracı ilə başla." }).intent, "chat");
   assert.equal(resolveCapabilityIntent({ registry, pluginIds: ["word", "web"], prompt: "Research then report" }).plugins[0].id, "web");
   const future = createPluginRegistry();
   future.register({ id: "drive", name: "Drive", icon: "document", description: "Read Drive", capabilities: ["external_read"], acceptedInputs: ["text"], outputTypes: ["research"], permissionRequirements: ["drive:read"], availability: () => true, execute: async () => ({ type: "research", text: "Document" }) });
@@ -140,14 +141,15 @@ test("an explicit Word selection targets the saved Word artifact even when a PDF
   assert.equal(edited.artifacts[0].version, 2);
 });
 
-test("Web research returns safe sources and research output becomes the next tool's context", async t => {
+test("Web research returns safe sources and grounded output stays out of artifact prompts", async t => {
   const h = await harness(t);
   const result = await (await h.post({ pluginIds: ["web", "word"], messages: [{ role: "user", content: "Research the fintech market and create Word report" }] })).json();
   assert.equal(result.execution.steps.length, 2); assert.deepEqual(result.execution.steps.map(step => step.pluginId), ["web", "word"]);
   assert.equal(result.groundingMetadata.groundingChunks.length, 1);
-  assert.match(h.calls[0].input, /Grounded market analysis/);
+  assert.doesNotMatch(h.calls[0].input, /Grounded market analysis/);
+  assert.match(result.reply, /Grounded market analysis/);
   const webOnly = await (await h.post({ pluginIds: ["web"], messages: [{ role: "user", content: "Research market" }] })).json();
-  assert.equal(webOnly.artifacts.length, 0); assert.equal(webOnly.reply, researchOutput.text);
+  assert.equal(webOnly.ordinaryChat, true);
 });
 
 test("Web → Excel → PowerPoint renders downloadable files and shares structured intermediate data", async t => {
@@ -160,8 +162,8 @@ test("Web → Excel → PowerPoint renders downloadable files and shares structu
   const result = await response.json();
   assert.equal(response.status, 200);
   assert.deepEqual(result.execution.steps.map(step => step.pluginId), ["web", "excel", "powerpoint"]);
-  assert.equal(inputs[1].priorOutputs[1].type, "xlsx");
-  assert.equal(inputs[1].priorOutputs[1].spec.units[0].rows[3][1].formula, "SUM(B2:B3)");
+  assert.equal(inputs[1].priorOutputs[0].type, "xlsx");
+  assert.equal(inputs[1].priorOutputs[0].spec.units[0].rows[3][1].formula, "SUM(B2:B3)");
   assert.equal(result.artifacts.length, 2);
   for (const artifact of result.artifacts) {
     const download = await h.get(artifact.downloadUrl);

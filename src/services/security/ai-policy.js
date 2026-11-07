@@ -4,9 +4,38 @@ import { BUILD_OUTPUT_RESERVATIONS, isValidBuildOutputReservation } from '../ai/
 import { guestDailyLimit, guestBuildDailyLimit } from './config.js';
 import { GUEST_EXHAUSTED_MESSAGE, GUEST_BUILD_EXHAUSTED_MESSAGE, GUEST_RESTRICTION_NOTICES, detectGuestFunctionalRestriction } from '../ai/prompts.js';
 import { resolveAskThinkingLevel } from '../ai/ask-routing.js';
+import { acquireSharedAskLease } from './owner-execution-lease.js';
 import { requestFingerprint } from './request-fingerprint.js';
 
 const fail = (code, status = 503) => Object.assign(new Error(code), { code, status });
+export const ASK_REQUESTS_PER_MINUTE = 15;
+const ASK_IP_REQUESTS_PER_MINUTE = 60;
+const ASK_RATE_WINDOW_MS = 60000;
+
+function reserveAskRate(redis, actor, ip, token) {
+  return redis.eval(`
+    local t = redis.call('TIME')
+    local now = t[1] * 1000 + math.floor(t[2] / 1000)
+    local window = tonumber(ARGV[2])
+    local retry = 0
+    for i, key in ipairs(KEYS) do
+      redis.call('zremrangebyscore', key, '-inf', now - window)
+      if redis.call('zcard', key) >= tonumber(ARGV[i + 2]) then
+        local oldest = redis.call('zrange', key, 0, 0, 'WITHSCORES')
+        retry = math.max(retry, tonumber(oldest[2]) + window - now)
+      end
+    end
+    if retry > 0 then return math.ceil(retry / 1000) end
+    for _, key in ipairs(KEYS) do
+      redis.call('zadd', key, now, ARGV[1])
+      redis.call('pexpire', key, window)
+    end
+    return 0
+  `, {
+    keys: [`security:ask-minute:${actor}`, `security:ask-minute-ip:${ip}`],
+    arguments: [token, String(ASK_RATE_WINDOW_MS), String(ASK_REQUESTS_PER_MINUTE), String(ASK_IP_REQUESTS_PER_MINUTE)],
+  });
+}
 
 export const DEFAULT_MODEL_PRICING = Object.freeze({
   get 'gemini-4-argon'() {
@@ -60,7 +89,9 @@ export function aiRequestTimeoutMs(req) {
   return 180000;
 }
 export class AiPolicy {
-  constructor({ redis, env = process.env, fetcher = fetch }) { this.redis = redis; this.env = env; this.fetcher = fetcher; }
+  constructor({ redis, env = process.env, fetcher = fetch, allowParallelAskChats = false }) {
+    Object.assign(this, { redis, env, fetcher, allowParallelAskChats });
+  }
   async assertEnabled() {
     this.ready();
     if (this.env.AI_EXECUTION_DISABLED === 'true' || (this.redis?.isReady && this.redis.get && await this.redis.get('security:ai-paused') === '1')) throw fail('EXECUTION_DISABLED');
@@ -117,11 +148,23 @@ export class AiPolicy {
             hasAttachment: messages.some(message => Boolean(message?.file)),
             hasStrategyContext: Boolean(body.strategyId), hasTaskContext: Boolean(body.taskId),
             rawThinkingLevel: resolveAskThinkingLevel({ requestedThinkingLevel: body.thinkingLevel, lastUserMsg }),
+            explicitLowThinking: body.thinkingLevel === 'low',
           }) || notice;
         }
         if (notice) return res.status(401).json({ code: 'AUTH_REQUIRED', error: notice, reply: notice });
       }
       if (!isAiRequest(req)) return next();
+      const isAsk = /^\/api\/ask\/?$/i.test(req.path);
+      const sharedAsk = this.allowParallelAskChats && isAsk && !guest && req.body?.mode !== 'research';
+      const endTimedOutRequest = () => {
+        if (res.destroyed || res.writableEnded) return;
+        if (!res.headersSent) return res.status(504).json({ code: 'EXECUTION_TIMEOUT' });
+        if (isAsk && String(res.getHeader('Content-Type')).startsWith('text/event-stream')) {
+          req.securityContext.askTerminalFailure = true;
+          return res.end('data: {"code":"EXECUTION_TIMEOUT","error":"Sorğunu tamamlamaq mümkün olmadı."}\n\n');
+        }
+        res.end();
+      };
       try { await this.assertEnabled(); }
       catch (error) { return res.status(503).json({ code: error.code === 'EXECUTION_DISABLED' ? 'EXECUTION_DISABLED' : 'EXECUTION_UNAVAILABLE', error: 'Sorğu icra edilə bilmədi.' }); }
       let controller;
@@ -143,8 +186,7 @@ export class AiPolicy {
         if (requestTimeout !== null) {
           memoryTimer = setTimeout(() => {
             controller.abort(fail('EXECUTION_TIMEOUT'));
-            if (!res.headersSent) res.status(504).json({ code: 'EXECUTION_TIMEOUT' });
-            else res.end();
+            endTimedOutRequest();
           }, requestTimeout);
           memoryTimer.unref?.();
         }
@@ -218,7 +260,7 @@ export class AiPolicy {
         }
         return next();
       }
-      let quotaKeys = [], requestKey, requestRecord, previousRequest, lock, fingerprint;
+      let quotaKeys = [], requestKey, requestRecord, previousRequest, lock, sharedAskLease, fingerprint;
       let replayResult;
       const isUpRequest = /^\/api\/up\/challenges(?:\/|$)/i.test(req.path);
       const isDurableStrategyRequest = /^\/api\/strategy\/(?:generate|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path);
@@ -257,7 +299,7 @@ export class AiPolicy {
         const canRetryAfterPreCommitFailure =
           handlerEntered &&
           !replayResult &&
-          res.statusCode >= 500 &&
+          (res.statusCode >= 500 || (isAsk && req.securityContext?.askTerminalFailure)) &&
           !req.securityContext?.mutationPending &&
           !req.securityContext?.mutationCommitted &&
           !req.securityContext?.isBackgroundJob;
@@ -270,6 +312,7 @@ export class AiPolicy {
               : 'started';
         if (requestKey && requestRecord) await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; redis.call('set',KEYS[1],ARGV[2],'EX',900); return 1", { keys: [requestKey], arguments: [requestRecord, JSON.stringify({ state: finalState, fingerprint, result: replayResult })] }).catch(() => {});
         if (lock) await this.redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end; return 0", { keys: [lock], arguments: [token] }).catch(() => {});
+        if (sharedAskLease) await sharedAskLease.release().catch(() => {});
       };
       let timer;
       try {
@@ -300,9 +343,17 @@ export class AiPolicy {
           return json(body);
         };
         const actor = req.ownerId, ip = this.ipKey(req), day = new Date().toISOString().slice(0, 10);
-        const keys = [`security:rate:${actor}`, `security:rate-ip:${ip}`];
-        const allowed = await this.redis.eval("for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); if n == 1 then redis.call('expire',k,600) end end; return 1", { keys, arguments: ['60'] });
-        if (!allowed) throw fail('RATE_LIMITED', 429);
+        if (sharedAsk) {
+          const retryAfter = await reserveAskRate(this.redis, actor, ip, token);
+          if (retryAfter > 0) {
+            res.setHeader('Retry-After', String(retryAfter));
+            throw fail('RATE_LIMITED', 429);
+          }
+        } else {
+          const keys = [`security:rate:${actor}`, `security:rate-ip:${ip}`];
+          const allowed = await this.redis.eval("for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); if n == 1 then redis.call('expire',k,600) end end; return 1", { keys, arguments: ['60'] });
+          if (!allowed) throw fail('RATE_LIMITED', 429);
+        }
         if (guest) {
           const isBuildRequest = /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path);
           const isBuildGenerate = /^\/api\/strategy\/(?:generate|generate-stream)\/?$/i.test(req.path);
@@ -343,8 +394,13 @@ export class AiPolicy {
             req.guestMessagesAvailable = req.remainingGuestMessages + 1;
           }
         }
-        lock = `security:owner-execution:${actor}`;
-        if (!await this.redis.set(lock, token, { NX: true, PX: 180000 })) { lock = null; throw fail('EXECUTION_BUSY', 429); }
+        if (sharedAsk) {
+          sharedAskLease = await acquireSharedAskLease(this.redis, actor, token);
+          if (!sharedAskLease) throw fail('EXECUTION_BUSY', 429);
+        } else {
+          lock = `security:owner-execution:${actor}`;
+          if (!await this.redis.set(lock, token, { NX: true, PX: 180000 })) { lock = null; throw fail('EXECUTION_BUSY', 429); }
+        }
         if (previousRequest) {
           const candidate = JSON.stringify({ state: 'reserved', fingerprint, token });
           const claimed = await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; redis.call('set',KEYS[1],ARGV[2],'EX',900); return 1", { keys: [requestKey], arguments: [previousRequest, candidate] });
@@ -352,17 +408,20 @@ export class AiPolicy {
           requestRecord = candidate;
         }
         controller = new AbortController();
-        req.securityContext.assertLease = async () => { if (!this.redis.isReady || await this.redis.get(lock) !== token) throw fail('EXECUTION_LOCK_LOST'); };
+        req.securityContext.assertLease = async () => {
+          const owned = sharedAskLease ? await sharedAskLease.isOwned() : this.redis.isReady && await this.redis.get(lock) === token;
+          if (!owned) throw fail('EXECUTION_LOCK_LOST');
+        };
         req.securityContext.route = req.path;
         req.securityContext.controller = controller; req.securityContext.signal = controller.signal;
         const renewal = setInterval(async () => {
           try {
-            const ok = await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; return redis.call('pexpire',KEYS[1],180000)", { keys: [lock], arguments: [token] });
+            const ok = sharedAskLease ? await sharedAskLease.renew() : await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; return redis.call('pexpire',KEYS[1],180000)", { keys: [lock], arguments: [token] });
             if (!ok) controller.abort(fail('EXECUTION_LOCK_LOST'));
           } catch { controller.abort(fail('EXECUTION_UNAVAILABLE')); }
         }, 30000); renewal.unref();
         const requestTimeout = aiRequestTimeoutMs(req);
-        if (requestTimeout !== null) timer = setTimeout(() => { clearInterval(renewal); controller.abort(fail('EXECUTION_TIMEOUT')); if (!res.headersSent) res.status(504).json({ code: 'EXECUTION_TIMEOUT' }); else res.end(); }, requestTimeout);
+        if (requestTimeout !== null) timer = setTimeout(() => { clearInterval(renewal); controller.abort(fail('EXECUTION_TIMEOUT')); endTimedOutRequest(); }, requestTimeout);
         req.securityContext.transferToBackground = () => {
           req.securityContext.isBackgroundJob = true;
           clearTimeout(timer);
@@ -375,10 +434,14 @@ export class AiPolicy {
         };
         res.once('finish', finishRequest);
         res.once('close', finishRequest);
+        if (req.aborted || res.destroyed || res.writableEnded) return finishRequest();
         handlerEntered = true;
         next();
       } catch (error) {
         await finish();
+        if (sharedAsk && error.code === 'RATE_LIMITED') {
+          return res.status(429).json({ code: 'RATE_LIMITED', error: 'Ask üçün dəqiqəlik sorğu limiti dolub. Bir qədər sonra yenidən cəhd edin.' });
+        }
         const isBuild = /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path);
         const exhaustedMsg = isBuild ? GUEST_BUILD_EXHAUSTED_MESSAGE : GUEST_EXHAUSTED_MESSAGE;
         res.status(error.status || 503).json({ code: error.code || 'EXECUTION_UNAVAILABLE', error: error.code === 'GUEST_DAILY_LIMIT' ? exhaustedMsg : 'Sorğu başlana bilmədi.', ...(error.code === 'GUEST_DAILY_LIMIT' ? { reply: exhaustedMsg } : {}) });

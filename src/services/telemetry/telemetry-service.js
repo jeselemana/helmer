@@ -162,7 +162,7 @@ export class TelemetryService {
     onlyNecessaryData = false,
     modelImprovement = true,
   } = {}) {
-    const isRestricted = onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
+    const isRestricted = Boolean(groundingActive) || onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
     const resolvedAskTokens = resolveTelemetryTokens(usage);
     const cost = providerUsage?.length ? providerUsage.map(item => calculateEstimatedCost(item.model, item.inputTokens, item.outputTokens)).reduce((sum, item) => ({ costUsd: sum.costUsd + item.costUsd, costAzn: sum.costAzn + item.costAzn, inputTokens: sum.inputTokens + item.inputTokens, outputTokens: sum.outputTokens + item.outputTokens, totalTokens: sum.totalTokens + item.totalTokens }), { costUsd: 0, costAzn: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 }) : calculateEstimatedCost(model, resolvedAskTokens.promptTokens, resolvedAskTokens.completionTokens);
     const rawMarket = isRestricted ? "global" : detectTargetMarket({ brief: querySnippet });

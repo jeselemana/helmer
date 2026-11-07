@@ -37,7 +37,12 @@ function isGroundedInteraction(item) {
   return Boolean(
     item.groundingActive === true ||
     item.mode === "ask_research" ||
-    item.taskType === "deep_research"
+    item.taskType === "deep_research" ||
+    item.groundingMetadata?.groundingChunks?.length ||
+    item.groundingMetadata?.webSearchQueries?.length ||
+    item.groundingMetadata?.searchSuggestions?.length ||
+    item.groundingMetadata?.searchEntryPoint ||
+    (item.relevantContext && (item.relevantContext.searchGrounded || item.relevantContext.groundingActive))
   );
 }
 
@@ -53,6 +58,15 @@ export class LearningLoopService {
     const groundedIds = new Set(
       store.interactions.filter((item) => isGroundedInteraction(item)).map((item) => item.id),
     );
+    for (const item of store.interactions) {
+      if (groundedIds.has(item.id)) {
+        item.onlyNecessaryData = true;
+        item.modelImprovement = false;
+        item.userPrompt = "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]";
+        item.modelResponse = "[Məzmun gizlədilib - Töhfə deaktivdir]";
+        item.relevantContext = null;
+      }
+    }
     if (!this.privacyPolicy) {
       if (groundedIds.size > 0) {
         store.candidates = store.candidates.filter((item) => !groundedIds.has(item.sourceInteractionId));
@@ -85,8 +99,8 @@ export class LearningLoopService {
   }
 
   async recordInteraction(input) {
-    const isRestricted = input.onlyNecessaryData === true || input.modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(input.ownerId, input.privacySnapshot));
     const groundingActive = isGroundedInteraction(input);
+    const isRestricted = groundingActive || input.onlyNecessaryData === true || input.modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(input.ownerId, input.privacySnapshot));
     const now = input.createdAt || new Date().toISOString();
     const tokens = usageFields(input.usage);
     const cost = estimateCost(input.modelName, tokens.inputTokens, tokens.outputTokens);
@@ -144,6 +158,7 @@ export class LearningLoopService {
     return this.repository.update(async (store) => {
       if (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId)) return null;
       const interaction = store.interactions.find((item) => item.id === interactionId && item.ownerId === ownerId);
+      if (isGroundedInteraction(interaction)) return null;
       if (!interaction) return null;
       const signal = { id: randomUUID(), interactionId, ...allowed, createdAt: new Date().toISOString() };
       store.signals.push(signal);

@@ -1651,13 +1651,13 @@ function createAskThinkingControls(isEn, onToggle = null) {
     }
   };
 
-  ["medium", "high"].forEach((lvl) => {
+  ["low", "medium", "high"].forEach((lvl) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = `ask-thinking-pill-btn${state.askThinkingLevel === lvl ? " is-active" : ""}`;
     btn.setAttribute("role", "radio");
     btn.setAttribute("aria-checked", String(state.askThinkingLevel === lvl));
-    btn.textContent = lvl === "high" ? "High" : "Medium";
+    btn.textContent = { low: "Low", medium: "Medium", high: "High" }[lvl];
 
     btn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -1687,7 +1687,7 @@ function createAskThinkingControls(isEn, onToggle = null) {
     try { localStorage.setItem("helmer_ask_thinking_enabled", String(isChecked)); } catch { }
 
     if (isChecked) {
-      if (!state.askThinkingLevel || state.askThinkingLevel === "off" || state.askThinkingLevel === "low") {
+      if (!state.askThinkingLevel || state.askThinkingLevel === "off") {
         setLevel("medium");
       } else {
         setLevel(state.askThinkingLevel);
@@ -1719,6 +1719,7 @@ function createAskModelSelector(isEn) {
 
   const getSelectorLabel = () => {
     if (!state.askThinkingEnabled) return "Auto";
+    if (state.askThinkingLevel === "low") return "Thinking · Low";
     return state.askThinkingLevel === "high" ? "Thinking · High" : "Thinking · Med";
   };
   const nameSpan = element("span", "ask-model-name", getSelectorLabel());
@@ -1746,7 +1747,6 @@ function createAskModelSelector(isEn) {
     state.askThinkingEnabled = false;
     currentAskThinking = "low";
     try { localStorage.setItem("helmer_ask_thinking_enabled", "false"); } catch { }
-    try { localStorage.setItem("helmer_ask_thinking_level", "low"); } catch { }
     menu.removeAttribute("open");
     render();
   });
@@ -2068,7 +2068,6 @@ function openMobileModelSheet(mode = "ask") {
     state.askThinkingEnabled = false;
     currentAskThinking = "low";
     try { localStorage.setItem("helmer_ask_thinking_enabled", "false"); } catch { }
-    try { localStorage.setItem("helmer_ask_thinking_level", "low"); } catch { }
     closeMobileModelSheet();
     syncMode();
     if (state.mode === "ask") render();
@@ -2770,7 +2769,7 @@ const state = {
       const saved = localStorage.getItem("helmer_ask_thinking_level");
       if (["low", "medium", "high"].includes(saved)) return saved;
     } catch { }
-    return "low";
+    return "medium";
   })(),
   askThinkingEnabled: (() => {
     try { return localStorage.getItem("helmer_ask_thinking_enabled") === "true"; }
@@ -3763,55 +3762,75 @@ function getUserFirstName() {
 }
 
 const BUILD_CTA_LIST_AZ = [
-  (name) => (name ? `${name}, hansı bazarı fəth edirik?` : "Hansı bazarı fəth edirik?"),
-  "Rəqibləri qabaqlamaq vaxtıdır.",
-  (name) => (name ? `${name}, satış gətirən plan quraq.` : "Satış gətirən plan quraq."),
-  "Böyüməyə (scale) hazırsan?",
-  (name) => (name ? `${name}, növbəti böyük gedişin nədir?` : "Növbəti böyük gedişin nədir?"),
-  "İdeyanı real gəlirə çevirək.",
-  "Hədəfi göstər, hücum planını quraq.",
-  (name) => (name ? `${name}, bazarı silkələyən plan quraq.` : "Bazarı silkələyən plan quraq."),
-  "Boş vədləri unudaq — icraya başlayaq.",
-  "Yeni məhsulunu bazara çıxaraq.",
+  (name) => (name ? `${name}, növbəti həmlən nədir?` : "Növbəti həmlən nədir?"),
+  "Rəqibləri oyundan çıxarmaq vaxtıdır.",
+  (name) => (name ? `${name}, planı qur, bazarı ələ alaq.` : "Planı qur, bazarı ələ alaq."),
+  "Boş söhbətləri kəs — icraya başla.",
+  (name) => (name ? `${name}, bu gün kimi sıxışdırırıq?` : "Bu gün kimi sıxışdırırıq?"),
+  "Standartları sən müəyyən et.",
+  (name) => (name ? `${name}, zəif nöqtə buraxma. Sistemi qur.` : "Zəif nöqtə buraxma. Sistemi qur."),
+  "İkinci dərəcəli olmağa vaxt yoxdur.",
+  (name) => (name ? `${name}, miqyası böyüt, hücuma keç.` : "Miqyası böyüt, hücuma keç."),
+  "Fikirlərlə vaxt itirmə — nəticə qoy ortaya.",
+  (name) => (name ? `${name}, masaya yumruğunu vurmaq vaxtıdır.` : "Masaya yumruğunu vurmaq vaxtıdır."),
+  "Baxmaq bəsdir — get payını götür.",
+  (name) => (name ? `${name}, yeni qaydaları sən yaz.` : "Yeni qaydaları sən yaz."),
+  "Ləngiyən məhv olur. Tərpən.",
+  (name) => (name ? `${name}, qoy onlar sənə çatmağa çalışsın.` : "Qoy onlar sənə çatmağa çalışsın."),
 ];
 
 const BUILD_CTA_LIST_EN = [
-  (name) => (name ? `${name}, what market are we conquering?` : "What market are we conquering?"),
-  "Time to outsmart the competition.",
-  (name) => (name ? `${name}, let's build a plan that prints results.` : "Let's build a plan that prints results."),
-  "Ready to scale aggressively?",
-  (name) => (name ? `${name}, what's your next power move?` : "What's your next power move?"),
-  "Turn that idea into actual revenue.",
-  "Name the target. We'll roadmap it.",
-  (name) => (name ? `${name}, let's build something disruptive.` : "Let's build something disruptive."),
-  "Skip vanity metrics — build the roadmap.",
-  "Ready to dominate your market?",
+  (name) => (name ? `${name}, what's the next play?` : "What's the next play?"),
+  "Eat their lunch.",
+  (name) => (name ? `${name}, lock in and ship.` : "Lock in and ship."),
+  "Stop talking. Start executing.",
+  (name) => (name ? `${name}, who are we squeezing out today?` : "Who are we squeezing out today?"),
+  "Set the standard. Make them chase.",
+  (name) => (name ? `${name}, build a moat.` : "Build a moat."),
+  "Second place is zero.",
+  (name) => (name ? `${name}, scale or bleed out.` : "Scale or bleed out."),
+  "Fuck the pitch deck. Show me the engine.",
+  (name) => (name ? `${name}, takeover mode.` : "Takeover mode."),
+  "Outwork, outship, outlast.",
+  (name) => (name ? `${name}, push to prod. Break the meta.` : "Push to prod. Break the meta."),
+  "Speed is the ultimate weapon.",
+  (name) => (name ? `${name}, stop playing defense.` : "Stop playing defense."),
 ];
 
 const ASK_CTA_LIST_AZ = [
-  (name) => (name ? `${name}, ən çətin biznes sualını ver.` : "Ən çətin biznes sualını ver."),
-  "Biznesdəki əsas darboğaz nədir?",
-  (name) => (name ? `${name}, hansı metrikanı analiz edək?` : "Hansı metrikanı analiz edək?"),
-  "Fərziyyə yox, real rəqəmlər.",
-  (name) => (name ? `${name}, böhran, yoxsa böyümə fürsəti?` : "Böhran, yoxsa böyümə fürsəti?"),
-  "Rəqibin zəif nöqtəsi nədir?",
-  (name) => (name ? `${name}, hansı strateji qərarı veririk?` : "Hansı strateji qərarı veririk?"),
-  "Heç bir bəhanə yoxdur. Soruş.",
-  "Biznes modelini sınağa çəkək.",
-  "Hansı problem satışa mane olur?",
+  (name) => (name ? `${name}, prosesdəki kritik boşluq nədir?` : "Prosesdəki kritik boşluq nədir?"),
+  "Özünü aldatma — real rəqəmləri göstər.",
+  (name) => (name ? `${name}, qazancı nə saxlayır? Problemə baxaq.` : "Qazancı nə saxlayır? Problemə baxaq."),
+  "Rəqibin səni haradan vurur?",
+  (name) => (name ? `${name}, riskdən qaçma, sualı ver.` : "Riskdən qaçma, sualı ver."),
+  "Bəhanələri bir kənara qoy.",
+  (name) => (name ? `${name}, darboğazı tap və darmadağın et.` : "Darboğazı tap və darmadağın et."),
+  "Zəif strategiya ancaq büdcə yeyir. Yoxlayaq.",
+  (name) => (name ? `${name}, nəyi görməzdən gəlirsən?` : "Nəyi görməzdən gəlirsən?"),
+  "Yaraya barmaq basmaq vaxtıdır.",
+  (name) => (name ? `${name}, sistemi nə batırır?` : "Sistemi nə batırır?"),
+  "Zəif arqumentlərlə vaxt alma.",
+  (name) => (name ? `${name}, pul hara axır? Konkret de.` : "Pul hara axır? Konkret de."),
+  "İllüziyaları dağıtmaq lazımdır.",
+  (name) => (name ? `${name}, ən qorxduğun ssenarini aç ortaya.` : "Ən qorxduğun ssenarini aç ortaya."),
 ];
 
 const ASK_CTA_LIST_EN = [
-  (name) => (name ? `${name}, hit me with your toughest question.` : "Hit me with your toughest question."),
-  "What's your biggest bottleneck?",
-  (name) => (name ? `${name}, which metric is giving you headaches?` : "Which metric is giving you headaches?"),
-  "Stop guessing — ask the data.",
-  (name) => (name ? `${name}, got a crisis or a growth unlock?` : "Got a crisis or a growth unlock?"),
-  "Where is the competition vulnerable?",
-  (name) => (name ? `${name}, what strategic call are we making?` : "What strategic call are we making?"),
-  "No fluff, no excuses. Ask away.",
-  "Stress-test your business model.",
-  "What metric is keeping you up at night?",
+  (name) => (name ? `${name}, where's the pipeline leaking?` : "Where's the pipeline leaking?"),
+  "Stop capping. Show the unit economics.",
+  (name) => (name ? `${name}, what's burning runway?` : "What's burning runway?"),
+  "Where are you getting cooked?",
+  (name) => (name ? `${name}, hit me with the ugly truth.` : "Hit me with the ugly truth."),
+  "No vanity metrics. What's broke?",
+  (name) => (name ? `${name}, find the bottleneck and kill it.` : "Find the bottleneck and kill it."),
+  "Stress-test it before the market does.",
+  (name) => (name ? `${name}, what blindspot are you dodging?` : "What blindspot are you dodging?"),
+  "Call out the bad assumptions.",
+  (name) => (name ? `${name}, what's sinking the ship?` : "What's sinking the ship?"),
+  "Drop the spin. What failed?",
+  (name) => (name ? `${name}, where's the cash bleed?` : "Where's the cash bleed?"),
+  "Check your blind spots.",
+  (name) => (name ? `${name}, what's your worst-case reality?` : "What's your worst-case reality?"),
 ];
 
 function getBuildCta() {
@@ -5023,10 +5042,17 @@ function cleanMarkdownFormatting(raw) {
   return text;
 }
 
-function appendAskInline(parent, value) {
+function appendAskInline(parent, value, allowLineBreaks = false) {
+  const appendText = (target, text) => {
+    const lines = allowLineBreaks ? text.split(/<br\s*\/?>/i) : [text];
+    lines.forEach((line, index) => {
+      if (index) target.appendChild(document.createElement("br"));
+      target.appendChild(document.createTextNode(line));
+    });
+  };
   const str = String(value || "");
   if (!str.includes("*") && !str.includes("_") && !str.includes("`") && !str.includes("[")) {
-    parent.appendChild(document.createTextNode(str));
+    appendText(parent, str);
     return;
   }
   const cleaned = cleanMarkdownFormatting(str);
@@ -5042,13 +5068,17 @@ function appendAskInline(parent, value) {
       a.className = "ask-inline-link";
       parent.appendChild(a);
     } else if ((part.startsWith("**") && part.endsWith("**")) || (part.startsWith("__") && part.endsWith("__"))) {
-      parent.appendChild(element("strong", "", part.slice(2, -2)));
+      const strong = element("strong", "");
+      appendText(strong, part.slice(2, -2));
+      parent.appendChild(strong);
     } else if ((part.startsWith("*") && part.endsWith("*") && part.length > 2) || (part.startsWith("_") && part.endsWith("_") && part.length > 2)) {
-      parent.appendChild(element("em", "", part.slice(1, -1)));
+      const emphasis = element("em", "");
+      appendText(emphasis, part.slice(1, -1));
+      parent.appendChild(emphasis);
     } else if (part.startsWith("`") && part.endsWith("`")) {
       parent.appendChild(element("code", "", part.slice(1, -1)));
     } else {
-      parent.appendChild(document.createTextNode(part));
+      appendText(parent, part);
     }
   });
 }
@@ -5257,7 +5287,7 @@ function createAskBlockNode(block) {
     const headerRow = document.createElement("tr");
     askTableCells(block.headerLine).forEach((cell) => {
       const th = document.createElement("th");
-      appendAskInline(th, cell);
+      appendAskInline(th, cell, true);
       headerRow.appendChild(th);
     });
     thead.appendChild(headerRow);
@@ -5267,7 +5297,7 @@ function createAskBlockNode(block) {
       const row = document.createElement("tr");
       askTableCells(rowLine).forEach((cell) => {
         const td = document.createElement("td");
-        appendAskInline(td, cell);
+        appendAskInline(td, cell, true);
         row.appendChild(td);
       });
       tbody.appendChild(row);
@@ -6314,7 +6344,7 @@ function renderAsk() {
   }
   composerBody.append(label, input);
   if (state.currentUser) {
-    window.HelmerArtifacts?.attachComposer({ input, body: composerBody, getSelection: () => state.askPluginIds || [], setSelection: ids => { state.askPluginIds = ids; }, disabled: state.askLoading });
+    window.HelmerArtifacts?.attachComposer({ input, body: composerBody, getSelection: () => state.askPluginIds || [], setSelection: ids => { state.askPluginIds = ids; } });
   }
   if (state.askArtifactId) {
     const editContext = element("div", "ask-artifact-edit-context", `${isEn ? "Editing latest version" : "Son versiyanı redaktə et"}: ${state.askArtifactName}`);
@@ -7570,9 +7600,16 @@ function finalizeStreamingAskMessageDom(message, messageIndex) {
   return true;
 }
 
+function rememberActiveAskChat(chatId) {
+  const ownerId = state.currentUser?.id;
+  if (!ownerId) return;
+  try { sessionStorage.setItem("helmer_active_ask_chat", JSON.stringify({ chatId, ownerId })); } catch { }
+}
+
 function rememberSavedAskChat(chat) {
   if (!chat?.id) return;
   state.askChatId = chat.id;
+  rememberActiveAskChat(chat.id);
   window.helmerSecurity?.rememberChat(chat);
   const messages = Array.isArray(chat.messages) ? chat.messages : [];
   const historyItem = {
@@ -7841,7 +7878,16 @@ async function consumeAskEventStream(reader, onEvent, { maxFrameChars = 8 * 1024
     let data;
     try { data = JSON.parse(dataText); } catch { throw protocolError(); }
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw protocolError();
-    if (data.error) throw new Error(typeof data.error === 'string' ? data.error : protocolError().message);
+    if (data.error) {
+      const isEn = getLanguage() === 'en';
+      if (['ASK_TIMEOUT', 'ASK_PROVIDER_TIMEOUT', 'EXECUTION_TIMEOUT'].includes(data.code)) {
+        throw new Error(isEn ? 'The response timed out. Please retry.' : 'Cavab üçün gözləmə müddəti bitdi. Yenidən cəhd edin.');
+      }
+      if (data.code === 'GROUNDING_UNAVAILABLE') {
+        throw new Error(isEn ? 'Web Search could not verify any sources. Please retry.' : 'Veb axtarışı mənbələri təsdiqləyə bilmədi. Yenidən cəhd edin.');
+      }
+      throw new Error(typeof data.error === 'string' ? data.error : protocolError().message);
+    }
     if (data.chunk !== undefined && typeof data.chunk !== 'string') throw protocolError();
     if (data.reply !== undefined && typeof data.reply !== 'string') throw protocolError();
     await onEvent(data);
@@ -7905,7 +7951,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
       openGuestRestrictionModal(GUEST_RESTRICTION_NOTICES.planner);
       return;
     }
-    if (state.askThinkingEnabled && (currentAskThinking === "high" || currentAskThinking === "medium")) {
+    if (state.askThinkingEnabled) {
       openGuestRestrictionModal(GUEST_RESTRICTION_NOTICES.thinking);
       return;
     }
@@ -8007,7 +8053,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
       if (data.chatId) {
         state.askChatId = data.chatId;
         if (data.chatRevision) window.helmerSecurity?.revisions.set(data.chatId, data.chatRevision);
-        try { sessionStorage.setItem("helmer_active_ask_chat", data.chatId); } catch { }
+        rememberActiveAskChat(data.chatId);
       }
       if (data.message?.id) assistantMsg.id = data.message.id;
       render();
@@ -8147,7 +8193,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
         if (data.chatId) {
           state.askChatId = data.chatId;
           if (data.chatRevision) window.helmerSecurity?.revisions.set(data.chatId, data.chatRevision);
-          try { sessionStorage.setItem("helmer_active_ask_chat", data.chatId); } catch { }
+          rememberActiveAskChat(data.chatId);
         }
 
         if (data.status) {
@@ -11523,7 +11569,7 @@ function buildStrategyAskAssistant() {
   const composerBody = element("div", "strategy-artifact-composer-body");
   composerBody.append(input);
   if (state.currentUser) {
-    window.HelmerArtifacts?.attachComposer({ input, body: composerBody, getSelection: () => state.askPluginIds || [], setSelection: ids => { state.askPluginIds = ids; }, disabled: state.askLoading });
+    window.HelmerArtifacts?.attachComposer({ input, body: composerBody, getSelection: () => state.askPluginIds || [], setSelection: ids => { state.askPluginIds = ids; } });
   }
   form.append(composerBody, send);
 
@@ -12221,7 +12267,6 @@ async function openSavedChat(chatId) {
     state.askStrategyId = data.chat.strategyId || "";
     state.askTaskId = data.chat.taskId || "";
     state.askError = "";
-    try { sessionStorage.setItem("helmer_active_ask_chat", data.chat.id); } catch { }
     syncMode();
     syncNav();
     render();
@@ -19089,8 +19134,14 @@ if (!new Set(["/login", "/signin", "/signup", "/register", "/forgot-password", "
   render();
 }
 
+let startupAskChat;
+try { startupAskChat = JSON.parse(sessionStorage.getItem("helmer_active_ask_chat")); } catch { }
 initializeAuthentication(async (user) => {
+  const previousAskChat = startupAskChat;
+  startupAskChat = null;
   updateWorkspaceIdentity(user);
+  const epoch = state.identityEpoch;
+  const expectedUserId = user?.id || null;
   const preferredMode = user?.settings?.defaultMode || getCookie("helmer_default_mode");
   if (preferredMode === "ask" || preferredMode === "build") {
     setCookie("helmer_default_mode", preferredMode);
@@ -19118,11 +19169,10 @@ initializeAuthentication(async (user) => {
   }
   render();
   await Promise.allSettled([loadSavedStrategies(), loadSavedChats(), loadPlannerTasks(), loadUsageStats()]);
-  const lastActiveChatId = (() => {
-    try { return sessionStorage.getItem("helmer_active_ask_chat"); } catch { return null; }
-  })();
-  if (lastActiveChatId && state.mode === "ask" && !state.askMessages.length) {
-    openSavedChat(lastActiveChatId).catch(() => { });
+  if (isIdentityStale(epoch, expectedUserId)) return;
+  if (expectedUserId && previousAskChat?.ownerId === expectedUserId &&
+      /^[0-9a-f-]{36}$/i.test(previousAskChat.chatId) && state.mode === "ask" && state.view === "home" && !state.askMessages.length) {
+    openSavedChat(previousAskChat.chatId).catch(() => { });
   }
   if (user) {
     resumeBackgroundJobs();

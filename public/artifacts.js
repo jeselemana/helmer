@@ -39,7 +39,7 @@
     const data = await response.json(); if (!response.ok) throw new Error(data.error || "Unable to open file"); return data;
   };
   const registry = () => registryPromise ||= request("/api/ask/plugins").then(data => data.plugins).catch(error => { registryPromise = null; throw error; });
-  function attachComposer({ input, body, getSelection, setSelection, disabled = false }) {
+  function attachComposer({ input, body, getSelection, setSelection }) {
     const chips = node("div", "ask-plugin-tokens");
     const popup = node("div", "ask-plugin-selector"); popup.hidden = true; popup.id = `plugin-selector-${input.id}`;
     popup.setAttribute("role", "listbox"); popup.setAttribute("aria-label", isEn() ? "Capabilities" : "Capability seçimi");
@@ -53,13 +53,13 @@
         const plugin = plugins.find(item => item.id === id);
         const chip = node("span", "ask-plugin-token");
         chip.append(capabilityIcon(plugin?.icon, plugin?.id || id), node("span", "", `@${plugin?.name || id}`));
-        const remove = node("button", "ask-plugin-token-remove", "×"); remove.type = "button"; remove.disabled = disabled;
+        const remove = node("button", "ask-plugin-token-remove", "×"); remove.type = "button";
         remove.setAttribute("aria-label", `${isEn() ? "Remove" : "Sil"} @${plugin?.name || id}`);
-        remove.addEventListener("click", () => { setSelection(getSelection().filter(value => value !== id)); drawChips(); input.focus(); }); chip.append(remove); chips.append(chip);
+        remove.addEventListener("click", () => { if (input.disabled) return; setSelection(getSelection().filter(value => value !== id)); drawChips(); input.focus(); }); chip.append(remove); chips.append(chip);
       }
     };
     const choose = plugin => {
-      if (!queryRange || plugin.status !== "available") return;
+      if (input.disabled || !queryRange || plugin.status !== "available") return;
       const ids = getSelection(); if (!ids.includes(plugin.id) && ids.length < 6) setSelection([...ids, plugin.id]);
       const cursor = queryRange.start;
       input.value = input.value.slice(0, queryRange.start) + input.value.slice(queryRange.end);
@@ -79,7 +79,7 @@
       if (matches[active]) input.setAttribute("aria-activedescendant", `${popup.id}-${active}`);
     };
     const search = () => {
-      if (disabled) return;
+      if (input.disabled) return close();
       const cursor = input.selectionStart;
       const match = input.value.slice(0, cursor).match(/(?:^|\s)@([^\s@]*)$/);
       if (!match) return close();
@@ -93,7 +93,7 @@
     };
     input.addEventListener("input", search); input.addEventListener("click", search);
     input.addEventListener("keydown", event => {
-      if (event.isComposing) return;
+      if (event.isComposing || input.disabled) return;
       if (!popup.hidden && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) {
         event.preventDefault(); event.stopImmediatePropagation();
         if (event.key === "Escape") close();
@@ -101,7 +101,7 @@
         else { active = matches.length ? (active + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length : 0; drawPopup(); }
       } else if (event.key === "Backspace" && !input.value && getSelection().length) { setSelection(getSelection().slice(0, -1)); drawChips(); }
     }, true);
-    input.addEventListener("blur", () => setTimeout(close, 150));
+    input.addEventListener("blur", close);
     drawChips();
     registry().then(list => { plugins = list; if (input.isConnected) { drawChips(); search(); } }).catch(() => { if (input.isConnected) { close(); chips.append(node("small", "ask-plugin-empty", isEn() ? "Capabilities could not load. Refresh to retry." : "Capability-lər yüklənmədi. Yenidən yoxlamaq üçün səhifəni yeniləyin.")); } });
   }

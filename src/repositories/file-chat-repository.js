@@ -13,6 +13,8 @@ import { TenantLockManager } from "./tenant-lock.js";
 import { storageCorruption, writeJsonAtomically } from "./atomic-json-store.js";
 import { invalidateUserContextCache } from "../services/ai/personal-context.js";
 
+import { pruneExpiredGroundedResults } from "../services/ai/grounded-chat-retention.js";
+
 export class FileChatRepository {
   /**
    * @param {string} filePath - Path to chats.json or chats directory
@@ -290,9 +292,14 @@ export class FileChatRepository {
             ? `${etag}:${record.length}:${record[0]?.id || ""}:${record[0]?.updatedAt || ""}:${record.at(-1)?.id || ""}:${record.at(-1)?.updatedAt || ""}`
             : createHash("sha256").update(JSON.stringify(record)).digest("hex");
           if (this.syncedShardTags.get(tenantKey) !== tagKey) {
-            await this.writeLocalTenant(tenantKey, record).catch(() => {});
+            const cached = record.map(chat => {
+              const view = { ...chat };
+              pruneExpiredGroundedResults(view);
+              return view;
+            });
+            await this.writeLocalTenant(tenantKey, cached).catch(() => {});
             if (this.redis?.isReady) {
-              await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(record)).catch(() => {});
+              await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(cached)).catch(() => {});
             }
             this.syncedShardTags.set(tenantKey, tagKey);
           }
@@ -399,6 +406,11 @@ export class FileChatRepository {
             : (Array.isArray(mutatorOutput) ? mutatorOutput : recordsCopy));
         const returnValue = mutatorOutput?.result !== undefined ? mutatorOutput.result : mutatorOutput;
 
+        if (mutatorOutput?.unchanged === true) return returnValue;
+        for (const chat of nextRecords) {
+          if (chat.ownerId === ownerId && pruneExpiredGroundedResults(chat)) chat.revision = (chat.revision || 1) + 1;
+        }
+
         // Perform R2 conditional PUT with OCC ETag
         if (isCloud) {
           const success = await this.writeCloud(tenantKey, nextRecords, etag);
@@ -442,7 +454,26 @@ export class FileChatRepository {
     const tenantKey = this.tenantKey(ownerId);
     const { records, tombstone } = await this.readTenantDataWithEtag(ownerId, tenantKey, options);
     if (tombstone) return [];
-    return records.filter(record => !record.deleted && guestVisible(record, ownerId));
+    return records.filter(record => !record.deleted && guestVisible(record, ownerId)).map(record => {
+      const view = { ...record };
+      pruneExpiredGroundedResults(view);
+      return view;
+    });
+  }
+
+  async pruneGroundedHistory(ownerId, now = Date.now()) {
+    return this.mutateTenant(ownerId, records => {
+      let removed = 0;
+      for (const chat of records) {
+        if (chat.ownerId !== ownerId) continue;
+        const count = pruneExpiredGroundedResults(chat, now);
+        if (count) {
+          removed += count;
+          chat.revision = (chat.revision || 1) + 1;
+        }
+      }
+      return { unchanged: removed === 0, updated: records, result: removed };
+    });
   }
 
   /**
@@ -468,6 +499,7 @@ export class FileChatRepository {
             const raw = await fs.readFile(path.join(this.chatsDir, entry.name), "utf8");
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) {
+              for (const chat of parsed) pruneExpiredGroundedResults(chat);
               aggregated.push(...parsed);
             }
           } catch {
@@ -570,6 +602,7 @@ export class FileChatRepository {
           taskId: taskId !== undefined ? taskId : records[existingIndex].taskId,
           updatedAt: now,
         };
+        pruneExpiredGroundedResults(records[existingIndex]);
         return { updated: records, result: records[existingIndex] };
       }
 
@@ -600,6 +633,7 @@ export class FileChatRepository {
         createdAt: now,
         updatedAt: now,
       };
+      pruneExpiredGroundedResults(newRecord);
       records.push(newRecord);
       return { updated: records, result: newRecord };
     });

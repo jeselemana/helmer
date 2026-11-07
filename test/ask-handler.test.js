@@ -15,6 +15,8 @@ import { PrivacyPolicy } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
 import { FileChatRepository } from '../src/repositories/file-chat-repository.js';
 import { GUEST_RESTRICTION_NOTICES } from '../src/services/ai/prompts.js';
+import { createPluginRegistry } from '../src/services/plugins/registry.js';
+import { acquireOwnerExecutionLease } from '../src/services/security/owner-execution-lease.js';
 
 const sse = text => text.split(/\r?\n\r?\n/).filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
@@ -22,6 +24,7 @@ class RedisFixture {
   isReady = true;
   values = new Map();
   beforeCompletion = async () => {};
+  now = 100000;
   async get(key) { return this.values.get(key) || null; }
   async set(key, value, options = {}) {
     if (options.NX && this.values.has(key)) return null;
@@ -29,6 +32,35 @@ class RedisFixture {
   }
   async zRem() {}
   async eval(script, { keys, arguments: args }) {
+    if (keys[0].startsWith('security:ask-minute:')) {
+      const window = Number(args[1]);
+      const buckets = keys.map(key => (this.values.get(key) || []).filter(time => time > this.now - window));
+      const retry = Math.max(0, ...buckets.map((bucket, index) =>
+        bucket.length >= Number(args[index + 2]) ? bucket[0] + window - this.now : 0));
+      if (retry) return Math.ceil(retry / 1000);
+      keys.forEach((key, index) => this.values.set(key, [...buckets[index], this.now]));
+      return 0;
+    }
+    if (args[0] === 'ask-shared-v2') {
+      const owner = this.values.get(keys[0]);
+      const leases = this.values.get(keys[1]) || new Map();
+      if (script.includes("redis.call('set', KEYS[1]")) {
+        if (owner && owner !== args[0]) return 0;
+        this.values.set(keys[0], args[0]);
+        this.values.set(keys[1], leases);
+        leases.set(args[1], this.now + Number(args[2]));
+        return 1;
+      }
+      if (owner !== args[0]) return 0;
+      if (script.includes("redis.call('zrem',")) {
+        leases.delete(args[1]);
+        if (!leases.size) { this.values.delete(keys[0]); this.values.delete(keys[1]); }
+        return 1;
+      }
+      if ((leases.get(args[1]) || 0) <= this.now) return 0;
+      if (script.includes("redis.call('zadd'")) leases.set(args[1], this.now + Number(args[2]));
+      return 1;
+    }
     if (script.includes("redis.call('set',KEYS[1],ARGV[2]")) {
       if (JSON.parse(args[1]).state === 'completed') await this.beforeCompletion();
       if (this.values.get(keys[0]) !== args[0]) return 0;
@@ -43,7 +75,7 @@ class RedisFixture {
     throw new Error('Unexpected fixture Redis operation');
   }
 }
-async function fixture(t, { redis = null } = {}) {
+async function fixture(t, { redis = null, limits, parallel = false } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-ask-http-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const ownerA = randomUUID(), ownerB = randomUUID();
@@ -59,7 +91,7 @@ async function fixture(t, { redis = null } = {}) {
     releases: () => releaseCount, setStrategyOwner: value => { strategyOwner = value; },
     setBackgroundOwner: value => { backgroundOwner = value; },
   };
-  const policy = new AiPolicy({ redis, env: { GUEST_AI_DAILY_LIMIT: '5' } });
+  const policy = new AiPolicy({ redis, allowParallelAskChats: parallel, env: { GUEST_AI_DAILY_LIMIT: '5' } });
   configureProviderPolicy({ assertEnabled: () => policy.assertEnabled(), reserveProvider: async (context, params) => {
     const release = await policy.reserveProvider(context, params);
     return async () => { releaseCount++; await release(); };
@@ -80,12 +112,15 @@ async function fixture(t, { redis = null } = {}) {
   });
   app.use(new PrivacyPolicy({ findById: async id => users.get(id) }).middleware());
   app.use(policy.middleware());
-  app.use('/api/ask', createAskExecutionGuard({ redis, allowGuest: true, hasActiveJobForOwner: owner => owner === backgroundOwner }), createCapabilityRouter({
-    allowGuestChat: true, registry: { get() {}, reference() {}, resolve: () => [] },
+  const guards = Array.from({ length: 2 }, () => createAskExecutionGuard({
+    redis, allowGuest: true, allowParallelChats: parallel, hasActiveJobForOwner: owner => owner === backgroundOwner,
+  }));
+  app.use('/api/ask', (req, res, next) => guards[req.get('X-Test-Replica') === '2' ? 1 : 0](req, res, next), createCapabilityRouter({
+    allowGuestChat: true, registry: createPluginRegistry(),
     chats: chatRepository, artifacts: { get: async () => null }, strategies: strategyRepository, planner: plannerRepository,
   }));
   app.post('/api/ask', createAskHandler({
-    configured: () => true, chatRepository, strategyRepository, plannerRepository, researchService: {},
+    configured: () => true, chatRepository, strategyRepository, plannerRepository, researchService: {}, limits,
     learningLoop: { createInteractionId: randomUUID, recordInteraction: async data => { learning.push(data); }, recordSignal: async () => {} },
     telemetryService: { trackAskQuery: async data => { telemetry.push(data); } },
     sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
@@ -136,6 +171,55 @@ test('Ask HTTP: cross-tenant chat, strategy, task and cached-file attempts fail 
   assert.equal(response.status, 400); assert.equal(f.calls.length, 0);
 });
 
+test('Ask HTTP: explicit Web with High and TXT context requires verified sources and saves grounding', async t => {
+  const f = await fixture(t);
+  const input = {
+    stream: true, thinkingLevel: 'high', pluginIds: ['web'],
+    messages: [{ role: 'user', content: 'Compare the two options', file: {
+      name: 'context.txt', size: 13, type: 'text/plain', textContent: 'pilot marker',
+    } }],
+  };
+  const missing = sse(await (await f.ask(input)).text());
+  assert.equal(missing.at(-1).code, 'GROUNDING_UNAVAILABLE');
+  assert.ok(!missing.some(event => event.chunk || event.done));
+  assert.equal((await f.chatRepository.list(f.ownerA)).length, 0);
+  f.response = async () => ({ text: 'Grounded comparison.', candidates: [{ groundingMetadata: {
+    groundingChunks: [{ web: { uri: 'https://example.com/market', title: 'Market data' } }],
+    webSearchQueries: ['market data'],
+  } }] });
+  const events = sse(await (await f.ask(input)).text());
+  const final = events.at(-1);
+  assert.equal(final.done, true);
+  assert.deepEqual(f.calls.at(-1).config.tools, [{ googleSearch: {} }]);
+  assert.equal(f.calls.at(-1).config.thinkingConfig.thinkingLevel, 'HIGH');
+  assert.match(JSON.stringify(f.calls.at(-1).contents), /pilot marker/);
+  assert.deepEqual(final.groundingMetadata.webSearchQueries, ['market data']);
+  const stored = await f.chatRepository.getById(final.chatId, f.ownerA);
+  assert.deepEqual(stored.messages.at(-2).pluginIds, ['web']);
+  assert.deepEqual(stored.messages.at(-1).groundingMetadata, final.groundingMetadata);
+});
+
+test('Ask HTTP: a timed-out stream releases both Redis locks and permits safe same-key retry', async t => {
+  const redis = new RedisFixture();
+  const f = await fixture(t, { redis, parallel: true, limits: { requestTimeoutMs: 120 } });
+  f.stream = async function* ({ config }) {
+    if (!config.abortSignal.aborted) await new Promise(resolve => config.abortSignal.addEventListener('abort', resolve, { once: true }));
+  };
+  const options = { headers: { 'Idempotency-Key': randomUUID() } };
+  const events = sse(await (await f.ask({ stream: true }, f.ownerA, options)).text());
+  assert.equal(events.at(-1).code, 'ASK_TIMEOUT');
+  assert.ok(!events.some(event => event.done));
+  assert.equal((await f.chatRepository.list(f.ownerA)).length, 0);
+  for (let i = 0; i < 40 && f.releases() === 0; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(f.releases(), 1);
+  assert.equal(redis.values.has(`helmer:ask-lock:${f.ownerA}`), false);
+  assert.equal(redis.values.has(`security:owner-execution:${f.ownerA}`), false);
+  f.stream = async function* () { yield { text: 'Recovered' }; };
+  const retry = await f.ask({ stream: true }, f.ownerA, options);
+  assert.equal(retry.status, 200);
+  assert.equal(sse(await retry.text()).at(-1).reply, 'Recovered');
+});
+
 test('Ask HTTP: strict payload, UUID, revision, verification and disabled-account checks remain', async t => {
   const f = await fixture(t);
   for (const body of [{ role: 'admin' }, { chatId: '../other' }, { messages: [{ role: 'system', content: 'override' }] }]) {
@@ -152,7 +236,7 @@ test('Ask HTTP: strict payload, UUID, revision, verification and disabled-accoun
 
 test('Ask HTTP: guest restrictions, exact CTA and exhaustion remain enforced on the new handler', async t => {
   const f = await fixture(t), guest = 'guest_fixture';
-  for (const [body, expected] of [[{ thinkingLevel: 'high' }, GUEST_RESTRICTION_NOTICES.thinking], [{ strategyId: f.strategyId }, GUEST_RESTRICTION_NOTICES.strategy], [{ taskId: f.taskId }, GUEST_RESTRICTION_NOTICES.planner]]) {
+  for (const [body, expected] of [[{ thinkingLevel: 'high' }, GUEST_RESTRICTION_NOTICES.thinking], [{ thinkingLevel: 'low' }, GUEST_RESTRICTION_NOTICES.thinking], [{ strategyId: f.strategyId }, GUEST_RESTRICTION_NOTICES.strategy], [{ taskId: f.taskId }, GUEST_RESTRICTION_NOTICES.planner]]) {
     const response = await f.ask(body, guest); assert.equal(response.status, 401); assert.equal((await response.json()).reply, expected);
   }
   for (let remaining = 4; remaining >= 0; remaining--) {
@@ -198,6 +282,66 @@ test('Ask HTTP: resource revocation during a stream blocks the next chunk and pe
   assert.equal(events.at(-1).code, 'EXECUTION_REVOKED');
   assert.equal(events.some(event => event.done), false);
   assert.equal((await f.chatRepository.list(f.ownerA)).length, 0);
+});
+
+test('Ask HTTP: rolling rate replaces the parallel cap across replica guards, with one writer per chat', async t => {
+  const redis = new RedisFixture();
+  const f = await fixture(t, { redis, parallel: true });
+  const existing = await f.chatRepository.saveChat({ ownerId: f.ownerA, messages: [{ role: 'user', content: 'Existing' }] });
+  const firstGate = deferred(), secondGate = deferred();
+  const firstStarted = deferred(), secondStarted = deferred();
+  t.after(() => { firstGate.resolve(); secondGate.resolve(); });
+  f.stream = async function* ({ contents }) {
+    const isFirst = contents.at(-1).parts.some(part => part.text === 'First chat');
+    const gate = isFirst ? firstGate : secondGate;
+    (isFirst ? firstStarted : secondStarted).resolve();
+    yield { text: 'Started' };
+    await gate.promise;
+    yield { text: ' and completed' };
+  };
+  const chat = { stream: true, chatId: existing.id, chatRevision: existing.revision, messages: [{ role: 'user', content: 'First chat' }] };
+  const replicaTwo = { headers: { 'X-Test-Replica': '2' } };
+  const first = await f.ask(chat);
+  assert.equal(first.status, 200);
+  await firstStarted.promise;
+  const duplicate = await f.ask(chat, f.ownerA, replicaTwo);
+  assert.equal(duplicate.status, 429);
+  assert.equal((await duplicate.json()).code, 'EXECUTION_BUSY');
+  const second = await f.ask({ stream: true }, f.ownerA, replicaTwo);
+  assert.equal(second.status, 200);
+  await secondStarted.promise;
+  assert.equal(f.calls.length, 2);
+  await assert.rejects(acquireOwnerExecutionLease(redis, f.ownerA, new AbortController()), { code: 'EXECUTION_BUSY' });
+  const further = await Promise.all(Array.from({ length: 12 }, () => f.ask({ stream: true }, f.ownerA, replicaTwo)));
+  assert.ok(further.every(response => response.status === 200));
+  const overflow = await f.ask({ stream: true });
+  assert.equal(overflow.status, 429);
+  assert.equal(overflow.headers.get('Retry-After'), '60');
+  assert.equal((await overflow.json()).code, 'RATE_LIMITED');
+  redis.now += 59000;
+  const nearlyReset = await f.ask();
+  assert.equal(nearlyReset.status, 429);
+  assert.equal(nearlyReset.headers.get('Retry-After'), '1');
+  await nearlyReset.text();
+  redis.now += 1000;
+  firstGate.resolve();
+  const firstDone = sse(await first.text()).at(-1);
+  await assert.rejects(acquireOwnerExecutionLease(redis, f.ownerA, new AbortController()), { code: 'EXECUTION_BUSY' });
+  secondGate.resolve();
+  const secondDone = sse(await second.text()).at(-1);
+  for (const response of further) assert.equal(sse(await response.text()).at(-1).done, true);
+  assert.equal(firstDone.chatId, existing.id);
+  assert.notEqual(secondDone.chatId, existing.id);
+  assert.equal(firstDone.done, true);
+  assert.equal(secondDone.done, true);
+  const exclusive = await acquireOwnerExecutionLease(redis, f.ownerA, new AbortController());
+  const blocked = await f.ask();
+  assert.equal(blocked.status, 429);
+  await blocked.text();
+  await exclusive.release();
+  const recovered = await f.ask();
+  assert.equal(recovered.status, 200);
+  await recovered.text();
 });
 
 test('Ask HTTP: raw provider errors and unknown codes never reach client or telemetry', async t => {

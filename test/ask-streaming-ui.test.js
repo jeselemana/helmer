@@ -33,7 +33,7 @@ test('streamed Markdown matches a full safe render at every character and keeps 
     'Hello\n\n## Heading\n\nA final paragraph.',
     'One\n\n- First\n\n- Second\n  continuation\n\nLast.',
     'One\n\n1. First\n\n2. Second\n\nLast.',
-    'Hello\n\n| Name | Value |\n| --- | --- |\n| A | **B** |\n\nEnd.',
+    'Hello\n\n| Name | Value |\n| --- | --- |\n| A | **B<br>C**<br />D `<br>` <img src=x onerror=alert(1)> |\n\nEnd.',
     'A\n\n```js\nconst value = 1;\n```\n\nAfter.',
     'Normal\n## Heading\nText\n\n---\n\nFinal **bold** [link](https://example.com).',
     'Text\r\n\r\nNext paragraph with <img src=x onerror=alert(1)>.',
@@ -55,6 +55,15 @@ test('streamed Markdown matches a full safe render at every character and keeps 
   patchAskRichTextElement(root, 'Stable paragraph.\n\nNew text');
   assert.equal(root.firstChild, first);
   assert.equal(root._askParseCache.blocks[0].sourceStart, 0);
+});
+
+test('Ask tables render only safe breaks and preserve literal tags in code', t => {
+  const w = harness(t);
+  const root = w.askTest.renderAskRichText('| Name | Value |\n| --- | --- |\n| A | B<br>C `<br>` <br onclick=alert(1)> |');
+  const cell = root.querySelectorAll('td')[1];
+  assert.equal(cell.querySelectorAll('br').length, 1);
+  assert.equal(cell.querySelector('code').textContent, '<br>');
+  assert.match(cell.textContent, /<br onclick=alert\(1\)>/);
 });
 
 test('source chips use titles, preserve destinations, collapse queries and reject unsafe URLs', t => {

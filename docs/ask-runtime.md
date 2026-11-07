@@ -50,7 +50,7 @@ Values outside the supported range fall back to the default.
 | Variable | Default | Supported range |
 | --- | ---: | ---: |
 | `ASK_MAX_OUTPUT_TOKENS` | 8192 | 256–16384 |
-| `ASK_REQUEST_TIMEOUT_MS` | 180000 | 1000–240000 |
+| `ASK_REQUEST_TIMEOUT_MS` | 165000 | 1000–240000 |
 | `ASK_FIRST_EVENT_TIMEOUT_MS` | 60000 | 1000–180000 |
 | `ASK_STREAM_IDLE_TIMEOUT_MS` | 30000 | 1000–180000 |
 | `ASK_SEARCH_TIMEOUT_MS` | 18000 | 1000–180000 |

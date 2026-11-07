@@ -6,6 +6,7 @@ import { ASK_INSTRUCTIONS } from './prompts.js';
 import { geminiFileCache } from './gemini-file-cache.js';
 import { ungroundedFallbackConfig } from './grounding-fallback.js';
 import { assertExecutionActive, assertExecutionAuthorized } from '../security/execution-control.js';
+import { isGroundedAssistantMessage } from './grounded-chat-retention.js';
 import { LLMProviderError } from './llm-router.js';
 
 const SAFETY_SETTINGS = [
@@ -53,7 +54,7 @@ export function buildAskContents(messages, ownerId, fileCache, limits) {
   let chars = 0, count = 0;
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
-    if (!message) continue;
+    if (!message || isGroundedAssistantMessage(message)) continue;
     const size = (message.content?.length || 0) + Math.min(message.file?.textContent?.length || 0, 30000);
     if (count && (count >= limits.maxHistoryMessages || chars + size > limits.maxHistoryChars)) break;
     selected.add(index); chars += size; count++;
@@ -66,6 +67,9 @@ export function buildAskContents(messages, ownerId, fileCache, limits) {
   let fileChars = 0, fileTextChars = 0;
   for (const index of [...selected].sort((a, b) => a - b)) {
     const message = messages[index], role = message.role === 'assistant' ? 'model' : 'user';
+    if (isGroundedAssistantMessage(message)) {
+      continue;
+    }
     const parts = [];
     if (role === 'user' && message.file) {
       const file = fileCache.resolveFile(message.file, ownerId) || message.file;

@@ -43,6 +43,21 @@ test("registry-only additions appear automatically and mouse selection works", a
   h.document.querySelector(".ask-plugin-option").click(); assert.deepEqual(h.selected(), ["drive"]);
 });
 
+test("@ selector follows the composer disabled state through repeated streaming completions", async t => {
+  const h = await domHarness(t);
+  for (let turn = 0; turn < 20; turn++) {
+    h.input.disabled = true;
+    h.type("@");
+    assert.equal(h.document.querySelector(".ask-plugin-selector").hidden, true);
+    h.input.disabled = false;
+    h.type("@excel");
+    assert.equal(h.document.querySelector(".ask-plugin-selector").hidden, false);
+    h.key("Enter");
+    assert.deepEqual(h.selected(), ["excel"]);
+    h.key("Backspace");
+  }
+});
+
 test("artifact cards use safe DOM text and server-generated authenticated URLs", async t => {
   const h = await domHarness(t);
   const artifact = { id: randomUUID(), version: 1, filename: '<img src=x onerror="alert(1)">.docx', size: 4096, pluginId: "word", downloadUrl: "javascript:alert(1)" };

@@ -48,7 +48,7 @@ These directives are MANDATORY and NON-NEGOTIABLE across all coding, refactoring
 
 ### 4. AI Execution & Concurrency Control (All Generation Routes)
 - **Universal Scope**: Mandatory for `/api/ask`, `/api/strategy`, `/api/up`, and any future generation or streaming endpoints.
-- **Per-Tenant Mutex**: All AI generation must pass through `createAskExecutionGuard` (and `hasActiveJobForOwner` for background research jobs). A single `ownerId` cannot run concurrent AI generation or background research requests (must return 429 `EXECUTION_BUSY`).
+- **Per-Tenant Execution Limits**: With Redis admission available, authenticated foreground `POST /api/ask` requests may run in parallel across separate chats. Limit submissions to 15 per owner and 60 per IP in a rolling minute, returning 429 `RATE_LIMITED` with `Retry-After`. Keep one writer per existing chat. Guests, other AI routes, and background research retain exclusive owner admission. An exclusive execution cannot overlap with active Ask work. Reject execution conflicts with 429 `EXECUTION_BUSY`. Keep the execution guard, background-job check, and atomic Redis leases across replicas.
 - **Platform-Wide Capacity & Heartbeats**: Enforce global concurrent execution limits and Redis provider slots via atomic Lua scripts and heartbeat lease renewals.
 - **Idempotency & Fingerprinting**: All mutating generation endpoints require an `Idempotency-Key` header (`^[A-Za-z0-9_-]{16,100}$`). In Build mode, always compute canonical payload fingerprints (`computePayloadFingerprint`) and reject parameter mismatches with 409 `IDEMPOTENCY_CONFLICT`.
 - **Budget Tracking**: Every AI model call must be reserved through `AiPolicy.reserveProvider()` to enforce daily per-user (`AI_USER_DAILY_USD`) and platform (`AI_PLATFORM_DAILY_USD`) micro-dollar spend ceilings.
@@ -75,6 +75,9 @@ These directives are MANDATORY and NON-NEGOTIABLE across all coding, refactoring
   - Filter all search results against `LOW_QUALITY_DOMAINS` and prioritize `HIGH_SIGNAL_DOMAINS`.
   - All web source URLs must be strictly sanitized (`https?://` only) to protect against malicious URL schemes (`javascript:`, `data:`).
   - Linked sources MUST be rendered in a compact chip format directly at the end of the response. Titles and domains must be safely rendered without raw `innerHTML`.
+- **Grounding Data Isolation & 2-Year Retention**:
+  - Responses grounded with Google Search must NEVER be forwarded to learning loops, telemetry, or subsequent model prompt turns (`isRestricted = true`). Telemetry and learning loop entries for grounded queries must redact interaction content (`onlyNecessaryData: true`).
+  - Grounded assistant turns stored in user chat history have a strict maximum retention of 2 years (`MAX_GROUNDED_CHAT_RETENTION_MS`). Stored records older than 2 years must be pruned during store sanitization and tenant maintenance.
 
 ---
 
@@ -115,10 +118,10 @@ These directives are MANDATORY and NON-NEGOTIABLE across all coding, refactoring
 ---
 
 ### 10. UI Card & Teaser Permanent Dismissal (Zero Clutter Policy)
-- **Permanent Dismissal with X / Close**: When a user clicks 'X' (close), 'Dismiss', 'Keç', or 'Bir daha göstərmə' on any informational card, teaser banner, starter guide, or announcement (such as "SI Hub yaxında", starter guide cards in Ask/Build, Archive feature tips, or release toasts), the dismissal MUST be stored permanently in persistent client storage (`localStorage`).
+- **Permanent Dismissal with X / Close**: When a user clicks 'X' (close), 'Dismiss', 'Keç', or 'Bir daha göstərmə' on any informational card, starter guide, feature tip, or announcement toast, the dismissal MUST be stored permanently in persistent client storage (`localStorage`).
 - **Zero Temporary Memory / No Session Clutter**: Never use `sessionStorage` or transient in-memory flags for dismissible UI cards or promotional teasers that cause them to reappear upon reload, opening a new tab, or starting a new session.
 - **Cross-Mode Cleanliness**: Dismissing starter or guide cards must permanently dismiss all related starter guide cards across all modes (Ask and Build) so the interface remains clean and the user is never repeatedly interrupted.
-- **Interaction & Action Dismissal**: When the user acts on a promotional or informational card (e.g., clicking 'Try it' / 'Yoxla' or navigating to the featured destination), the card must be marked permanently dismissed so future visits to that page remain decluttered.
+- **Interaction & Action Dismissal**: When the user acts on an informational card (e.g., clicking 'Try it' / 'Yoxla' or navigating to the featured destination), the card must be marked permanently dismissed so future visits to that page remain decluttered.
 
 ---
 

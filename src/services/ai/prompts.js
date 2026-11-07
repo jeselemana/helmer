@@ -471,11 +471,12 @@ export function detectGuestFunctionalRestriction({
   hasStrategyContext = false,
   hasTaskContext = false,
   rawThinkingLevel = null,
+  explicitLowThinking = false,
 } = {}) {
   const text = (lastUserMsg || "").toLowerCase();
 
   // 1. Thinking
-  if (rawThinkingLevel === "high" || rawThinkingLevel === "medium") {
+  if (explicitLowThinking || rawThinkingLevel === "high" || rawThinkingLevel === "medium") {
     return GUEST_RESTRICTION_NOTICES.thinking;
   }
   if (

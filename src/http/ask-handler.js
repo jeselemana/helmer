@@ -249,8 +249,10 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       const selectedAskModel = ASK_GEMINI_MODEL;
       const searchDecision = evaluateSearchRoute({ prompt: lastUserMsg, messages, hasStrategyContext });
-      const enableSearch = searchDecision.enableSearch;
-      const requireGrounding = Boolean(searchDecision.requireGrounding);
+      const explicitWeb = req.body.pluginIds?.includes("web") === true;
+      if (explicitWeb) messages.at(-1).pluginIds = ["web"];
+      const enableSearch = explicitWeb || searchDecision.enableSearch;
+      const requireGrounding = explicitWeb || searchDecision.requireGrounding;
       const requestedThinkingLevel = resolveAskThinkingLevel({
         requestedThinkingLevel: rawThinkingLevel,
         lastUserMsg,
@@ -309,6 +311,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           lastUserMsg, hasAttachment: Boolean(hasAnyAttachment),
           hasStrategyContext: Boolean(selectedStrategy || strategyId),
           hasTaskContext: Boolean(selectedTask || taskId), rawThinkingLevel: requestedThinkingLevel,
+          explicitLowThinking: rawThinkingLevel === "low",
         });
         if (restrictionNotice) {
           await complete(restrictionNotice, undefined, { restrictedFeature: true, notice: true });
@@ -364,10 +367,11 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       await complete(reply, sanitizedGrounding);
 
       const modelImprovementActive = isModelImprovementEnabled(req);
-      const isRestricted = !modelImprovementActive;
       const hasPriorAssistant = messages.some((message) => message.role === "assistant");
       const hasGroundedHistory = messages.some((m) => Boolean(m?.groundingMetadata || m?.type === "research" || m?.pluginIds?.includes("web")))
         || Boolean(selectedStrategy?.strategy?.orchestration?.searchGrounded);
+      const groundingActive = Boolean(enableSearch || sanitizedGrounding?.groundingChunks?.length || hasGroundedHistory);
+      const isRestricted = !modelImprovementActive || groundingActive;
       const logging = learningLoop.recordInteraction({
         id: learningInteractionId, ownerId: req.ownerId, sessionId: req.guestOwnerId,
         mode: "ask", taskType: learningTaskType,
@@ -376,9 +380,9 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         modelProvider: generated.provider, modelName: generated.model,
         modelResponse: isRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : reply,
         usage: generated.usage, latencyMs: Date.now() - learningStartedAt, requestStatus: "success",
-        groundingActive: Boolean(enableSearch || sanitizedGrounding?.groundingChunks?.length || hasGroundedHistory),
+        groundingActive,
         onlyNecessaryData: isRestricted,
-        modelImprovement: modelImprovementActive,
+        modelImprovement: !isRestricted,
         privacySnapshot: getReqPrivacySnapshot(req),
       }).then(() => hasPriorAssistant && !isRestricted ? learningLoop.recordSignal(learningInteractionId, req.ownerId, { continuedConversation: true }) : null);
       logWithoutBlocking(logging, "Ask interaction logging");
@@ -389,18 +393,18 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         model: activeModel,
         latencyMs: Date.now() - learningStartedAt,
         usage: generated.usage,
-        groundingActive: Boolean(enableSearch),
+        groundingActive,
         status: "success",
         querySnippet: isRestricted ? "" : learningPrompt,
         onlyNecessaryData: isRestricted,
-        modelImprovement: modelImprovementActive,
+        modelImprovement: !isRestricted,
       }).catch(() => {});
 
       return;
     } catch (error) {
 
       const modelImprovementActive = isModelImprovementEnabled(req);
-      const isRestricted = !modelImprovementActive;
+      const isRestricted = !modelImprovementActive || learningContext.searchGrounded === true;
       if (learningInteractionId) {
         logWithoutBlocking(learningLoop.recordInteraction({
           id: learningInteractionId, ownerId: req.ownerId, sessionId: req.guestOwnerId,

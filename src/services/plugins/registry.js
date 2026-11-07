@@ -72,7 +72,9 @@ export function resolveCapabilityIntent({ registry, pluginIds = [], prompt, prev
     if (plugin) return { intent: "artifact_generation", plugins: [plugin], editing: true };
   }
   if (/(?:hazırla|yarat|çevir|fayl.*kimi|sənəd|create|generate|make|export|convert|prepare)/i.test(prompt)) {
-    const plugin = registry.detect(prompt);
+    // A slash-separated export format is usually a product feature, not a
+    // request to create a workbook (for example, "plan hazırla ... Excel/CSV").
+    const plugin = registry.detect(prompt.replace(/\b(?:excel\s*\/\s*csv|csv\s*\/\s*excel)\b/gi, ""));
     if (plugin) return { intent: "artifact_generation", plugins: [plugin] };
   }
   return { intent: "chat", plugins: [] };

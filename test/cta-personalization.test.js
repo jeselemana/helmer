@@ -25,16 +25,16 @@ test("script.js: CTAs include a balanced mix of personalized and natural nameles
   assert.ok(scriptContent.includes("typeof item === \"function\" ? item(name) : item"), "function-based CTAs are resolved with name");
 
   // Verify key bold business phrases in AZ and EN (both personalized and nameless)
-  assert.ok(scriptContent.includes("hansı bazarı fəth edirik?"), "AZ Build contains personalized market conquest CTA");
-  assert.ok(scriptContent.includes("what market are we conquering?"), "EN Build contains personalized market conquest CTA");
-  assert.ok(scriptContent.includes("Rəqibləri qabaqlamaq vaxtıdır."), "AZ Build contains natural nameless CTA");
-  assert.ok(scriptContent.includes("Time to outsmart the competition."), "EN Build contains natural nameless CTA");
-  assert.ok(scriptContent.includes("Böyüməyə (scale) hazırsan?"), "AZ Build contains natural nameless scaling CTA");
-  assert.ok(scriptContent.includes("Ready to scale aggressively?"), "EN Build contains natural nameless scaling CTA");
-  assert.ok(scriptContent.includes("Biznesdəki əsas darboğaz nədir?"), "AZ Ask contains natural nameless bottleneck CTA");
-  assert.ok(scriptContent.includes("What's your biggest bottleneck?"), "EN Ask contains natural nameless bottleneck CTA");
-  assert.ok(scriptContent.includes("ən çətin biznes sualını ver."), "AZ Ask contains personalized toughest question CTA");
-  assert.ok(scriptContent.includes("hit me with your toughest question."), "EN Ask contains personalized toughest question CTA");
+  assert.ok(scriptContent.includes("növbəti həmlən nədir?"), "AZ Build contains personalized play CTA");
+  assert.ok(scriptContent.includes("what's the next play?"), "EN Build contains personalized play CTA");
+  assert.ok(scriptContent.includes("Rəqibləri oyundan çıxarmaq vaxtıdır."), "AZ Build contains natural nameless CTA");
+  assert.ok(scriptContent.includes("Eat their lunch."), "EN Build contains natural nameless CTA");
+  assert.ok(scriptContent.includes("Ləngiyən məhv olur. Tərpən."), "AZ Build contains natural nameless urgency CTA");
+  assert.ok(scriptContent.includes("Speed is the ultimate weapon."), "EN Build contains natural nameless urgency CTA");
+  assert.ok(scriptContent.includes("prosesdəki kritik boşluq nədir?"), "AZ Ask contains personalized critical gap CTA");
+  assert.ok(scriptContent.includes("where's the pipeline leaking?"), "EN Ask contains personalized leaking pipeline CTA");
+  assert.ok(scriptContent.includes("Özünü aldatma — real rəqəmləri göstər."), "AZ Ask contains natural nameless unit economics CTA");
+  assert.ok(scriptContent.includes("Stop capping. Show the unit economics."), "EN Ask contains natural nameless unit economics CTA");
 });
 
 test("style.css: ask-title has uniform reduced font-weight: 400 across all CTA elements", async () => {

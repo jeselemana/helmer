@@ -1,4 +1,6 @@
-import { createExecutionController } from '../services/security/execution-control.js';
+import { assertExecutionAuthorized } from '../services/security/execution-control.js';
+import { createAskTransport } from './ask-transport.js';
+import { createAskConfig } from '../services/ai/ask-config.js';
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -41,17 +43,11 @@ function storedMessage(message) {
     ...(message.file ? { file: { fileId: message.file.fileId, name: message.file.name, size: message.file.size, type: message.file.type, mimeType: message.file.mimeType } } : {}) };
 }
 
-export function createCapabilityRouter({ allowGuestChat = false, registry, workflow, artifacts, chats, strategies, planner, rateLimit, hydrateFile, onComplete }) {
+export function createCapabilityRouter({ allowGuestChat = false, registry, workflow, artifacts, chats, strategies, planner, rateLimit, hydrateFile, onComplete, limits = createAskConfig() }) {
   const router = express.Router();
   router.get("/plugins", requireAuth, (_req, res) => res.json({ plugins: registry.list() }));
   router.post("/", (req, res, next) => allowGuestChat && !req.user && req.ownerId?.startsWith("guest_") ? next() : requireAuth(req, res, next), async (req, res, next) => {
-    let streaming = false, controller, heartbeat, completedResult, committed = false, allocatedChatId, initialChat;
-    const emit = data => {
-      if (!res.destroyed && !res.writableEnded) {
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-        res.flush?.();
-      }
-    };
+    let transport, completedResult, committed = false, allocatedChatId, initialChat;
     try {
       const parsed = askRequestSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: "Sorğu parametrləri düzgün deyil.", code: "VALIDATION_ERROR" });
@@ -89,19 +85,22 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       const latestPublished = target ? references.filter(artifact => artifact.id === target.id).at(-1) : null;
       if (previous && previous.versions.at(-1).version !== latestPublished?.version) throw new Error("Artifact update is still being committed");
       const selection = resolveCapabilityIntent({ registry, pluginIds: payload.pluginIds, prompt, previousArtifact: previous });
-      if (selection.intent === "chat") {
+      if (selection.intent === "chat" || (selection.plugins.length === 1 && selection.plugins[0].id === "web")) {
         if (chat) req.preloadedAskChat = chat;
         if (previous) req.askArtifactContext = JSON.stringify(previous.versions.at(-1).spec);
         return next();
       }
       if (!req.user) return res.status(401).json({ code: "AUTH_REQUIRED" });
       if (rateLimit) { let limited = true; rateLimit(req, res, () => { limited = false; }); if (limited) return; }
+      transport = createAskTransport(req, res, limits);
+      const streaming = payload.stream === true || req.headers.accept?.includes("text/event-stream");
       const strategyId = payload.strategyId || chat?.strategyId;
       const taskId = payload.taskId || chat?.taskId;
       const [strategy, task] = await Promise.all([
         strategyId ? strategies.getById(strategyId, req.ownerId) : null,
         taskId ? planner.list(req.ownerId).then(items => items.find(item => item.id === taskId) || null) : null,
       ]);
+      transport.signal.throwIfAborted();
       if ((strategyId && !strategy) || (taskId && !task)) return res.status(404).json({ error: "Seçilmiş kontekst tapılmadı.", code: "NOT_FOUND" });
       const sourceContext = strategy || task ? JSON.stringify({ strategy: strategy ? { title: strategy.title, brief: strategy.brief, strategy: strategy.strategy } : null, task: task ? { text: task.text, strategyTitle: task.strategyTitle } : null }) : "";
       const isRetry = chat?.messages.at(-1)?.role === "user" && chat.messages.at(-1).content === prompt;
@@ -111,6 +110,7 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       if (isRetry && incoming.file) history.at(-1).file = incoming.file;
       history.at(-1).pluginIds = selection.plugins.map(plugin => plugin.id);
       for (const message of history) if (message.file) {
+        transport.signal.throwIfAborted();
         assertCachedFileReference(message.file, chat);
         message.file = await prepareUploadedContext(hydrateFile ? await hydrateFile(message.file, req.ownerId) : message.file);
         if (!message.file.data && !message.file.textContent) throw new Error("Uploaded context expired; attach the file again");
@@ -118,6 +118,7 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       allocatedChatId = chat?.id || randomUUID();
       // Establish an owner-scoped chat before artifact persistence; failed runs stay retryable.
       const safeHistory = history.map((message, index) => chat && index < chat.messages.length ? chat.messages[index] : { ...storedMessage(message), pluginIds: message.pluginIds });
+      await assertExecutionAuthorized(transport.signal);
       initialChat = await chats.saveChat({ id: allocatedChatId, ownerId: req.ownerId, messages: safeHistory, strategyId, taskId, mustExist: Boolean(chat), expectedRevision: chat ? expectedRevision : null });
       if (req.securityContext) req.securityContext.assertResources = async () => {
         const [authorizedChat, authorizedStrategy, authorizedTasks] = await Promise.all([
@@ -130,41 +131,39 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
           throw Object.assign(new Error('Execution context removed'), { code: 'EXECUTION_REVOKED', status: 403 });
         }
       };
-      streaming = payload.stream === true || req.headers.accept?.includes("text/event-stream");
-      controller = createExecutionController();
-      res.on("close", () => { if (!res.writableEnded) controller.abort(); });
       if (streaming) {
-        res.set({ "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no", "Content-Encoding": "identity" });
-        res.flushHeaders();
-        heartbeat = setInterval(() => { if (!res.destroyed) res.write(": keepalive\n\n"); }, 15000);
-        emit({ status: "analyzing", statusText: "Məlumatları analiz edirəm...", chatId: allocatedChatId, chatRevision: initialChat.revision });
+        transport.start();
+        transport.send({ status: "analyzing", statusText: "Məlumatları analiz edirəm...", chatId: allocatedChatId, chatRevision: initialChat.revision });
       }
-      const isWebResearchOnly = selection.plugins.length === 1 && selection.plugins[0].id === "web";
+      transport.signal.throwIfAborted();
       const result = completedResult = await workflow.execute({ plugins: selection.plugins, ownerId: req.ownerId, chatId: allocatedChatId, prompt, messages: history, sourceContext, previous,
         preferEdit: Boolean(payload.artifactId),
-        requestedModel: payload.model, scopes: new Set(["context:read", "artifacts:write", "web:search"]), signal: controller.signal,
+        requestedModel: payload.model, scopes: new Set(["context:read", "artifacts:write", "web:search"]), signal: transport.signal,
         language: req.user?.settings?.language || (req.headers["accept-language"]?.includes("en") ? "en" : "az"),
-        onStatus: streaming ? emit : () => {},
-        onChunk: streaming && isWebResearchOnly ? (chunk, groundingMetadata) => emit({ chunk, groundingMetadata, model: "gemini-3.8-flash" }) : undefined,
+        onStatus: streaming ? transport.send : undefined,
       });
       const assistant = { role: "assistant", content: result.reply, artifacts: result.artifacts, execution: result.execution, model: result.model, groundingMetadata: result.groundingMetadata, createdAt: new Date().toISOString() };
       await req.securityContext?.assertAuthorized?.();
+      transport.signal.throwIfAborted();
       req.securityContext?.markMutationPending?.();
       const savedChat = await chats.saveChat({ id: allocatedChatId, ownerId: req.ownerId, messages: [...safeHistory, assistant], strategyId, taskId, mustExist: true, expectedRevision: initialChat.revision || 1 });
       committed = true;
       const response = { done: true, reply: result.reply, artifacts: result.artifacts, execution: result.execution, model: result.model, chat: savedChat, chatId: savedChat.id, chatRevision: savedChat.revision, groundingMetadata: result.groundingMetadata };
       req.securityContext?.recordIdempotentResult?.(200, response);
+      await req.securityContext?.persistIdempotentResult?.();
+      transport.signal.throwIfAborted();
       onComplete?.({ req, result });
-      if (streaming) { emit(response); return res.end(); }
+      if (streaming) { transport.send(response); await transport.drain(); return res.end(); }
       return res.json(response);
     } catch (error) {
       if (completedResult && !committed) for (const artifact of completedResult.artifacts.reverse()) await artifacts.rollback(artifact, req.ownerId).catch(() => {});
       // Provider/renderer internals and raw model output never appear in the conversation.
       const response = { error: "Tapşırığı tamamlamaq mümkün olmadı. Yenidən cəhd edin.", code: "CAPABILITY_EXECUTION_FAILED", retryable: true, execution: error.execution, chatId: allocatedChatId, chatRevision: initialChat?.revision };
       console.error("Capability execution failed:", error.code || error.name);
-      if (streaming && !res.destroyed) { emit(response); return res.end(); }
+      if (transport?.streaming) return transport.fail(error, response);
+      if (res.destroyed || res.writableEnded) return;
       if (!res.headersSent) return res.status(502).json(response);
-    } finally { clearInterval(heartbeat); }
+    } finally { transport?.dispose(); }
   });
   return router;
 }

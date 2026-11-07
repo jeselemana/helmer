@@ -17,6 +17,7 @@ export function createAskTransport(req, res, { requestTimeoutMs = 180000, maxBuf
     controller.abort(error);
     if (res.destroyed || res.writableEnded) return;
     const payload = { code: error.code, error: 'Sorğunu tamamlamaq mümkün olmadı.' };
+    if (req.securityContext) req.securityContext.askTerminalFailure = true;
     if (streaming) res.end(`data: ${JSON.stringify(payload)}\n\n`);
     else res.status(504).json(payload);
   }, requestTimeoutMs);
@@ -60,11 +61,11 @@ export function createAskTransport(req, res, { requestTimeoutMs = 180000, maxBuf
       if (res.writableNeedDrain) await once(res, 'drain', { signal: controller.signal });
       controller.signal.throwIfAborted();
     },
-    fail(error) {
+    fail(error, publicPayload) {
       if (res.destroyed || res.writableEnded) return;
+      if (req.securityContext) req.securityContext.askTerminalFailure = true;
       // The operation can be aborted while the HTTP socket is still usable.
-      res.write(`data: ${JSON.stringify({ error: 'Sorğunu tamamlamaq mümkün olmadı.', code: publicAskErrorCode(error) })}\n\n`);
-      res.end();
+      res.end(`data: ${JSON.stringify(publicPayload || { error: 'Sorğunu tamamlamaq mümkün olmadı.', code: publicAskErrorCode(error) })}\n\n`);
     },
     dispose() {
       clearTimeout(deadline);
