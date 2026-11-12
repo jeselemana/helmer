@@ -13,8 +13,8 @@ These directives are MANDATORY and NON-NEGOTIABLE across all coding, refactoring
 ---
 
 ### ARCHITECTURAL BASELINE ANCHOR
-- **Reference Commit**: `0eaa33a`
-- **Baseline Invariant**: The codebase state at commit `0eaa33a` is the immutable architectural benchmark. When adding features, refactoring, or optimizing, strictly preserve the patterns, defensive pipelines, multi-replica consistency, and tenant isolation established in this commit. If in doubt about an implementation detail, inspect the patterns from commit `0eaa33a`.
+- **Reference Commit**: `43f22a2`
+- **Baseline Invariant**: The codebase state at commit `43f22a2` is the immutable architectural benchmark. When adding features, refactoring, or optimizing, strictly preserve the patterns, defensive pipelines, multi-replica consistency, and tenant isolation established in this commit. If in doubt about an implementation detail, inspect the patterns from commit `43f22a2`.
 - **Zero Guard Truncation**: You are strictly FORBIDDEN from omitting, simplifying, or commenting out existing validation checks, locks, abort handlers, or security guards during refactoring. Every defensive check in the original code must persist.
 - **No Unauthorized Dependencies**: Do not introduce new external npm packages (especially networking, HTTP, or alternate parsing libraries) without explicit confirmation. Rely strictly on verified internal utilities.
 
