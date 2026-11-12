@@ -1,4 +1,4 @@
-import { isLowQualityDomain, isHighSignalDomain } from "./research-service.js";
+import { extractCleanDomain, isGoogleRelayHostOrUrl, isLowQualityDomain, isHighSignalDomain } from "./research-service.js";
 
 export function sanitizeAskGroundingMetadata(metadata) {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
@@ -19,8 +19,10 @@ export function sanitizeAskGroundingMetadata(metadata) {
       if (typeof uri !== "string" || !uri.trim()) return false;
       try {
         const parsed = new URL(uri.trim());
+        const cleanHost = extractCleanDomain(parsed.href);
         if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password ||
-            parsed.href.length > 2000 || isLowQualityDomain(parsed.hostname) || seenSources.has(parsed.href)) return false;
+            parsed.href.length > 2000 || isGoogleRelayHostOrUrl(parsed.href) || !cleanHost ||
+            isLowQualityDomain(cleanHost) || seenSources.has(parsed.href)) return false;
         chunk.web.uri = parsed.href;
         seenSources.add(parsed.href);
         return true;

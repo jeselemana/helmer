@@ -36,28 +36,58 @@ export async function acquireIdempotencyLock({ ownerId, idempotencyKey, operatio
       const raw = await redis.get(resultKey);
       return raw ? JSON.parse(raw) : null;
     };
-    saveResult = value => redis.set(resultKey, JSON.stringify({ ...value, expiresAt: Date.now() + resultTtl }), { PX: resultTtl });
+    saveResult = async value => {
+      const payload = JSON.stringify({ ...value, ownerToken: token, expiresAt: Date.now() + resultTtl });
+      const ok = await redis.eval(
+        "if redis.call('get', KEYS[1]) == ARGV[1] then redis.call('set', KEYS[2], ARGV[2], 'PX', ARGV[3]); return 1 else return 0 end",
+        { keys: [key, resultKey], arguments: [token, payload, String(resultTtl)] },
+      );
+      if (!ok) {
+        loseLease();
+        controller.signal.throwIfAborted();
+      }
+    };
   } else {
     const cloud = storage || (isR2Configured() ? { read: readTenantObject, write: writeTenantObject } : null);
     if (cloud) {
+      // Store both lease state and replay result in ONE object so single-object R2 ETag CAS is atomic.
       const key = `strategy-locks-v1/${safeId}.json`;
       const current = await cloud.read(key);
       if (current.record?.token && current.record.expiresAt > Date.now()) return null;
-      if (!await cloud.write(key, { token, expiresAt: Date.now() + timeoutMs }, current.etag)) return null;
+      const existingResult = current.record?.result?.expiresAt > Date.now() ? current.record.result : undefined;
+      if (!await cloud.write(key, { token, expiresAt: Date.now() + timeoutMs, ...(existingResult ? { result: existingResult } : {}) }, current.etag)) {
+        return null;
+      }
       renewBackend = async () => {
         const fresh = await cloud.read(key);
         if (fresh.record?.token !== token || fresh.record.expiresAt <= Date.now()) return false;
-        return cloud.write(key, { token, expiresAt: Date.now() + timeoutMs }, fresh.etag);
+        const freshResult = fresh.record?.result?.expiresAt > Date.now() ? fresh.record.result : undefined;
+        return cloud.write(key, { token, expiresAt: Date.now() + timeoutMs, ...(freshResult ? { result: freshResult } : {}) }, fresh.etag);
       };
       releaseBackend = async () => {
         const fresh = await cloud.read(key);
-        if (fresh.record?.token === token) await cloud.write(key, { token: null, expiresAt: 0 }, fresh.etag);
+        if (fresh.record?.token === token) {
+          const freshResult = fresh.record?.result?.expiresAt > Date.now() ? fresh.record.result : undefined;
+          await cloud.write(key, { token: null, expiresAt: 0, ...(freshResult ? { result: freshResult } : {}) }, fresh.etag);
+        }
       };
-      const resultKey = `strategy-results-v1/${safeId}.json`;
-      readResult = async () => (await cloud.read(resultKey)).record;
+      readResult = async () => (await cloud.read(key)).record?.result || null;
       saveResult = async value => {
-        const current = await cloud.read(resultKey);
-        if (!await cloud.write(resultKey, { ...value, expiresAt: Date.now() + resultTtl }, current.etag)) {
+        const fresh = await cloud.read(key);
+        if (fresh.record?.token !== token || fresh.record.expiresAt <= Date.now()) {
+          loseLease();
+          controller.signal.throwIfAborted();
+        }
+        const ok = await cloud.write(
+          key,
+          {
+            token,
+            expiresAt: fresh.record.expiresAt,
+            result: { ...value, ownerToken: token, expiresAt: Date.now() + resultTtl },
+          },
+          fresh.etag
+        );
+        if (!ok) {
           loseLease();
           controller.signal.throwIfAborted();
         }
@@ -94,7 +124,13 @@ export async function acquireIdempotencyLock({ ownerId, idempotencyKey, operatio
     signal: controller.signal,
     assertOwned: async () => {
       if (released) loseLease();
-      if (renewBackend) await renewLease();
+      if (renewBackend) {
+        if (renewing) await renewal;
+        if (!controller.signal.aborted && !released) {
+          const ok = await Promise.resolve().then(renewBackend).catch(() => false);
+          if (!ok) loseLease();
+        }
+      }
       controller.signal.throwIfAborted();
     },
     readResult: async () => {

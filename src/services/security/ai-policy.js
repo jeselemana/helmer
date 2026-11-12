@@ -52,6 +52,33 @@ export const DEFAULT_MODEL_PRICING = Object.freeze({
   'default': { input: 2.50, output: 10.00, search: 0.035 },
 });
 
+export function resolveEffectiveModelPricing(model, env = process.env) {
+  let prices = {};
+  try {
+    if (env?.AI_MODEL_PRICING) {
+      prices = JSON.parse(env.AI_MODEL_PRICING);
+    }
+  } catch {
+    prices = {};
+  }
+  const modelKey = model || 'default';
+  const price = prices[modelKey] ||
+    prices[String(modelKey).toLowerCase()] ||
+    DEFAULT_MODEL_PRICING[modelKey] ||
+    DEFAULT_MODEL_PRICING[String(modelKey).toLowerCase()] ||
+    DEFAULT_MODEL_PRICING.default;
+  if (!price || !Number.isFinite(price.input) || !Number.isFinite(price.output) || price.input < 0 || price.output <= 0) {
+    return null;
+  }
+  const search = Number.isFinite(price.search) ? Number(price.search) : 0.035;
+  return {
+    input: Number(price.input),
+    output: Number(price.output),
+    search,
+    searchMicros: Math.round(search * 1_000_000),
+  };
+}
+
 // The available balance includes this reserved message; remaining is the post-request balance.
 export function guestMessageBalance(req) {
   const available = req.guestMessagesAvailable;
@@ -320,6 +347,8 @@ export class AiPolicy {
         this.ready();
         const id = req.get('Idempotency-Key');
         if (!id || !/^[A-Za-z0-9_-]{16,100}$/.test(id)) throw fail('IDEMPOTENCY_KEY_REQUIRED', 400);
+        const bodyId = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey.trim() : '';
+        if (bodyId && bodyId !== id) throw fail('IDEMPOTENCY_CONFLICT', 409);
         requestKey = `security:request:${createHash('sha256').update(`${req.ownerId}:${req.path}:${id}`).digest('hex')}`;
         fingerprint = requestFingerprint(req.body);
         const candidate = JSON.stringify({ state: 'reserved', fingerprint, token });
@@ -451,24 +480,12 @@ export class AiPolicy {
   async reserveProvider(context, params, reservation = {}) {
     await this.assertEnabled();
     this.ready();
-    let prices = {};
-    try {
-      if (this.env.AI_MODEL_PRICING) {
-        prices = JSON.parse(this.env.AI_MODEL_PRICING);
-      }
-    } catch {
-      prices = {};
-    }
     const modelKey = params?.model || 'default';
-    const price = prices[modelKey] ||
-                  prices[String(modelKey).toLowerCase()] ||
-                  DEFAULT_MODEL_PRICING[modelKey] ||
-                  DEFAULT_MODEL_PRICING[String(modelKey).toLowerCase()] ||
-                  DEFAULT_MODEL_PRICING.default;
-    if (!price || !Number.isFinite(price.input) || !Number.isFinite(price.output) || price.input < 0 || price.output <= 0) throw fail('MODEL_PRICING_UNAVAILABLE');
+    const price = resolveEffectiveModelPricing(modelKey, this.env);
+    if (!price) throw fail('MODEL_PRICING_UNAVAILABLE');
     const tools = params?.tools || params?.config?.tools || [];
     const searching = tools.some(tool => tool.googleSearch || /web_search/.test(tool.type || ''));
-    const searchPrice = Number.isFinite(price.search) ? price.search : 0.035;
+    const searchPrice = price.search;
     if (searching && (!Number.isFinite(searchPrice) || searchPrice < 0)) throw fail('TOOL_PRICING_UNAVAILABLE');
     let inlineBase64Chars = 0;
     const serialized = JSON.stringify(params, (key, value) => {

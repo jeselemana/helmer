@@ -836,7 +836,7 @@ test("Regression 1: Account A -> Logout -> Account B ensures complete frontend a
   // Extract isIdentityStale, clearUserScopedWorkspaceState, requestRefinement, saveStrategy, loadSavedStrategies, loadSavedChats, openSavedChat, openSavedStrategy, loadPlannerTasks, loadUsageStats
   const staleFnMatch = scriptSource.match(/function isIdentityStale\(epoch, expectedUserId\) \{[\s\S]*?\n\}/);
   const clearFnMatch = scriptSource.match(/function clearUserScopedWorkspaceState\(\) \{[\s\S]*?\n\}/);
-  const refineFnMatch = scriptSource.match(/async function requestRefinement\(action, request\) \{[\s\S]*?\n\}/);
+  const refineFnMatch = scriptSource.match(/async function requestRefinement\(action, request(?:, [^)]*)?\) \{[\s\S]*?\n\}/);
   const saveFnMatch = scriptSource.match(/async function saveStrategy\(\) \{[\s\S]*?\n\}/);
   const loadStratsMatch = scriptSource.match(/async function loadSavedStrategies\(\) \{[\s\S]*?\n\}/);
   const loadChatsMatch = scriptSource.match(/async function loadSavedChats\(\) \{[\s\S]*?\n\}/);

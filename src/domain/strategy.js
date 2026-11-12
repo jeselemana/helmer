@@ -115,14 +115,23 @@ export const StrategySchema = z.object({
           }
         }, "URL must be http or https"),
       }).strict()).max(20).nullable().optional(),
+      evidence: z.array(z.object({
+        text: z.string().trim().min(1).max(2000),
+        sourceIndices: z.array(z.number().int().min(0).max(19)).min(1).max(20),
+      }).strict()).max(20).optional(),
+      firstGroundedAt: z.string().trim().max(64).nullable().optional(),
+      lastGroundedAt: z.string().trim().max(64).nullable().optional(),
       searchQueries: z.array(z.string().trim().max(160)).max(10).nullable().optional(),
       searchEntryPoint: z.object({
         renderedContent: z.string().max(50000).nullable().optional(),
       }).strict().nullable().optional(),
       buildMode: z.enum(["auto", "faster"]).nullable().optional(),
+      mode: z.enum(["auto", "faster"]).nullable().optional(),
       generatorModel: z.string().trim().max(100).nullable().optional(),
+      strategistModel: z.string().trim().max(100).nullable().optional(),
       thinkingLevel: z.string().trim().max(32).nullable().optional(),
       fasterThinkingLevel: z.enum(["medium", "high"]).nullable().optional(),
+      sourcesCount: z.number().int().nonnegative().nullable().optional(),
       stageMetrics: z.array(z.object({
         phase: z.string().trim().max(64),
         model: z.string().trim().max(100),
@@ -222,9 +231,11 @@ export const UpdateStrategyTitleSchema = z.object({
 
 export const StrategyFeedbackSchema = z.object({
   strategyId: z.string().trim().regex(/^[0-9a-f-]{36}$/i).nullable().optional(),
+  clientSaveId: z.string().trim().min(8).max(120).nullable().optional(),
   feedback: z.enum(["like", "dislike"]).nullable(),
   brief: z.string().trim().max(3000).optional(),
   title: z.string().trim().max(300).optional(),
+  groundingActive: z.boolean().optional(),
 }).strict();
 
 export const StrategySummaryRequestSchema = z

@@ -1,4 +1,5 @@
 import { executionContext } from '../security/privacy-policy.js';
+import { isGroundedStrategyRecord, isGroundedAssistantMessage } from './grounded-chat-retention.js';
 
 const STOP_WORDS = new Set([
   "about", "after", "also", "and", "are", "but", "can", "for", "from", "how", "into", "our", "that", "the", "their", "this", "what", "when", "with", "your",
@@ -201,8 +202,14 @@ export async function getRelevantUserContext({
   const { allChats, allStrategies } = await loadTenantContextData(ownerId, chatRepository, strategyRepository);
   const candidates = [];
 
+  const groundedStrategyIds = new Set(
+    allStrategies.filter((strategy) => isGroundedStrategyRecord(strategy)).map((strategy) => strategy.id)
+  );
+
   for (const chat of allChats) {
     if (chat.deleted || chat.ownerId !== ownerId || chat.id === currentChatId || !Array.isArray(chat.messages)) continue;
+    if (chat.strategyId && groundedStrategyIds.has(chat.strategyId)) continue;
+    if (chat.messages.some((message) => isGroundedAssistantMessage(message))) continue;
     for (const message of chat.messages) {
       if (message?.role !== "user" || typeof message.content !== "string") continue;
       const score = relevance(queryTokens, message.content);
@@ -220,7 +227,7 @@ export async function getRelevantUserContext({
   }
 
   for (const strategy of allStrategies) {
-    if (strategy.deleted || strategy.ownerId !== ownerId) continue;
+    if (strategy.deleted || strategy.ownerId !== ownerId || isGroundedStrategyRecord(strategy)) continue;
     const searchable = `${strategy.title || ""} ${strategy.brief || ""} ${strategy.context?.business || ""} ${strategy.context?.targetAudience || ""}`;
     const score = relevance(queryTokens, searchable);
     if (score > 0) {

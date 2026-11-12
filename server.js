@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { publicAskErrorCode } from './src/http/ask-errors.js';
 import { sanitizeAskGroundingMetadata } from './src/services/ai/ask-grounding.js';
 import { createAskHandler } from './src/http/ask-handler.js';
@@ -7,7 +8,6 @@ import { z } from "zod";
 import { isR2Configured, loadJSONFromR2, saveJSONToR2, testR2Connection } from "./src/http/r2-storage.js";
 import express from "express";
 import { maintenanceMiddleware } from "./src/http/maintenance.js";
-import dotenv from "dotenv";
 import cors from "cors";
 import fs from "fs";
 import path from "path";
@@ -58,7 +58,6 @@ import { DistributedResearchService as ResearchService } from "./src/services/ai
 import { createResearchRouter } from "./src/http/research-router.js";
 import { GuestRetention } from "./src/services/security/guest-retention.js";
 
-dotenv.config();
 validateSecurityConfig();
 
 const isProduction = process.env.NODE_ENV === "production";
@@ -277,7 +276,7 @@ const aiLearningRepository = new FileAiLearningRepository(AI_LEARNING_PATH, redi
 const privacyPolicy = new PrivacyPolicy(userRepository);
 const learningLoop = new LearningLoopService(aiLearningRepository, undefined, privacyPolicy);
 const telemetryRepository = new FileTelemetryRepository(TELEMETRY_PATH, redis);
-const telemetryService = new TelemetryService(telemetryRepository, privacyPolicy);
+const telemetryService = new TelemetryService(telemetryRepository, privacyPolicy, { strategyRepository });
 const upRepository = new FileUpRepository(path.join(DATA_DIR, "up-v1"));
 const upService = new UpService(upRepository, { telemetry: telemetryService });
 const emailService = new PasswordResetEmailService({ dataDir: DATA_DIR });
@@ -334,12 +333,16 @@ async function syncAllStores() {
   await refreshAdminIdentities();
   userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
   guestRetention.prune().catch(() => {});
+  strategyRepository.pruneInactiveGroundedData().catch(() => {});
+  chatRepository.pruneInactiveGroundedData().catch(() => {});
 }
 
 // Periodic background check for expired account deletion (every 1 hour)
 setInterval(() => {
   userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
   guestRetention.prune().catch(() => {});
+  strategyRepository.pruneInactiveGroundedData().catch(() => {});
+  chatRepository.pruneInactiveGroundedData().catch(() => {});
 }, 60 * 60 * 1000).unref();
 
 const requireAdmin = createRequireAdmin(adminUsernames);

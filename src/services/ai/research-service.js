@@ -94,14 +94,73 @@ export const HIGH_SIGNAL_DOMAINS = Object.freeze([
   "developer.nvidia.com",
 ]);
 
-export function extractCleanDomain(urlOrDomain = "") {
-  let str = String(urlOrDomain || "").trim().toLowerCase();
+import {
+  isGroundedStrategyRecord,
+  isGroundedPlannerTaskInput,
+  resolveGroundedStrategyProvenance,
+  stripInternalStrategyMetadata,
+} from "./grounded-chat-retention.js";
+
+export function isGoogleRelayHostOrUrl(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
   try {
-    if (str.includes("://")) {
-      str = new URL(str).hostname;
+    const parsed = raw.includes("://") ? new URL(raw) : new URL(`https://${raw}`);
+    const host = parsed.hostname.toLowerCase().replace(/^(?:www\.)+/i, "").replace(/\.+$/, "");
+    if (
+      host === "vertexaisearch.cloud.google.com" ||
+      host.endsWith(".vertexaisearch.cloud.google.com") ||
+      parsed.pathname.includes("/grounding-api-redirect")
+    ) {
+      return true;
     }
-  } catch {}
-  return str.replace(/^www\./, "");
+    if (/^(?:[a-z0-9-]+\.)*google\.[a-z.]{2,6}$/i.test(host) && (parsed.pathname === "/url" || parsed.pathname.startsWith("/url/"))) {
+      return true;
+    }
+  } catch {
+    const lower = raw.toLowerCase();
+    if (lower.includes("vertexaisearch.cloud.google.com") || lower.includes("grounding-api-redirect")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function extractCleanDomain(urlOrDomain = "") {
+  const raw = String(urlOrDomain || "").trim();
+  if (!raw || /\s/.test(raw)) return "";
+  if (isGoogleRelayHostOrUrl(raw)) return "";
+  let host = raw.toLowerCase();
+  try {
+    if (raw.includes("://")) {
+      const parsed = new URL(raw);
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+        return "";
+      }
+      if (isGoogleRelayHostOrUrl(parsed.href)) return "";
+      host = parsed.hostname.toLowerCase();
+    } else if (raw.includes("/") || raw.includes("?") || raw.includes("#")) {
+      const parsed = new URL(`https://${raw}`);
+      if (parsed.username || parsed.password || isGoogleRelayHostOrUrl(parsed.href)) return "";
+      host = parsed.hostname.toLowerCase();
+    }
+  } catch {
+    return "";
+  }
+  const clean = host.replace(/^(?:www\.)+/i, "").replace(/\.+$/, "");
+  if (!clean) return "";
+  if (
+    clean === "vertexaisearch.cloud.google.com" ||
+    clean.endsWith(".vertexaisearch.cloud.google.com") ||
+    /\.(?:local|internal|localhost|localdomain|arpa|home|corp|lan)$/i.test(clean) ||
+    /^(?:localhost|127\.|0\.|10\.|192\.168\.|169\.254\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|172\.(?:1[6-9]|2\d|3[01])\.|\[?(?:::1|fe80:|fc00:|fd00:))/.test(clean)
+  ) {
+    return "";
+  }
+  if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(clean)) {
+    return "";
+  }
+  return clean;
 }
 
 const LOW_QUALITY_PATTERNS = Object.freeze([
@@ -275,13 +334,16 @@ export function enrichSourcesFromText(extractedSources = [], markdownText = "") 
     if (!rawUrl || typeof rawUrl !== "string") return;
     try {
       const parsed = new URL(rawUrl.trim());
-      if (!["http:", "https:"].includes(parsed.protocol)) return;
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return;
+      if (isGoogleRelayHostOrUrl(parsed.href)) return;
       const cleanUrl = parsed.href;
       if (seenUrls.has(cleanUrl)) return;
 
-      const domain = extractCleanDomain(rawDomain || parsed.hostname);
-      if (!domain) return;
-      if (isLowQualityDomain(domain)) return;
+      const hostDomain = extractCleanDomain(parsed.hostname);
+      if (!hostDomain) return;
+      if (isLowQualityDomain(hostDomain)) return;
+      if (rawDomain && isLowQualityDomain(rawDomain)) return;
+      const domain = hostDomain;
 
       seenUrls.add(cleanUrl);
       const isHighSignal = isHighSignalDomain(domain);
@@ -632,17 +694,95 @@ export class ResearchService {
 
     let selectedStrategy = null;
     let selectedTask = null;
+    let existingChat = null;
+    if (chatId && this.chatRepository) {
+      existingChat = await this.chatRepository.getById(chatId, ownerId);
+    }
+    const effectiveStrategyId = strategyId || existingChat?.strategyId || null;
+    const effectiveTaskId = taskId || existingChat?.taskId || null;
 
-    if (strategyId && this.strategyRepository) {
-      selectedStrategy = await this.strategyRepository.getById(strategyId, ownerId);
+    if (this.strategyRepository && typeof this.strategyRepository.loadOwnerProvenance === "function") {
+      await this.strategyRepository.loadOwnerProvenance(ownerId).catch(() => {});
     }
-    if (taskId && this.plannerRepository) {
+    const allOwnerStrategies =
+      this.strategyRepository && typeof this.strategyRepository.readAll === "function"
+        ? await this.strategyRepository.readAll(ownerId).catch(() => [])
+        : [];
+
+    if (effectiveStrategyId && this.strategyRepository) {
+      selectedStrategy = await this.strategyRepository.getById(effectiveStrategyId, ownerId);
+      const strategyProvenance = resolveGroundedStrategyProvenance(
+        ownerId,
+        selectedStrategy || { id: effectiveStrategyId },
+        allOwnerStrategies
+      );
+      if (strategyProvenance.grounded || isGroundedStrategyRecord(selectedStrategy)) {
+        const restrictedErr = new Error("Veb araşdırması olan strategiyanı Deep Research-ə ötürmək mümkün deyil.");
+        restrictedErr.code = "GROUNDED_STRATEGY_RESTRICTED";
+        restrictedErr.status = 422;
+        throw restrictedErr;
+      }
+      if (!selectedStrategy) {
+        if (strategyId) {
+          const notFoundErr = new Error("Seçilmiş strategiya tapılmadı.");
+          notFoundErr.code = "NOT_FOUND";
+          notFoundErr.status = 404;
+          throw notFoundErr;
+        }
+        const restrictedErr = new Error("Veb araşdırması olan və ya silinmiş strategiyanı Deep Research-ə ötürmək mümkün deyil.");
+        restrictedErr.code = "GROUNDED_STRATEGY_RESTRICTED";
+        restrictedErr.status = 422;
+        throw restrictedErr;
+      }
+    }
+    if (effectiveTaskId && this.plannerRepository) {
       const tasks = await this.plannerRepository.list(ownerId);
-      selectedTask = tasks.find((t) => t.id === taskId) || null;
+      selectedTask = tasks.find((t) => t.id === effectiveTaskId) || null;
+      if (taskId && !selectedTask) {
+        const notFoundErr = new Error("Seçilmiş tapşırıq tapılmadı.");
+        notFoundErr.code = "NOT_FOUND";
+        notFoundErr.status = 404;
+        throw notFoundErr;
+      }
+      if (selectedTask) {
+        const taskStrategy =
+          selectedTask.strategyId && this.strategyRepository
+            ? await this.strategyRepository.getById(selectedTask.strategyId, ownerId)
+            : null;
+        const taskStrategyProvenance = selectedTask.strategyId
+          ? resolveGroundedStrategyProvenance(ownerId, taskStrategy || { id: selectedTask.strategyId }, allOwnerStrategies)
+          : { grounded: false };
+        const isGroundedTask =
+          isGroundedStrategyRecord(taskStrategy) ||
+          taskStrategyProvenance.grounded ||
+          Boolean(selectedTask.strategyId && this.strategyRepository && !taskStrategy) ||
+          isGroundedPlannerTaskInput(
+            ownerId,
+            {
+              strategyId: selectedTask.strategyId || null,
+              strategyTitle: selectedTask.strategyTitle || null,
+              tasks: [selectedTask],
+              source: selectedTask.source || null,
+              searchGrounded: Boolean(selectedTask.searchGrounded || selectedTask.groundingActive),
+            },
+            allOwnerStrategies
+          );
+        if (isGroundedTask) {
+          const restrictedErr = new Error("Veb araşdırması olan strategiya tapşırığını Deep Research-ə ötürmək mümkün deyil.");
+          restrictedErr.code = "GROUNDED_STRATEGY_RESTRICTED";
+          restrictedErr.status = 422;
+          throw restrictedErr;
+        }
+      }
     }
+
+    const safeStrategyPayload =
+      selectedStrategy?.strategy && typeof selectedStrategy.strategy === "object"
+        ? stripInternalStrategyMetadata(selectedStrategy.strategy)
+        : selectedStrategy?.strategy || {};
 
     const strategyContext = selectedStrategy
-      ? `\n\n[STRATEGY CONTEXT]:\nTitle: ${selectedStrategy.title}\nBrief: ${JSON.stringify(selectedStrategy.brief || {})}\nStrategy Summary: ${JSON.stringify(selectedStrategy.strategy || {})}`
+      ? `\n\n[STRATEGY CONTEXT]:\nTitle: ${selectedStrategy.title}\nBrief: ${JSON.stringify(selectedStrategy.brief || {})}\nStrategy Summary: ${JSON.stringify(safeStrategyPayload)}`
       : "";
     const taskContext = selectedTask
       ? `\n\n[TASK CONTEXT]:\nTask: ${selectedTask.text}\nGroup: ${selectedTask.groupLabel || "General"}`
@@ -676,7 +816,7 @@ export class ResearchService {
 
     const intendedChatId = chatId || randomUUID();
     const startedAt = Date.now();
-    const intent = { id: jobId, messageId, ownerId, chatId: intendedChatId, prompt: researchPrompt, language, strategyContext, taskContext, strategyId, taskId, privacySnapshot: privacySnapshot(user), status: 'pending', steps, sources: [], artifacts: [], content: '', createdAt: now, deadlineAt: startedAt + 10 * 60 * 1000, checkpoint: {} };
+    const intent = { id: jobId, messageId, ownerId, chatId: intendedChatId, prompt: researchPrompt, language, strategyContext, taskContext, strategyId: effectiveStrategyId, taskId: effectiveTaskId, privacySnapshot: privacySnapshot(user), status: 'pending', steps, sources: [], artifacts: [], content: '', createdAt: now, deadlineAt: startedAt + 10 * 60 * 1000, checkpoint: {} };
     executionLease?.lease.signal?.throwIfAborted();
     executionLease?.controller?.signal.throwIfAborted();
     if (executionLease) executionLease.intent = intent;
@@ -687,8 +827,8 @@ export class ResearchService {
       ownerId,
       title: !chatId ? (researchPrompt.length > 50 ? `${researchPrompt.slice(0, 48)}…` : researchPrompt) : undefined,
       appendMessages: [userMessage, assistantMessage],
-      strategyId: strategyId || null,
-      taskId: taskId || null,
+      strategyId: effectiveStrategyId || null,
+      taskId: effectiveTaskId || null,
     });
 
     const modelImprovement = user?.settings?.modelImprovement === true;
@@ -702,8 +842,8 @@ export class ResearchService {
       language,
       strategyContext,
       taskContext,
-      strategyId,
-      taskId,
+      strategyId: effectiveStrategyId,
+      taskId: effectiveTaskId,
       modelImprovement,
       privacySnapshot: privacySnapshot(user),
       status: "pending",
@@ -1493,7 +1633,7 @@ export class ResearchService {
     }
 
     const isModelImprovement = job.modelImprovement === true;
-    const isRestricted = !isModelImprovement;
+    const isRestricted = true;
 
     if (this.learningLoop) {
       const interactionId = this.learningLoop.createInteractionId();

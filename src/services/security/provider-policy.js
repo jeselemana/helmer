@@ -45,18 +45,60 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
         finally { checking = false; }
       }, 1000);
       authorizationTimer?.unref();
-      let lastUsage, released = false, groundedSearchUsed = false, observedOutputBytes = 0, completedSuccessfully = false;
+      let lastUsage, released = false, groundedSearchUsed = false, observedOutputBytes = 0, completedSuccessfully = false, sawTerminalFinish = false;
+      const searchToolRequested = Boolean(
+        (params?.tools || params?.config?.tools || []).some(
+          (tool) => tool?.googleSearch || /web_search/.test(tool?.type || '')
+        )
+      );
       const observe = value => {
         lastUsage = providerUsage(value) || lastUsage;
         const gm = value?.candidates?.[0]?.groundingMetadata || value?.groundingMetadata;
-        if (gm && (gm.webSearchQueries?.length || gm.groundingChunks?.length || gm.searchEntryPoint)) {
+        if (gm && (gm.webSearchQueries?.length || gm.groundingChunks?.length || gm.groundingSupports?.length || gm.searchEntryPoint)) {
           groundedSearchUsed = true;
+        }
+        if (
+          value?.item?.type === 'web_search_call' ||
+          (typeof value?.type === 'string' && value.type.startsWith('response.web_search_call.')) ||
+          (Array.isArray(value?.output) && value.output.some((item) => item?.type === 'web_search_call'))
+        ) {
+          groundedSearchUsed = true;
+        }
+        if (value?.candidates?.[0]?.finishReason || value?.status === 'completed') {
+          sawTerminalFinish = true;
         }
         if (typeof value?.text === 'string' && value.text.length > 0) {
           observedOutputBytes += Buffer.byteLength(value.text);
+        } else if (Array.isArray(value?.candidates?.[0]?.content?.parts)) {
+          for (const part of value.candidates[0].content.parts) {
+            if (typeof part?.text === 'string' && part.text.length > 0) {
+              observedOutputBytes += Buffer.byteLength(part.text);
+            }
+          }
         } else if (typeof value?.output_text === 'string' && value.output_text.length > 0) {
           observedOutputBytes += Buffer.byteLength(value.output_text);
+        } else if (typeof value?.delta === 'string' && value.delta.length > 0) {
+          observedOutputBytes += Buffer.byteLength(value.delta);
         }
+      };
+      const resolveSearchSettlement = (baseSearchCalls = 0) => {
+        if (!searchToolRequested && !groundedSearchUsed && baseSearchCalls === 0) {
+          return { searchCalls: 0, searchUsageKnown: true, searchSettlementEvidence: 'no_search_tool' };
+        }
+        if (groundedSearchUsed || baseSearchCalls > 0) {
+          return {
+            searchCalls: Math.max(1, baseSearchCalls || 0),
+            searchUsageKnown: true,
+            searchSettlementEvidence: groundedSearchUsed ? 'provider_grounding_metadata' : 'provider_usage_search_calls',
+          };
+        }
+        if (type === 'gemini' && (completedSuccessfully || sawTerminalFinish)) {
+          return { searchCalls: 0, searchUsageKnown: true, searchSettlementEvidence: 'completed_without_grounding' };
+        }
+        if (type !== 'gemini' && completedSuccessfully) {
+          return { searchCalls: baseSearchCalls, searchUsageKnown: true, searchSettlementEvidence: 'provider_usage_completed' };
+        }
+        return { searchCalls: 0, searchUsageKnown: false, searchSettlementEvidence: 'unknown_incomplete_stream' };
       };
       const finish = async () => {
         if (released) return;
@@ -64,23 +106,22 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
         clearInterval(authorizationTimer);
         try {
           if (lastUsage) {
-            const usageToRecord = buildVertex && type === 'gemini'
-              ? {
-                  ...lastUsage,
-                  searchCalls: groundedSearchUsed ? Math.max(1, lastUsage.searchCalls || 0) : (lastUsage.searchCalls || 0),
-                  searchUsageKnown: true,
-                }
-              : { ...lastUsage, searchUsageKnown: type !== 'gemini' };
+            const searchSettlement = resolveSearchSettlement(lastUsage.searchCalls || 0);
+            const usageToRecord = {
+              ...lastUsage,
+              ...searchSettlement,
+            };
             await release.recordUsage?.(usageToRecord);
             await context.onProviderUsage?.({ provider: kind, model: params.model, ...usageToRecord });
-          } else if (completedSuccessfully && observedOutputBytes > 0) {
+          } else if (observedOutputBytes > 0 || groundedSearchUsed) {
             const rawInput = typeof params?.contents === 'string' ? params.contents : JSON.stringify(params?.contents || params?.input || params?.messages || '');
+            const searchSettlement = resolveSearchSettlement(groundedSearchUsed ? 1 : 0);
             const estimatedUsage = {
               inputTokens: Math.max(1, Math.ceil(Buffer.byteLength(rawInput) / 4)),
-              outputTokens: Math.max(1, Math.ceil(observedOutputBytes / 4)),
-              searchCalls: groundedSearchUsed ? 1 : 0,
-              searchUsageKnown: buildVertex ? true : type !== 'gemini',
+              outputTokens: observedOutputBytes > 0 ? Math.max(1, Math.ceil(observedOutputBytes / 4)) : 0,
+              ...searchSettlement,
               estimated: true,
+              ...(observedOutputBytes === 0 && groundedSearchUsed && !completedSuccessfully ? { partialSearchOnly: true } : {}),
             };
             await release.recordUsage?.(estimatedUsage);
             await context.onProviderUsage?.({ provider: kind, model: params.model, ...estimatedUsage });

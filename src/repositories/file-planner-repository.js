@@ -624,6 +624,7 @@ export class FilePlannerRepository {
             strategyId,
             strategyTitle,
             source: item.source || (strategyId || strategyTitle ? "brief" : "user"),
+            ...(item.searchGrounded || item.groundingActive ? { searchGrounded: true } : {}),
             feedback: item.feedback || null,
             isPriority,
             priority,
@@ -663,7 +664,7 @@ export class FilePlannerRepository {
       if (index === -1) return { updated: records, result: null };
 
       const now = new Date().toISOString();
-      const { id: _ignoredId, ownerId: _ignoredOwnerId, createdAt: _ignoredCreatedAt, ...safeChanges } = changes;
+      const { id: _ignoredId, ownerId: _ignoredOwnerId, createdAt: _ignoredCreatedAt, strategyId: _ignoredStrategyId, searchGrounded: _ignoredSearchGrounded, ...safeChanges } = changes;
 
       const completed = typeof safeChanges.completed === "boolean"
         ? safeChanges.completed
@@ -683,6 +684,7 @@ export class FilePlannerRepository {
       const source = safeChanges.source !== undefined
         ? safeChanges.source
         : (records[index].source || (records[index].strategyId || records[index].strategyTitle ? "brief" : "user"));
+      const searchGrounded = Boolean(records[index].searchGrounded || records[index].groundingActive || changes.searchGrounded || changes.groundingActive);
 
       records[index] = {
         ...records[index],
@@ -690,6 +692,8 @@ export class FilePlannerRepository {
         id: records[index].id,
         ownerId: records[index].ownerId,
         createdAt: records[index].createdAt,
+        strategyId: records[index].strategyId ?? null,
+        ...(searchGrounded ? { searchGrounded: true } : {}),
         title,
         text,
         timeframe,

@@ -1,11 +1,15 @@
 import express from "express";
 import { z } from "zod";
 import { isModelImprovementEnabled } from "./auth-middleware.js";
+import { isGroundedStrategyRecord, resolveGroundedStrategyProvenance } from "../services/ai/grounded-chat-retention.js";
 
 const ClientTelemetryEventSchema = z.object({
   eventType: z.enum(["export_requested", "summary_clicked", "ui_action"]),
   format: z.enum(["pdf", "markdown", "html", "excel", "csv", "spreadsheet"]).optional(),
+  strategyId: z.string().regex(/^[0-9a-f-]{36}$/i).nullable().optional(),
+  clientSaveId: z.string().trim().min(8).max(120).nullable().optional(),
   title: z.string().max(200).optional(),
+  groundingActive: z.boolean().optional(),
   metadata: z.record(z.any()).optional(),
 }).strict();
 
@@ -116,6 +120,7 @@ setInterval(() => {
 export function createTelemetryClientRouter(telemetryService, options = {}) {
   const router = express.Router();
   const rateLimitMiddleware = options.rateLimit || createTelemetryRateLimiter();
+  const strategyRepository = options.strategyRepository || telemetryService?.strategyRepository || null;
 
   router.post("/event", rateLimitMiddleware, async (req, res) => {
     try {
@@ -128,20 +133,37 @@ export function createTelemetryClientRouter(telemetryService, options = {}) {
         });
       }
 
-      const { eventType, format, title } = parseResult.data;
+      const { eventType, format, strategyId, clientSaveId, title, groundingActive: clientGroundingActive } = parseResult.data;
       const ownerId = req.ownerId || null;
       const sessionId = req.guestOwnerId || null;
 
       if (eventType === "export_requested") {
         const modelImprovement = isModelImprovementEnabled(req);
+        if (strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function") {
+          await strategyRepository.loadOwnerProvenance(ownerId).catch(() => {});
+        }
+        let existing = null;
+        if (strategyId && strategyRepository && typeof strategyRepository.getById === "function") {
+          existing = await strategyRepository.getById(strategyId, ownerId);
+        }
+        const provenance = resolveGroundedStrategyProvenance(
+          ownerId,
+          existing || { id: strategyId, clientSaveId, title },
+          existing ? [existing] : []
+        );
+        const serverGrounded = Boolean((existing && isGroundedStrategyRecord(existing)) || provenance.grounded || clientGroundingActive === true);
+        const isGroundedOrUnverified = !strategyId || !existing || serverGrounded;
+        const onlyNecessaryData = !modelImprovement || isGroundedOrUnverified;
+        const resolvedTitle = onlyNecessaryData ? "" : (existing.strategy?.title || existing.title || "");
         await telemetryService.trackExport({
           ownerId,
           sessionId,
           format: format || "pdf",
-          title: modelImprovement ? (title || "") : "",
+          title: resolvedTitle,
           status: "success",
-          onlyNecessaryData: !modelImprovement,
-          modelImprovement,
+          groundingActive: serverGrounded,
+          onlyNecessaryData,
+          modelImprovement: !onlyNecessaryData,
         });
       }
 

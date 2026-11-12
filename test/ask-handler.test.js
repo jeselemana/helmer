@@ -101,7 +101,7 @@ async function fixture(t, { redis = null, limits, parallel = false } = {}) {
     generateContent: async params => { calls.push(params); return f.response(params); },
     generateContentStream: async params => { calls.push(params); return f.stream(params); },
   } }, 'gemini');
-  const strategyRepository = { getById: async (id, owner) => id === strategyId && owner === strategyOwner ? { id, ownerId: owner, title: 'Private strategy', strategy: { secret: 'Tenant strategy' } } : null };
+  const strategyRepository = { getById: async (id, owner) => id === strategyId && owner === strategyOwner ? { id, ownerId: owner, title: 'Private strategy', strategy: { secret: 'Tenant strategy', ...f.strategy } } : null };
   const plannerRepository = { list: async owner => owner === ownerA ? [{ id: taskId, ownerId: owner, text: 'Private task' }] : [] };
   const app = express(); app.use(express.json());
   // Fixture identities replace only session login. Production privacy, AI policy,
@@ -169,6 +169,17 @@ test('Ask HTTP: cross-tenant chat, strategy, task and cached-file attempts fail 
   const file = { fileId: 'gfc_foreign', name: 'private.txt', size: 1, type: 'text/plain' };
   const response = await f.ask({ messages: [{ role: 'user', content: 'Read', file }] }, f.ownerB);
   assert.equal(response.status, 400); assert.equal(f.calls.length, 0);
+});
+
+test('Ask HTTP blocks a grounded Build strategy before model use or logging', async t => {
+  const f = await fixture(t);
+  f.strategy = { orchestration: { searchGrounded: true } };
+  const response = await f.ask({ strategyId: f.strategyId, stream: true });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).code, 'GROUNDED_STRATEGY_RESTRICTED');
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.learning.length, 0);
+  assert.equal(f.telemetry.length, 0);
 });
 
 test('Ask HTTP: explicit Web with High and TXT context requires verified sources and saves grounding', async t => {

@@ -15,8 +15,8 @@ removed.
 | `/api/strategy/estimate` | Gemini 3.8 Flash only; validated estimate decisions may be reused | Deterministic preparation estimate (no model router call) |
 
 Flash uses `HIGH` thinking and strict structured JSON: `needs_search`,
-`argon_thinking_level` (`Low`, `Medium`, `High`), `facts`, `focus_area`. It produces
-compressed evidence and a direction, never a draft strategy. The prompt reserves
+`argon_thinking_level` (`Low`, `Medium`, `High`), `facts`, `focus_area`. Only
+the validated thinking level configures Argon. The prompt reserves
 High for maximally complex financial, legal/regulatory or international corporate
 briefs; standard, broad and difficult strategy defaults to Medium. Simple
 refinements request no search and Low. These are model classification instructions,
@@ -31,16 +31,19 @@ No arbitrary URL fetching, URL-context, code execution or alternative search
 provider is supplied. Argon receives no tools, uses the selected thinking level,
 and returns the complete existing `StrategySchema`.
 
-Sources come exclusively from provider grounding metadata, with URL scheme,
-credential, length, duplicate and low-quality-domain checks. High-signal sources
-are prioritized. No accepted sources means no scout factual handoff. Argon is
-instructed to cite accepted URLs inline and treat unsupported claims as
-assumptions. Source chips remain at the end of the strategy. Google Search
-Suggestions metadata is retained and shown using the existing safe DOM renderer,
-including suggestion-only results when all source URLs are filtered. Provider
-HTML never enters the main page through `innerHTML`; the existing restrictive
-frame CSP is preserved. Grounded results remain excluded from training even when
-source filtering removes every source.
+Build accepts a web finding only when a provider `groundingSupports` segment
+matches the whole finding and links it to at least one accepted `groundingChunks`
+source. URLs are checked for scheme, credentials, length and low-quality domains.
+Required research fails with `GROUNDING_UNAVAILABLE` when no finding qualifies.
+The final model receives the original brief and permitted personalization.
+Build adds the linked findings separately after final strategy validation and
+displays them alongside Search Suggestions. PDF, HTML, CSV and Excel preserve
+the finding-to-source links. Provider HTML stays outside the main page.
+
+Build excludes grounded content from learning and telemetry, including failures
+after an attempted search. Grounded strategies are available to view. Build
+refinement and Ask decline to send them to another model. The archive retention
+clock uses the original grounded version date and survives title edits.
 
 Argon chunks reach SSE as they arrive, after current authorization checks.
 Intermediate Flash JSON is private. Chunks are provisional: only a complete
@@ -89,9 +92,9 @@ transition.
 
 Transient Vertex AI failures (`408`, `429`, `5xx`, timeouts) retry across Vertex AI
 multi-region endpoints (`us` → `global`) with exponential backoff, streaming-to-unary
-recovery (`resetStream`), Argon thinking step-down on `MAX_TOKENS`, and state-preserving
-`scout` research checkpoints. Flash never generates or edits a brief under any
-circumstance. Missing ADC, invalid provider parameters and unavailable models have
+recovery (`resetStream`), and Argon thinking step-down on `MAX_TOKENS`. Only
+routing decisions without grounded content can be cached across requests.
+Missing ADC, invalid provider parameters and unavailable models have
 distinct sanitized error codes; they are never described as provider overload. Errors are sanitized
 and correlated by a random request ID. Diagnostic records contain stage, model,
 code/status, elapsed time and bounded schema issue paths, never SDK messages,
@@ -154,9 +157,9 @@ Advanced AI terms may impose additional logging. IAM, billing, model access,
 request/response logging, organization policy, cache retention and applicable
 Google terms must also be verified in the actual project. Section 20(k) specifically
 restricts modification/analysis, training, storage, framing and reuse of Grounded
-Results and Search Suggestions. The requested Flash-evidence-to-Argon synthesis,
-long-lived strategy archives and Google's exact suggestion display requirements
-need separate confirmation under the project's Google agreement; this refactor
+Results and Search Suggestions. Strategy archives, exports and Google's exact
+suggestion display requirements need separate confirmation under the project's
+Google agreement. This change
 must not be presented as certifying those contractual permissions. Repository changes
 alone cannot certify deployed compliance or grant model access.
 

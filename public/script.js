@@ -2680,6 +2680,14 @@ const LOADING_ASK_PLACEHOLDERS = new Proxy([], {
 
 let loadingAskPlaceholderTimer = null;
 let refinementPlaceholderTimer = null;
+let askPlaceholderTimer = null;
+
+function stopAskPlaceholderAnimation() {
+  if (askPlaceholderTimer) {
+    clearTimeout(askPlaceholderTimer);
+    askPlaceholderTimer = null;
+  }
+}
 
 function getCookie(name) {
   try {
@@ -2914,6 +2922,31 @@ function askThinkingLabel(message, isEn) {
 }
 
 // Background Jobs — analysis processes that continue when user leaves loading page
+const MAX_GROUNDED_JOB_RETENTION_MS = 730 * 24 * 60 * 60 * 1000;
+
+function isBackgroundJobGrounded(job) {
+  if (!job || typeof job !== "object") return false;
+  if (job.searchGrounded === true) return true;
+  if (job.strategy && isStrategyGroundedClient(job.strategy)) return true;
+  if (Array.isArray(job.versions) && job.versions.some((v) => isStrategyGroundedClient(v?.data || v))) return true;
+  return false;
+}
+
+function isExpiredGroundedBackgroundJob(job, now = Date.now()) {
+  if (!isBackgroundJobGrounded(job)) return false;
+  const candidates = [
+    job?.strategy?.orchestration?.firstGroundedAt,
+    job?.completedAt,
+    job?.startedAt,
+    job?.updatedAt,
+  ]
+    .map((ts) => (typeof ts === "string" || typeof ts === "number" ? Date.parse(ts) : NaN))
+    .filter((ms) => Number.isFinite(ms) && ms > 0);
+  if (candidates.length === 0) return true; // Fail closed when grounded provenance lacks a valid timestamp
+  const anchorMs = Math.min(...candidates);
+  return now - anchorMs >= MAX_GROUNDED_JOB_RETENTION_MS;
+}
+
 let backgroundJobs = loadBackgroundJobs();
 
 function currentOwnerId() {
@@ -2923,16 +2956,23 @@ function currentOwnerId() {
 function loadBackgroundJobs() {
   try {
     const owner = currentOwnerId();
-    const all = JSON.parse(localStorage.getItem("helmer_bg_jobs") || "[]");
-    return Array.isArray(all) ? all.filter((j) => j && j.ownerId === owner) : [];
+    const raw = JSON.parse(localStorage.getItem("helmer_bg_jobs") || "[]");
+    const all = Array.isArray(raw) ? raw : [];
+    const active = all.filter((j) => j && !isExpiredGroundedBackgroundJob(j));
+    if (active.length !== all.length) {
+      try { localStorage.setItem("helmer_bg_jobs", JSON.stringify(active)); } catch {}
+    }
+    return active.filter((j) => j.ownerId === owner);
   } catch { return []; }
 }
 
 function persistBackgroundJobs() {
   try {
     const owner = currentOwnerId();
-    const existingOther = JSON.parse(localStorage.getItem("helmer_bg_jobs") || "[]")
-      .filter((j) => j && j.ownerId && j.ownerId !== owner);
+    const raw = JSON.parse(localStorage.getItem("helmer_bg_jobs") || "[]");
+    const existingOther = (Array.isArray(raw) ? raw : [])
+      .filter((j) => j && j.ownerId && j.ownerId !== owner && !isExpiredGroundedBackgroundJob(j));
+    backgroundJobs = backgroundJobs.filter((j) => j && !isExpiredGroundedBackgroundJob(j));
     const combined = [...existingOther, ...backgroundJobs];
     localStorage.setItem("helmer_bg_jobs", JSON.stringify(combined));
   } catch { }
@@ -3023,6 +3063,8 @@ function slugify(value) {
 }
 
 let currentAbortController = null;
+const detachedBuildAbortControllers = new Set();
+const backgroundResumeAbortControllers = new Set();
 let currentAskAbortController = null;
 let activeAskReader = null;
 let activeAskTypewriter = null;
@@ -3727,6 +3769,7 @@ function resetStrategy() {
 function render() {
   stopBuildCountdown();
   stopBuildIntelligence();
+  stopAskPlaceholderAnimation();
   clearInterval(progressTimer);
   clearInterval(loadingAskPlaceholderTimer);
   clearTimeout(refinementPlaceholderTimer);
@@ -6251,15 +6294,60 @@ function renderAsk() {
   }
 
   const updateAskPlaceholder = () => {
+    stopAskPlaceholderAnimation();
     if (!state.currentUser && state.remainingGuestMessages === 0) {
       input.placeholder = isEn ? "Guest limit reached. Sign up to continue…" : "Qonaq mesaj limitiniz bitdi. Davam etmək üçün qeydiyyatdan keçin…";
       return;
     }
-    if (!state.currentUser) {
-      input.placeholder = isEn ? "Ask Helmer anything" : "Helmer-dən soruş";
+    const baseText = isEn ? "Ask Helmer anything" : "Helmer-dən soruş";
+    if (state.askPendingFile) {
+      input.placeholder = isEn ? "Ask a question about this file…" : "Fayl haqqında sualını yaz…";
       return;
     }
-    input.placeholder = state.askPendingFile ? (isEn ? "Ask a question about this file…" : "Fayl haqqında sualını yaz…") : (isEn ? "Ask Helmer anything or @ to mention" : "Helmer-dən soruş və ya @ işarələ");
+    if (isChatActive) {
+      input.placeholder = isEn ? "Reply to Helmer" : "Helmer-dən soruş";
+      return;
+    }
+    if (!state.currentUser) {
+      input.placeholder = baseText;
+      return;
+    }
+
+    const mentionSuffix = isEn ? " or @ to mention" : " və ya @ işarələ";
+    let isMentionVisible = false;
+    let charIndex = 0;
+    let isDeleting = false;
+    input.placeholder = baseText;
+
+    const tick = () => {
+      if (!input.isConnected || state.askPendingFile) return;
+      if (!isMentionVisible) {
+        // Typing mentionSuffix
+        if (charIndex < mentionSuffix.length) {
+          charIndex += 1;
+          input.placeholder = baseText + mentionSuffix.slice(0, charIndex);
+          askPlaceholderTimer = setTimeout(tick, 45);
+        } else {
+          isMentionVisible = true;
+          // Hold mention for 2.8 seconds
+          askPlaceholderTimer = setTimeout(tick, 2800);
+        }
+      } else {
+        // Deleting mentionSuffix
+        if (charIndex > 0) {
+          charIndex -= 1;
+          input.placeholder = baseText + mentionSuffix.slice(0, charIndex);
+          askPlaceholderTimer = setTimeout(tick, 25);
+        } else {
+          isMentionVisible = false;
+          input.placeholder = baseText;
+          // Hold baseText for 3.5 seconds
+          askPlaceholderTimer = setTimeout(tick, 3500);
+        }
+      }
+    };
+
+    askPlaceholderTimer = setTimeout(tick, 2500);
   };
   updateAskPlaceholder();
 
@@ -8692,9 +8780,11 @@ function minimizeToBackground() {
   }
   persistBackgroundJobs();
 
-  // Do NOT abort currentAbortController — let the fetch continue
-  // Detach the controller so resetStrategy doesn't abort it
+  // Detach the controller so resetStrategy doesn't abort it, while still tracking it for logout/identity reset
   const detachedController = currentAbortController;
+  if (detachedController) {
+    detachedBuildAbortControllers.add(detachedController);
+  }
   currentAbortController = null;
 
   // Reset state to home without aborting
@@ -8732,9 +8822,12 @@ async function autoSaveBackgroundJob(job) {
   const isEn = getLanguage() === "en";
   const epoch = state.identityEpoch;
   const expectedUserId = state.currentUser?.id || null;
+  const saveController = new AbortController();
+  backgroundResumeAbortControllers.add(saveController);
   try {
     const data = await api("/api/strategy/save", {
       method: "POST",
+      signal: saveController.signal,
       body: JSON.stringify({
         clientSaveId: job.idempotencyKey,
         brief: job.brief,
@@ -8750,9 +8843,11 @@ async function autoSaveBackgroundJob(job) {
     if (isIdentityStale(epoch, expectedUserId)) return;
     showToast(isEn ? "Strategy generated and saved to archive ✓" : "Strategiya hazırlandı və arxivə saxlanıldı ✓");
   } catch (error) {
-    if (isIdentityStale(epoch, expectedUserId)) return;
+    if (error?.name === "AbortError" || isIdentityStale(epoch, expectedUserId)) return;
     console.error("Auto-save background job failed:", error);
     persistBackgroundJobs();
+  } finally {
+    backgroundResumeAbortControllers.delete(saveController);
   }
 }
 
@@ -8779,6 +8874,10 @@ async function resumeBackgroundJobs() {
       removeBackgroundJob(job.id);
       continue;
     }
+    if (isExpiredGroundedBackgroundJob(job)) {
+      removeBackgroundJob(job.id);
+      continue;
+    }
     // Check if the strategy was already saved on server by idempotencyKey or brief
     const alreadySaved = state.savedStrategies.find(
       (s) => (s.clientSaveId && s.clientSaveId === job.idempotencyKey) || (s.brief && s.brief === job.brief)
@@ -8799,10 +8898,14 @@ async function resumeBackgroundJobs() {
 
     if (job.status !== "generating") continue;
 
+    const resumeController = new AbortController();
+    backgroundResumeAbortControllers.add(resumeController);
     try {
       const autoSaveActive = isAutoSaveStrategiesEnabled();
       const data = await api("/api/strategy/generate", {
         method: "POST",
+        signal: resumeController.signal,
+        headers: job.idempotencyKey ? { "Idempotency-Key": job.idempotencyKey } : {},
         body: JSON.stringify({
           brief: job.brief,
           answers: job.answers,
@@ -8811,7 +8914,7 @@ async function resumeBackgroundJobs() {
           autoSave: autoSaveActive,
         }),
       });
-      if (isIdentityStale(epoch, expectedUserId)) return;
+      if (isIdentityStale(epoch, expectedUserId) || resumeController.signal.aborted) return;
 
       // Check if user restored this job to foreground while in flight
       if (state.clientSaveId === job.idempotencyKey && state.status === "generating") {
@@ -8837,7 +8940,7 @@ async function resumeBackgroundJobs() {
         await autoSaveBackgroundJob(job);
       }
     } catch (err) {
-      if (err.name === "AbortError" || isIdentityStale(epoch, expectedUserId)) continue;
+      if (err.name === "AbortError" || resumeController.signal.aborted || isIdentityStale(epoch, expectedUserId)) continue;
 
       // If temporary network disconnection, keep in generating status and retry on reconnect
       if (!navigator.onLine) {
@@ -8868,6 +8971,8 @@ async function resumeBackgroundJobs() {
       job.error = err.message || (isEn ? "An error occurred." : "Xəta baş verdi");
       persistBackgroundJobs();
       if (state.view === "list") renderStrategyList();
+    } finally {
+      backgroundResumeAbortControllers.delete(resumeController);
     }
   }
 }
@@ -8884,6 +8989,10 @@ window.addEventListener("online", () => {
 function openBackgroundJob(jobId) {
   const job = backgroundJobs.find((j) => j.id === jobId);
   if (!job) return;
+  if (isExpiredGroundedBackgroundJob(job)) {
+    removeBackgroundJob(job.id);
+    return;
+  }
   const isEn = getLanguage() === "en";
 
   if (job.status === "ready" && job.strategy) {
@@ -9820,6 +9929,10 @@ async function startGeneration() {
       return;
     }
     setError(error, startGeneration, state.questions.length ? "needs_clarification" : "draft");
+  } finally {
+    if (typeof detachedBuildAbortControllers !== "undefined") {
+      detachedBuildAbortControllers.delete(controller);
+    }
   }
 }
 
@@ -9996,14 +10109,19 @@ function buildBriefFeedbackCard(strategy, isEn) {
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/></svg>';
 
   const sendBriefFeedback = (vote) => {
+    const isSavedUuid = Boolean(state.savedId && /^[0-9a-f-]{36}$/i.test(state.savedId));
+    const isGrounded = isStrategyGroundedClient(strategy || state.strategy);
+    const hideContent = isGrounded || !isSavedUuid;
     fetch("/api/strategy/feedback", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        strategyId: (state.savedId && /^[0-9a-f-]{36}$/i.test(state.savedId)) ? state.savedId : null,
+        strategyId: isSavedUuid ? state.savedId : null,
+        clientSaveId: (!isSavedUuid && state.clientSaveId) ? state.clientSaveId : null,
         feedback: vote,
-        brief: state.brief?.slice(0, 500) || "",
-        title: strategy?.title?.slice(0, 200) || "",
+        brief: hideContent ? "" : (state.brief?.slice(0, 500) || ""),
+        title: hideContent ? "" : (strategy?.title?.slice(0, 200) || ""),
+        ...(isGrounded ? { groundingActive: true } : {}),
       }),
     }).catch((err) => {
       console.warn("Brief feedback could not be logged:", err?.message || err);
@@ -10212,14 +10330,23 @@ function openPlannerTaskSelectionModal({
   strategyId = null,
   isEn = false,
   initialTab = "ai",
+  identityEpoch = state.identityEpoch,
+  expectedUserId = state.currentUser?.id || null,
   onTasksAdded = null,
 }) {
-  document.querySelectorAll(".planner-modal-overlay").forEach((el) => el.remove());
+  if (isIdentityStale(identityEpoch, expectedUserId)) return;
+  document.querySelectorAll(".planner-modal-overlay").forEach((el) => el._closeModal ? el._closeModal() : el.remove());
 
   const resolvedAiTasks = Array.isArray(aiTasks) && aiTasks.length > 0 ? aiTasks : (Array.isArray(tasks) ? tasks : []);
   const resolvedRawTasks = Array.isArray(rawTasks) ? rawTasks : [];
 
   const overlay = element("div", "planner-modal-overlay");
+  let onKeydown = null;
+  const closeModal = () => {
+    overlay.remove();
+    if (onKeydown) document.removeEventListener("keydown", onKeydown);
+  };
+  overlay._closeModal = closeModal;
   const card = element("div", "planner-modal-card");
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-modal", "true");
@@ -10241,7 +10368,7 @@ function openPlannerTaskSelectionModal({
   );
   headerText.append(badge, title, subtitle);
 
-  const closeBtn = button("✕", "planner-modal-close", () => overlay.remove());
+  const closeBtn = button("✕", "planner-modal-close", closeModal);
   closeBtn.setAttribute("aria-label", isEn ? "Close" : "Bağla");
   header.append(headerText, closeBtn);
 
@@ -10363,8 +10490,12 @@ function openPlannerTaskSelectionModal({
   }
 
   const footer = element("footer", "planner-modal-footer");
-  const cancelBtn = button(isEn ? "Cancel" : "İmtina", "planner-modal-cancel-btn", () => overlay.remove());
+  const cancelBtn = button(isEn ? "Cancel" : "İmtina", "planner-modal-cancel-btn", closeModal);
   const confirmBtn = button("", "planner-modal-confirm-btn", async () => {
+    if (isIdentityStale(identityEpoch, expectedUserId)) {
+      closeModal();
+      return;
+    }
     const activeTasks = getActiveTasks();
     const activeSelection = getActiveSelection();
     if (activeSelection.size === 0) return;
@@ -10384,14 +10515,15 @@ function openPlannerTaskSelectionModal({
       source: "brief",
     }));
 
-    const epoch = state.identityEpoch;
-    const expectedUserId = state.currentUser?.id || null;
     try {
       const res = await authRequest("/api/planner/batch", {
         method: "POST",
         body: JSON.stringify({ tasks: itemsToBatch }),
       });
-      if (isIdentityStale(epoch, expectedUserId)) return;
+      if (isIdentityStale(identityEpoch, expectedUserId)) {
+        closeModal();
+        return;
+      }
       state.plannerTasks = Array.isArray(res.tasks) ? res.tasks : state.plannerTasks;
       updatePlannerBadge();
       const count = res.added?.length ?? itemsToBatch.length;
@@ -10399,12 +10531,15 @@ function openPlannerTaskSelectionModal({
         ? (isEn ? "1 task added to Planner ✓" : "1 tapşırıq Planner-ə əlavə edildi ✓")
         : (isEn ? `${count} tasks added to Planner ✓` : `${count} tapşırıq Planner-ə əlavə edildi ✓`);
       showToast(toastMsg, "success");
-      overlay.remove();
+      closeModal();
       if (typeof onTasksAdded === "function") {
         onTasksAdded(selectedTasks);
       }
     } catch (err) {
-      if (isIdentityStale(epoch, expectedUserId)) return;
+      if (isIdentityStale(identityEpoch, expectedUserId)) {
+        closeModal();
+        return;
+      }
       showToast(err.message || (isEn ? "An error occurred" : "Xəta baş verdi"), "error");
       confirmBtn.disabled = false;
       updateCounts();
@@ -10452,13 +10587,12 @@ function openPlannerTaskSelectionModal({
   overlay.appendChild(card);
 
   overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) overlay.remove();
+    if (e.target === overlay) closeModal();
   });
 
-  const onKeydown = (e) => {
+  onKeydown = (e) => {
     if (e.key === "Escape") {
-      overlay.remove();
-      document.removeEventListener("keydown", onKeydown);
+      closeModal();
     }
   };
   document.addEventListener("keydown", onKeydown);
@@ -10567,17 +10701,25 @@ function buildNextStepsSection(strategy, isEn, isRoadmap = false) {
     isEn ? "✦ AI Summarize & Add" : "✦ AI ilə xülasələ və əlavə et",
     "add-to-planner-btn add-ai-summary-btn",
     async () => {
+      const epoch = state.identityEpoch;
+      const expectedUserId = state.currentUser?.id || null;
+      const capturedStrategyId = state.savedId || null;
+      const capturedStrategyTitle = strategy.title || (isEn ? "Strategy" : "Strategiya");
       addAllToPlannerButton.disabled = true;
       addAllToPlannerButton.textContent = isEn ? "✦ Summarizing with AI…" : "✦ AI ilə xülasələnir…";
 
       const triggerModalWithTasks = (summarizedTasks) => {
+        if (isIdentityStale(epoch, expectedUserId)) return;
         openPlannerTaskSelectionModal({
           aiTasks: summarizedTasks,
           rawTasks: itemsToSummarize,
-          strategyTitle: strategy.title || (isEn ? "Strategy" : "Strategiya"),
-          strategyId: state.savedId || null,
+          strategyTitle: capturedStrategyTitle,
+          strategyId: capturedStrategyId,
           isEn,
+          identityEpoch: epoch,
+          expectedUserId,
           onTasksAdded: (addedTasks) => {
+            if (isIdentityStale(epoch, expectedUserId)) return;
             rowControllers.forEach(({ setAddedState, cleaned }) => {
               const wasAdded = addedTasks.some((at) => {
                 const atText = cleanTaskText(at.title || at.text).toLowerCase();
@@ -10587,6 +10729,7 @@ function buildNextStepsSection(strategy, isEn, isRoadmap = false) {
             });
             addAllToPlannerButton.textContent = isEn ? "✓ Added" : "✓ Əlavə edildi";
             setTimeout(() => {
+              if (isIdentityStale(epoch, expectedUserId)) return;
               addAllToPlannerButton.disabled = false;
               addAllToPlannerButton.textContent = isEn ? "✦ AI Summarize & Add" : "✦ AI ilə xülasələ və əlavə et";
             }, 2500);
@@ -10599,11 +10742,12 @@ function buildNextStepsSection(strategy, isEn, isRoadmap = false) {
           method: "POST",
           body: JSON.stringify({
             tasks: itemsToSummarize,
-            strategyId: (state.savedId && /^[0-9a-f-]{36}$/i.test(state.savedId)) ? state.savedId : null,
-            strategyTitle: strategy.title || (isEn ? "Strategy" : "Strategiya"),
+            strategyId: (capturedStrategyId && /^[0-9a-f-]{36}$/i.test(capturedStrategyId)) ? capturedStrategyId : null,
+            strategyTitle: capturedStrategyTitle,
             language: isEn ? "en" : "az",
           }),
         });
+        if (isIdentityStale(epoch, expectedUserId)) return;
 
         const summarizedTasks = Array.isArray(res.tasks) && res.tasks.length > 0
           ? res.tasks
@@ -10615,6 +10759,7 @@ function buildNextStepsSection(strategy, isEn, isRoadmap = false) {
 
         triggerModalWithTasks(summarizedTasks);
       } catch (err) {
+        if (isIdentityStale(epoch, expectedUserId)) return;
         console.warn("AI Task summarization error, falling back to local tasks:", err);
         triggerModalWithTasks(
           itemsToSummarize.map((t) => ({
@@ -10624,8 +10769,10 @@ function buildNextStepsSection(strategy, isEn, isRoadmap = false) {
           }))
         );
       } finally {
-        addAllToPlannerButton.disabled = false;
-        addAllToPlannerButton.textContent = isEn ? "✦ AI Summarize & Add" : "✦ AI ilə xülasələ və əlavə et";
+        if (!isIdentityStale(epoch, expectedUserId)) {
+          addAllToPlannerButton.disabled = false;
+          addAllToPlannerButton.textContent = isEn ? "✦ AI Summarize & Add" : "✦ AI ilə xülasələ və əlavə et";
+        }
       }
     }
   );
@@ -10903,9 +11050,8 @@ function buildBlogView(strategy) {
 }
 
 function buildOrchestrationMetaPanel(strategy, isEn) {
-  const sources = Array.isArray(strategy?.orchestration?.sources)
-    ? strategy.orchestration.sources.filter((source) => source?.url && /^https?:\/\//i.test(source.url))
-    : [];
+  const sources = Array.isArray(strategy?.orchestration?.sources) ? strategy.orchestration.sources : [];
+  const evidence = Array.isArray(strategy?.orchestration?.evidence) ? strategy.orchestration.evidence : [];
   const searchSuggestions = extractGroundingSearchSuggestions({
     webSearchQueries: strategy?.orchestration?.searchQueries,
     searchEntryPoint: strategy?.orchestration?.searchEntryPoint,
@@ -10920,23 +11066,41 @@ function buildOrchestrationMetaPanel(strategy, isEn) {
     element("div", "strategy-sources-heading-copy")
   );
   heading.lastChild.append(
-    element("h3", "", isEn ? "Sources used" : "İstifadə olunan mənbələr"),
-    element("p", "", isEn ? "References from the web research behind this strategy" : "Strategiyanın əsaslandığı veb araşdırma istinadları")
+    element("h3", "", isEn ? "Web research" : "Veb araşdırması"),
+    element("p", "", isEn ? "Source-linked findings shown separately from the generated plan" : "Mənbələrlə əlaqələndirilmiş tapıntılar plandan ayrıca göstərilir")
   );
   panel.appendChild(heading);
   const list = element("div", "strategy-sources-list");
-  for (const source of sources.slice(0, 20)) {
+  const sourceLink = source => {
+    let url;
+    try { url = new URL(source?.url); }
+    catch { return null; }
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return null;
     const link = element("a", "strategy-source-link");
-    link.href = source.url;
+    link.href = url.href;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    let hostname;
-    try { hostname = new URL(source.url).hostname.replace(/^www\./, ""); }
-    catch { continue; }
+    const hostname = url.hostname.replace(/^www\./, "");
     link.append(element("strong", "", source.title || hostname), element("span", "", hostname + " ↗"));
-    list.appendChild(link);
+    return link;
+  };
+  if (evidence.length) {
+    const findings = element("ul", "decision-list");
+    for (const item of evidence) {
+      if (!item || typeof item.text !== "string" || !Array.isArray(item.sourceIndices)) continue;
+      const links = item.sourceIndices.map(index => sourceLink(sources[index])).filter(Boolean);
+      if (!links.length) continue;
+      const finding = element("li", "", item.text);
+      const citations = element("div", "strategy-sources-list");
+      citations.append(...links);
+      finding.appendChild(citations);
+      findings.appendChild(finding);
+    }
+    panel.appendChild(findings);
+  } else {
+    list.append(...sources.slice(0, 20).map(sourceLink).filter(Boolean));
+    panel.appendChild(list);
   }
-  panel.appendChild(list);
   if (searchSuggestions.length > 0) {
     const suggestionsBar = element("div", "ask-search-suggestions strategy-search-suggestions");
     suggestionsBar.setAttribute("aria-label", "Google Search Suggestions");
@@ -11250,6 +11414,8 @@ function buildFaqView(strategy) {
 
   renderFilteredFaq();
   container.appendChild(faqAccordion);
+  const metaPanel = buildOrchestrationMetaPanel(strategy, isEn);
+  if (metaPanel) container.appendChild(metaPanel);
   return container;
 }
 
@@ -11313,6 +11479,8 @@ function buildRoadmapView(strategy) {
   measurement.appendChild(kpiGrid);
 
   container.append(actionPlan, closeout, measurement);
+  const metaPanel = buildOrchestrationMetaPanel(strategy, isEn);
+  if (metaPanel) container.appendChild(metaPanel);
   return container;
 }
 
@@ -12030,10 +12198,11 @@ function startRefinementPlaceholderTyping(input) {
   tick();
 }
 
-async function requestRefinement(action, request) {
+async function requestRefinement(action, request, retryIdempotencyKey = null) {
   const epoch = state.identityEpoch;
   const expectedUserId = state.currentUser?.id || null;
   const previousStatus = state.savedId ? "saved" : "ready";
+  const refinementKey = retryIdempotencyKey || window.helmerSecurity?.idempotencyKey?.() || crypto.randomUUID();
   clearError();
   state.changeSummary = "";
   state.refinementOpen = false;
@@ -12051,12 +12220,14 @@ async function requestRefinement(action, request) {
     const data = await api(path, {
       method: "POST",
       signal: controller.signal,
+      headers: { "Idempotency-Key": refinementKey },
       body: JSON.stringify({
         brief: state.brief,
         answers: state.answers,
         strategy: state.strategy,
         action,
         request,
+        idempotencyKey: refinementKey,
         language: getLanguage(),
         ...(activeBuildMode === "faster" ? {
           buildMode: "faster",
@@ -12091,7 +12262,7 @@ async function requestRefinement(action, request) {
   } catch (error) {
     if (currentAbortController === controller) currentAbortController = null;
     if (error?.name === "AbortError" || controller.signal.aborted || isIdentityStale(epoch, expectedUserId)) return;
-    setError(error, () => requestRefinement(action, request), previousStatus);
+    setError(error, () => requestRefinement(action, request, refinementKey), previousStatus);
   }
 }
 
@@ -12127,14 +12298,39 @@ async function saveStrategy() {
   }
 }
 
+function isStrategyGroundedClient(strategy) {
+  if (!strategy || typeof strategy !== "object") return false;
+  const orch = strategy.orchestration && typeof strategy.orchestration === "object" ? strategy.orchestration : null;
+  return Boolean(
+    strategy.searchGrounded === true ||
+    strategy.groundingActive === true ||
+    (Array.isArray(strategy.sources) && strategy.sources.length > 0) ||
+    (Array.isArray(strategy.evidence) && strategy.evidence.length > 0) ||
+    orch?.searchGrounded === true ||
+    orch?.groundingActive === true ||
+    Number(orch?.sourcesCount) > 0 ||
+    (Array.isArray(orch?.sources) && orch.sources.length > 0) ||
+    (Array.isArray(orch?.evidence) && orch.evidence.length > 0) ||
+    (Array.isArray(orch?.searchQueries) && orch.searchQueries.length > 0) ||
+    (typeof orch?.searchEntryPoint?.renderedContent === "string" && orch.searchEntryPoint.renderedContent.trim().length > 0) ||
+    (Array.isArray(orch?.stageMetrics) && orch.stageMetrics.some((s) => s && (s.groundingActive || s.searchGrounded || Number(s.verifiedSourcesCount) > 0)))
+  );
+}
+
 function sendExportTelemetry(format, title = "") {
+  const isSavedUuid = Boolean(state?.savedId && /^[0-9a-f-]{36}$/i.test(state.savedId));
+  const isGrounded = isStrategyGroundedClient(state?.strategy);
+  const hideContent = isGrounded || !isSavedUuid;
   fetch("/api/telemetry/event", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       eventType: "export_requested",
       format,
-      title: title || state?.strategy?.title || "",
+      strategyId: isSavedUuid ? state.savedId : null,
+      clientSaveId: (!isSavedUuid && state?.clientSaveId) ? state.clientSaveId : null,
+      title: hideContent ? "" : ((title || state?.strategy?.title || "").slice(0, 200)),
+      ...(isGrounded ? { groundingActive: true } : {}),
     }),
   }).catch(() => { });
 }
@@ -12391,11 +12587,24 @@ function clearUserScopedWorkspaceState() {
   closeSearchModal();
   if (typeof stopBuildCountdown === "function") stopBuildCountdown();
   if (typeof stopBuildIntelligence === "function") stopBuildIntelligence();
+  if (typeof stopAskPlaceholderAnimation === "function") stopAskPlaceholderAnimation();
   document.querySelectorAll(".build-menu-actions, .build-rail-actions").forEach(node => node.remove());
   state.buildStartedAt = null;
   if (currentAbortController) {
     try { currentAbortController.abort(); } catch {}
     currentAbortController = null;
+  }
+  if (typeof detachedBuildAbortControllers !== "undefined" && detachedBuildAbortControllers.size > 0) {
+    for (const controller of detachedBuildAbortControllers) {
+      try { controller.abort(); } catch {}
+    }
+    detachedBuildAbortControllers.clear();
+  }
+  if (typeof backgroundResumeAbortControllers !== "undefined" && backgroundResumeAbortControllers.size > 0) {
+    for (const controller of backgroundResumeAbortControllers) {
+      try { controller.abort(); } catch {}
+    }
+    backgroundResumeAbortControllers.clear();
   }
   if (typeof progressTimer !== "undefined" && progressTimer) {
     clearInterval(progressTimer);
@@ -12424,6 +12633,7 @@ function clearUserScopedWorkspaceState() {
   }
   try {
     document.querySelector(".loading-ask-modal-overlay")?._closeAskModal?.();
+    document.querySelectorAll(".planner-modal-overlay").forEach((el) => el._closeModal ? el._closeModal() : el.remove());
     document.querySelector(".analysis-history-overlay")?.remove();
   } catch {}
 

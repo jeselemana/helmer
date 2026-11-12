@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { estimateCost, learningConfig } from "./config.js";
 import { calculateQualityScore } from "./quality-score.js";
 import { sanitizeRelevantContext, sanitizeTrainingText } from "./sanitizer.js";
+import { isGroundedStrategyRecord, isGroundedAssistantMessage, hasGroundedContent } from "../ai/grounded-chat-retention.js";
 
 function asText(value, limit) {
   const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
@@ -36,13 +37,17 @@ function isGroundedInteraction(item) {
   if (!item) return false;
   return Boolean(
     item.groundingActive === true ||
+    item.searchGrounded === true ||
     item.mode === "ask_research" ||
     item.taskType === "deep_research" ||
-    item.groundingMetadata?.groundingChunks?.length ||
-    item.groundingMetadata?.webSearchQueries?.length ||
-    item.groundingMetadata?.searchSuggestions?.length ||
-    item.groundingMetadata?.searchEntryPoint ||
-    (item.relevantContext && (item.relevantContext.searchGrounded || item.relevantContext.groundingActive))
+    hasGroundedContent(item) ||
+    isGroundedAssistantMessage(item) ||
+    isGroundedStrategyRecord(item) ||
+    isGroundedStrategyRecord(item.modelResponse) ||
+    isGroundedStrategyRecord(item.response) ||
+    (item.relevantContext &&
+      (hasGroundedContent(item.relevantContext) ||
+        isGroundedStrategyRecord(item.relevantContext)))
   );
 }
 
@@ -172,9 +177,19 @@ export class LearningLoopService {
     return this.repository.update(async (store) => {
       if (this.privacyPolicy && !await this.privacyPolicy.allows(input.ownerId, input.privacySnapshot)) return null;
       const parent = store.interactions.find((item) => item.id === input.parentInteractionId);
-      if (!parent || (input.ownerId && parent.ownerId !== input.ownerId)
-        || parent.onlyNecessaryData === true || parent.modelImprovement === false
-        || isGroundedInteraction(parent) || isGroundedInteraction(input.response?.orchestration ? { groundingActive: input.response.orchestration.searchGrounded } : input)) return null;
+      if (
+        !parent ||
+        (input.ownerId && parent.ownerId !== input.ownerId) ||
+        parent.onlyNecessaryData === true ||
+        parent.modelImprovement === false ||
+        isGroundedInteraction(parent) ||
+        input.onlyNecessaryData === true ||
+        input.modelImprovement === false ||
+        isGroundedInteraction(input) ||
+        isGroundedStrategyRecord(input.response)
+      ) {
+        return null;
+      }
       const siblings = store.iterations.filter((item) => item.parentInteractionId === parent.id);
       const iteration = {
         id: randomUUID(),

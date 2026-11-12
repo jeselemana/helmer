@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildAskContents } from '../src/services/ai/ask-service.js';
 import { createAskConfig } from '../src/services/ai/ask-config.js';
-import { MAX_GROUNDED_CHAT_RETENTION_MS, pruneExpiredGroundedResults } from '../src/services/ai/grounded-chat-retention.js';
+import { MAX_GROUNDED_CHAT_RETENTION_MS, pruneExpiredGroundedResults, pruneExpiredGroundedStrategies } from '../src/services/ai/grounded-chat-retention.js';
+import { getRelevantUserContext } from '../src/services/ai/personal-context.js';
 import { LearningLoopService } from '../src/services/learning/learning-loop-service.js';
 import { TelemetryService } from '../src/services/telemetry/telemetry-service.js';
 
@@ -152,4 +153,76 @@ test('4. Telemetry Protection: Grounded queries are strictly redacted and only n
   assert.equal(evt.category, 'Zəruri Əməliyyat');
   assert.equal(evt.metadata.onlyNecessaryData, true);
   assert.ok(!JSON.stringify(evt).includes('Confidential live search query'), 'Query snippet must never leak into telemetry');
+});
+
+test('5. Build Telemetry & Cross-Session Isolation: Grounded Build strategies are redacted in telemetry, excluded from cross-session Ask context, and pruned after 2 years', async () => {
+  const mockRepo = {
+    events: [],
+    async listEvents() { return { items: this.events, total: this.events.length }; },
+  };
+  const service = new TelemetryService(mockRepo);
+  service.persistEvent = async (event) => { mockRepo.events.push(event); return event; };
+
+  await service.trackBuildStrategy({
+    ownerId: 'usr-telem-build',
+    brief: 'Confidential grounded fintech brief in Baku',
+    model: 'gemini-4-argon',
+    groundingActive: true,
+    strategy: {
+      title: 'Grounded Strategy Secret',
+      orchestration: { searchGrounded: true },
+    },
+    status: 'success',
+  });
+
+  assert.equal(mockRepo.events.length, 1);
+  const buildEvt = mockRepo.events[0];
+  assert.equal(buildEvt.groundingActive, true);
+  assert.equal(buildEvt.onlyNecessaryData, true);
+  assert.equal(buildEvt.modelImprovement, false);
+  assert.equal(buildEvt.category, 'Zəruri Əməliyyat');
+  assert.ok(!JSON.stringify(buildEvt).includes('Confidential grounded fintech brief'), 'Grounded Build brief must never leak into telemetry');
+
+  // Verify grounded strategies are excluded from getRelevantUserContext
+  const now = Date.now();
+  const freshDate = new Date(now - 10 * 86400000).toISOString();
+  const expiredDate = new Date(now - (MAX_GROUNDED_CHAT_RETENTION_MS + 86400000)).toISOString();
+
+  const strategies = [
+    {
+      id: 'strat-grounded-1',
+      ownerId: 'usr-ctx-1',
+      title: 'Fintech Grounded Plan',
+      brief: 'Fintech payment gateway expansion',
+      summary: 'Grounded web secret summary',
+      createdAt: expiredDate,
+      updatedAt: freshDate,
+      strategy: { orchestration: { searchGrounded: true, sources: [{ title: 'reuters.com', url: 'https://reuters.com/fintech' }] } },
+    },
+    {
+      id: 'strat-ungrounded-1',
+      ownerId: 'usr-ctx-1',
+      title: 'Fintech Internal Plan',
+      brief: 'Fintech onboarding optimization',
+      summary: 'Ungrounded internal summary',
+      updatedAt: freshDate,
+      strategy: { orchestration: { searchGrounded: false, sources: [] } },
+    },
+  ];
+
+  const context = await getRelevantUserContext({
+    ownerId: 'usr-ctx-1',
+    userMessage: 'Fintech planımız nədir?',
+    chatRepository: { readAll: async () => [] },
+    strategyRepository: { readAll: async () => strategies, getById: async () => true },
+  });
+
+  assert.match(context, /Fintech Internal Plan/);
+  assert.doesNotMatch(context, /Fintech Grounded Plan|Grounded web secret summary/);
+
+  // Verify 2-year retention pruning removes expired grounded strategy while keeping ungrounded strategy
+  const removed = pruneExpiredGroundedStrategies(strategies, now);
+  assert.equal(removed, 1);
+  assert.equal(strategies.length, 1);
+  assert.equal(strategies[0].id, 'strat-ungrounded-1');
 });

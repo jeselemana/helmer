@@ -30,7 +30,7 @@ async function fixture(t) {
     if (!scout && f.failure) throw f.failure;
     const assessment = params.config.responseSchema.properties.status;
     return { text: JSON.stringify(scout ? f.route : assessment ? { status: 'ready', understanding: 'Clear brief', questions: [], assumptions: [] } : f.invalidFinal || strategyFixture()),
-      candidates: [{ finishReason: 'STOP', ...(scout && f.route.needs_search ? { groundingMetadata: { groundingChunks: [{ web: { uri: 'https://reuters.com/report', title: 'Report' } }], webSearchQueries: ['Market launch evidence'] } } : {}) }],
+      candidates: [{ finishReason: 'STOP', ...(scout && f.route.needs_search ? { groundingMetadata: { groundingChunks: [{ web: { uri: 'https://reuters.com/report', title: 'Report' } }], webSearchQueries: ['Market launch evidence'], groundingSupports: f.route.facts.map(text => ({ segment: { text }, groundingChunkIndices: [0] })) } } : {}) }],
       usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 20 } };
   };
   const gemini = wrapProvider({ models: {
@@ -76,6 +76,8 @@ test('Build HTTP: SSE ends at Argon, saves one tenant record, preserves sources 
   const done = events.find(event => event.done);
   assert.equal(done.strategy.title, 'Launch brief'); assert.ok(done.savedId);
   assert.equal(done.strategy.orchestration.sources[0].url, 'https://reuters.com/report');
+  assert.deepEqual(done.strategy.orchestration.evidence, [{ text: 'Reported evidence', sourceIndices: [0] }]);
+  assert.doesNotMatch(f.calls[1].params.contents, /Reported evidence/);
   assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash', 'gemini-4-argon']);
   assert.equal(f.calls[1].params.config.thinkingConfig.thinkingLevel, 'HIGH');
   assert.match(JSON.parse(f.calls[1].params.contents).untrustedBusinessProfile, /Industry: Software/);
@@ -353,4 +355,35 @@ test('Build HTTP: oversized array/object collections are rejected before Zod par
   const body = await res.json();
   assert.equal(body.code, 'VALIDATION_ERROR');
   assert.equal(f.calls.length, 0);
+});
+
+test('Build HTTP blocks grounded refinements before provider calls and learning', async t => {
+  const f = await fixture(t);
+  const payload = f.payload();
+  const generated = await f.post('/generate', payload);
+  const { strategy, savedId } = await generated.json();
+  assert.ok(savedId);
+  const callCount = f.calls.length;
+  const input = { action: 'shorten', idempotencyKey: randomUUID() };
+  const stored = await f.post(`/${savedId}/refine`, input);
+  const unsaved = await f.post('/refine', { ...input, strategy, brief: payload.brief });
+  for (const response of [stored, unsaved]) {
+    assert.equal(response.status, 422);
+    assert.equal((await response.json()).code, 'GROUNDED_STRATEGY_RESTRICTED');
+  }
+  assert.equal(f.calls.length, callCount);
+  assert.equal(f.learning.filter(item => item.taskType?.startsWith('build_refine')).length, 0);
+});
+
+test('Build HTTP redacts failed grounding with model improvement enabled', async t => {
+  const f = await fixture(t);
+  f.users.get(f.ownerA).settings.modelImprovement = true;
+  f.route.facts = [];
+  const response = await f.post('/generate', f.payload());
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).code, 'GROUNDING_UNAVAILABLE');
+  assert.equal(f.calls.length, 1);
+  assert.equal((await f.repository.list(f.ownerA)).length, 0);
+  assert.equal(f.learning[0].onlyNecessaryData, true);
+  assert.doesNotMatch(JSON.stringify(f.learning), /Prepare a secure/);
 });

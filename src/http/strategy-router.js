@@ -1,4 +1,5 @@
 import { assertExecutionAuthorized, createExecutionController } from '../services/security/execution-control.js';
+import { executionContext } from '../services/security/privacy-policy.js';
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import express from "express";
@@ -24,6 +25,13 @@ import { buildStrategyPersonalizationContext } from "../services/ai/personal-con
 import { detectTargetMarket, getGuestBuildCtaNotice, GUEST_BUILD_EXHAUSTED_MESSAGE } from "../services/ai/prompts.js";
 import { BuildEstimateRequestSchema } from "../services/ai/build-estimate.js";
 import { buildConfig } from "../services/ai/build-config.js";
+import {
+  isGroundedStrategyRecord,
+  isExpiredGroundedStrategyRecord,
+  resolveGroundedStrategyProvenance,
+  applyGroundedProvenanceToStrategy,
+  rememberGroundedStrategyProvenance,
+} from "../services/ai/grounded-chat-retention.js";
 import { aiConfig } from "../services/ai/config.js";
 import { logWithoutBlocking } from "../services/learning/learning-loop-service.js";
 import { isModelImprovementEnabled } from "./auth-middleware.js";
@@ -66,6 +74,7 @@ export function computePayloadFingerprint(operation, payload, resourceId = null)
     strategy: payload?.strategy && typeof payload.strategy === "object" ? canonicalize(payload.strategy) : null,
     ...(payload?.buildMode !== undefined ? { buildMode: payload.buildMode } : {}),
     ...(payload?.fasterThinkingLevel !== undefined ? { fasterThinkingLevel: payload.fasterThinkingLevel } : {}),
+    ...(payload?.round !== undefined ? { round: Number(payload.round) } : {}),
   };
   return createHash("sha256").update(JSON.stringify(canonicalize(norm))).digest("hex");
 }
@@ -102,6 +111,8 @@ function publicBuildFailure(error) {
     AI_INVALID_OUTPUT: "Strategiyanın cavab formatını tamamlamaq mümkün olmadı. Yenidən cəhd edin.",
     AI_MAX_TOKENS: "Strategiyanın cavab həcmi limitə çatdı. Yenidən cəhd edin.",
     AI_CONTENT_BLOCKED: "Bu sorğunu tamamlamaq mümkün olmadı. Sorğunu nəzərdən keçirin.",
+    GROUNDING_UNAVAILABLE: "Canlı araşdırma üçün mənbə ilə dəstəklənən məlumat tapılmadı. Yenidən cəhd edin.",
+    GROUNDED_STRATEGY_RESTRICTED: "Veb araşdırması olan strategiyanı model ilə redaktə etmək mümkün deyil. Orijinal brifdən yeni strategiya yaradın.",
   };
   const code = typeof error.code === "string" ? error.code : "STRATEGY_ERROR";
   return {
@@ -233,8 +244,13 @@ async function runTrackedBuild({
   const startedAt = Date.now();
   let providerMeta = { provider: "google", model: buildConfig.strategistModel, usage: null, stageMetrics: [] };
   const isRestricted = onlyNecessaryData || modelImprovement === false;
+  let searchObserved = false;
+  let searchAttempted = false;
   try {
     const result = await execute((meta) => {
+      searchObserved ||= Boolean(meta?.groundingActive || meta?.searchGrounded);
+      searchAttempted ||= Boolean(meta?.searchAttempted);
+      if (!meta?.model) return;
       const prevUsage = providerMeta.usage;
       const stageMetrics = [
         ...(Array.isArray(providerMeta.stageMetrics) ? providerMeta.stageMetrics : []),
@@ -274,75 +290,81 @@ async function runTrackedBuild({
       }
       providerMeta = { ...providerMeta, ...meta, usage: nextUsage, stageMetrics };
     });
-    const groundingActive = Boolean(result?.orchestration?.searchGrounded || providerMeta?.searchGrounded);
+    const groundingActive = searchObserved || isGroundedStrategyRecord(result);
+    const effectiveRestricted = Boolean(isRestricted || groundingActive);
     if (learningLoop) {
       logWithoutBlocking(learningLoop.recordInteraction({
         id: interactionId,
         ownerId,
         mode: "build",
         taskType,
-        userPrompt: isRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : userPrompt,
-        relevantContext: isRestricted ? null : relevantContext,
+        userPrompt: effectiveRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : userPrompt,
+        relevantContext: effectiveRestricted ? null : relevantContext,
         modelProvider: providerMeta.provider,
         modelName: providerMeta.model,
-        modelResponse: isRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : result,
+        modelResponse: effectiveRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : result,
         usage: providerMeta.usage,
         latencyMs: Date.now() - startedAt,
         requestStatus: "success",
         groundingActive,
-        onlyNecessaryData: isRestricted,
-        modelImprovement: !isRestricted,
+        onlyNecessaryData: effectiveRestricted,
+        modelImprovement: !effectiveRestricted,
         privacySnapshot,
       }), `Build ${taskType} logging`);
     }
     if (telemetryService) {
       telemetryService.trackBuildStrategy({
         ownerId,
-        brief: isRestricted ? "" : userPrompt,
+        brief: effectiveRestricted ? "" : userPrompt,
         model: providerMeta.model,
         latencyMs: Date.now() - startedAt,
         usage: providerMeta.usage,
+        groundingActive,
         status: "success",
-        strategy: isRestricted ? null : result,
+        strategy: effectiveRestricted ? null : result,
         action: taskType,
-        onlyNecessaryData: isRestricted,
-        modelImprovement: !isRestricted,
+        onlyNecessaryData: effectiveRestricted,
+        modelImprovement: !effectiveRestricted,
       }).catch(() => {});
     }
     return { result, interactionId, providerMeta };
   } catch (error) {
+    const errorGroundingActive = searchObserved || searchAttempted;
+    const errorRestricted = Boolean(isRestricted || errorGroundingActive);
     if (learningLoop) {
       logWithoutBlocking(learningLoop.recordInteraction({
         id: interactionId,
         ownerId,
         mode: "build",
         taskType,
-        userPrompt: isRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : userPrompt,
-        relevantContext: isRestricted ? null : relevantContext,
+        userPrompt: errorRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : userPrompt,
+        relevantContext: errorRestricted ? null : relevantContext,
         modelProvider: providerMeta.provider,
         modelName: providerMeta.model,
-        modelResponse: "",
+        modelResponse: errorRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : "",
         usage: providerMeta.usage,
         latencyMs: Date.now() - startedAt,
         requestStatus: "error",
         errorType: error?.code || error?.name || "BUILD_ERROR",
-        onlyNecessaryData: isRestricted,
-        modelImprovement: !isRestricted,
+        groundingActive: errorGroundingActive,
+        onlyNecessaryData: errorRestricted,
+        modelImprovement: !errorRestricted,
         privacySnapshot,
       }), `Build ${taskType} failure logging`);
     }
     if (telemetryService) {
       telemetryService.trackBuildStrategy({
         ownerId,
-        brief: isRestricted ? "" : userPrompt,
+        brief: errorRestricted ? "" : userPrompt,
         model: providerMeta.model,
         latencyMs: Date.now() - startedAt,
         usage: providerMeta.usage,
+        groundingActive: errorGroundingActive,
         status: "error",
         error,
         action: taskType,
-        onlyNecessaryData: isRestricted,
-        modelImprovement: !isRestricted,
+        onlyNecessaryData: errorRestricted,
+        modelImprovement: !errorRestricted,
       }).catch(() => {});
     }
     throw error;
@@ -352,16 +374,264 @@ async function runTrackedBuild({
 export function createStrategyRouter(repository, learningLoop = null, options = {}) {
   const router = express.Router();
   const telemetryService = options?.telemetryService || null;
-  const estimateFingerprints = new Map();
+  const routeIdempotencyState = new Map();
   const generationServices = options.generationServices || { assessBrief, generateStrategy, refineStrategy };
   const isGenerationRequest = req => req.method === "POST" && /^\/(?:estimate|assess|generate|generate-stream|refine|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path);
+
+  const readRequestHeaderKey = (req) => {
+    const raw = typeof req.get === "function"
+      ? req.get("Idempotency-Key")
+      : (req.headers?.["idempotency-key"] || req.headers?.["Idempotency-Key"] || "");
+    return typeof raw === "string" ? raw.trim() : "";
+  };
+
+  const resolveRequestIdempotencyKey = (req, payload = null) => {
+    const headerKey = readRequestHeaderKey(req);
+    const rawBodyKey = payload?.idempotencyKey ?? req.body?.idempotencyKey;
+    const bodyKey = typeof rawBodyKey === "string" ? rawBodyKey.trim() : "";
+    if (bodyKey && headerKey && bodyKey !== headerKey) {
+      const conflictErr = new Error("Eyni idempotency açarı fərqli parametrlərlə istifadə edilib.");
+      conflictErr.code = "IDEMPOTENCY_CONFLICT";
+      conflictErr.status = 409;
+      throw conflictErr;
+    }
+    return bodyKey || headerKey || null;
+  };
+
+  async function executeSharedRefinement({ refineKey, fingerprint, subscriberId, req, res, execute }) {
+    const isSecurityAbortReason = (reason) => Boolean(
+      reason &&
+      typeof reason === "object" &&
+      /^(EXECUTION_|RESEARCH_RESTART|GROUNDING_|PROVENANCE_|DAILY_BUDGET_|MODEL_PRICING_|TOOL_PRICING_)/.test(reason.code || "")
+    );
+
+    const attachSubscriber = (entry, subId, subReq, subRes) => {
+      entry.subscribers.add(subId);
+      const subContext = subReq?.securityContext || null;
+      if (subContext) {
+        entry.subscriberContexts.set(subId, subContext);
+      }
+
+      const subSignal = subContext?.signal || null;
+      const onSecurityAbort = () => {
+        if (!entry.settled && isSecurityAbortReason(subSignal?.reason)) {
+          entry.abortController.abort(subSignal.reason);
+        }
+      };
+      if (subSignal) {
+        if (subSignal.aborted) {
+          onSecurityAbort();
+        } else {
+          subSignal.addEventListener("abort", onSecurityAbort, { once: true });
+        }
+      }
+
+      let detached = false;
+      const detach = (fromReqClose = false) => {
+        if (detached) return;
+        if (fromReqClose && subReq.complete && !subRes.destroyed && !subRes.closed) return;
+        if (subRes.writableEnded) return;
+        detached = true;
+        entry.subscribers.delete(subId);
+        entry.subscriberContexts.delete(subId);
+        if (entry.subscribers.size === 0 && !entry.settled) {
+          entry.abortController.abort();
+          entry.releaseLease?.();
+        }
+      };
+      const onReqClose = () => detach(true);
+      const onResClose = () => detach(false);
+      subReq.on?.("close", onReqClose);
+      subRes.on?.("close", onResClose);
+
+      return () => {
+        subReq.off?.("close", onReqClose);
+        subRes.off?.("close", onResClose);
+        if (subSignal) {
+          try { subSignal.removeEventListener("abort", onSecurityAbort); } catch {}
+        }
+        entry.subscribers.delete(subId);
+        entry.subscriberContexts.delete(subId);
+        if (entry.settled && entry.subscribers.size === 0) {
+          setImmediate(() => {
+            if (entry.settled && entry.subscribers.size === 0) {
+              entry.releaseLease?.();
+            }
+          }).unref?.();
+        }
+      };
+    };
+
+    if (refineKey && activeRefinements.has(refineKey)) {
+      const entry = activeRefinements.get(refineKey);
+      if (entry.fingerprint && entry.fingerprint !== fingerprint) {
+        const conflictErr = new Error("Eyni idempotency açarı fərqli parametrlərlə istifadə edilib.");
+        conflictErr.code = "IDEMPOTENCY_CONFLICT";
+        conflictErr.status = 409;
+        throw conflictErr;
+      }
+      if (entry.settled && entry.result) {
+        return entry.result;
+      }
+      const cleanupSubscriber = attachSubscriber(entry, subscriberId, req, res);
+      try {
+        return await entry.promise;
+      } finally {
+        cleanupSubscriber();
+      }
+    }
+
+    const baseContext = req?.securityContext || null;
+    const lease = refineKey && baseContext?.transferToBackground ? baseContext.transferToBackground() : null;
+    const abortController = baseContext ? new AbortController() : createExecutionController();
+    let leaseReleased = false;
+    const entry = {
+      promise: null,
+      fingerprint,
+      abortController,
+      subscribers: new Set(),
+      subscriberContexts: new Map(),
+      settled: false,
+      result: null,
+      lease,
+      releaseLease: () => {
+        if (leaseReleased || !lease?.release) return;
+        leaseReleased = true;
+        return Promise.resolve().then(() => lease.release()).catch(() => {});
+      },
+    };
+
+    const cleanupCreator = attachSubscriber(entry, subscriberId, req, res);
+    if (res?.once) {
+      res.once("finish", () => {
+        if (entry.settled && entry.subscribers.size === 0) {
+          entry.releaseLease?.();
+        }
+      });
+    }
+
+    const sharedContext = baseContext
+      ? {
+          ...baseContext,
+          controller: abortController,
+          signal: abortController.signal,
+          markMutationPending: () => {
+            baseContext.markMutationPending?.();
+            for (const ctx of entry.subscriberContexts.values()) {
+              if (ctx !== baseContext) ctx?.markMutationPending?.();
+            }
+          },
+          recordIdempotentResult: (...args) => {
+            baseContext.recordIdempotentResult?.(...args);
+            for (const ctx of entry.subscriberContexts.values()) {
+              if (ctx !== baseContext) ctx?.recordIdempotentResult?.(...args);
+            }
+          },
+          assertAuthorized: async () => {
+            const activeContexts = entry.subscriberContexts.size > 0
+              ? [...entry.subscriberContexts.values()]
+              : [baseContext];
+            await Promise.all([
+              ...activeContexts.map((ctx) => (ctx?.assertAuthorized ? ctx.assertAuthorized() : Promise.resolve())),
+              ...(lease?.assertOwned ? [lease.assertOwned()] : []),
+            ]);
+          },
+        }
+      : null;
+
+    const refinePromise = sharedContext
+      ? executionContext.run(sharedContext, () => execute(abortController.signal))
+      : execute(abortController.signal);
+    entry.promise = refinePromise;
+    if (refineKey) {
+      activeRefinements.set(refineKey, entry);
+      refinePromise.then(
+        (val) => {
+          entry.settled = true;
+          entry.result = val;
+          setTimeout(() => {
+            if (activeRefinements.get(refineKey) === entry) {
+              activeRefinements.delete(refineKey);
+            }
+          }, 5 * 60 * 1000).unref();
+          setImmediate(() => {
+            if (entry.subscribers.size === 0) entry.releaseLease?.();
+          }).unref?.();
+        },
+        () => {
+          entry.settled = true;
+          if (activeRefinements.get(refineKey) === entry) {
+            activeRefinements.delete(refineKey);
+          }
+          entry.releaseLease?.();
+        },
+      );
+    }
+
+    try {
+      return await refinePromise;
+    } finally {
+      cleanupCreator();
+    }
+  }
+
+  function runWithRouteIdempotency(operation, ownerId, idKey, fingerprint, fn) {
+    if (!idKey) return fn();
+    const requestKey = createHash("sha256").update(`${ownerId}:${operation}:${idKey}`).digest("hex");
+    const now = Date.now();
+    for (const [key, entry] of routeIdempotencyState) if (entry.expiresAt <= now) routeIdempotencyState.delete(key);
+    const previous = routeIdempotencyState.get(requestKey);
+    if (previous && previous.fingerprint !== fingerprint) {
+      const conflictErr = new Error("Eyni sorğu açarı fərqli parametrlərlə istifadə edilib.");
+      conflictErr.code = "IDEMPOTENCY_CONFLICT";
+      conflictErr.status = 409;
+      throw conflictErr;
+    }
+    if (previous?.status === "completed" && previous.response) {
+      return Promise.resolve(previous.response);
+    }
+    if (previous?.status === "pending" && previous.promise) {
+      return previous.promise;
+    }
+    if (routeIdempotencyState.size >= 512) routeIdempotencyState.delete(routeIdempotencyState.keys().next().value);
+    const entry = {
+      fingerprint,
+      status: "pending",
+      response: null,
+      expiresAt: now + 15 * 60 * 1000,
+      promise: null,
+    };
+    entry.promise = Promise.resolve().then(fn).then(
+      (result) => {
+        entry.status = "completed";
+        entry.response = result;
+        return result;
+      },
+      (err) => {
+        if (routeIdempotencyState.get(requestKey) === entry) {
+          routeIdempotencyState.delete(requestKey);
+        }
+        throw err;
+      }
+    );
+    routeIdempotencyState.set(requestKey, entry);
+    return entry.promise;
+  }
 
   const estimateRateLimit = rateLimit(20, 10 * 60 * 1000, "estimate");
   const generationRateLimit = rateLimit(30);
   router.use((req, res, next) => (req.path === "/estimate" ? estimateRateLimit : generationRateLimit)(req, res, next));
   router.use((req, res, next) => {
-    if (isGenerationRequest(req) && !/^[A-Za-z0-9_-]{16,100}$/.test(req.get("Idempotency-Key") || "")) {
-      return res.status(400).json({ code: "IDEMPOTENCY_KEY_REQUIRED", error: "Etibarlı sorğu açarı tələb olunur." });
+    if (isGenerationRequest(req)) {
+      const headerKey = readRequestHeaderKey(req);
+      if (!/^[A-Za-z0-9_-]{16,100}$/.test(headerKey)) {
+        return res.status(400).json({ code: "IDEMPOTENCY_KEY_REQUIRED", error: "Etibarlı sorğu açarı tələb olunur." });
+      }
+      const rawBodyKey = req.body?.idempotencyKey;
+      const bodyKey = typeof rawBodyKey === "string" ? rawBodyKey.trim() : "";
+      if (bodyKey && bodyKey !== headerKey) {
+        return res.status(409).json({ code: "IDEMPOTENCY_CONFLICT", error: "Eyni sorğu açarı fərqli parametrlərlə istifadə edilib." });
+      }
     }
     return next();
   });
@@ -373,15 +643,8 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
 
   router.post("/estimate", asyncRoute(async (req, res) => {
     const payload = parse(BuildEstimateRequestSchema, req.body);
+    const idKey = readRequestHeaderKey(req);
     const fingerprint = computePayloadFingerprint("estimate", payload);
-    const requestKey = createHash("sha256").update(`${req.ownerId}:estimate:${req.get("Idempotency-Key")}`).digest("hex");
-    const now = Date.now();
-    for (const [key, entry] of estimateFingerprints) if (entry.expiresAt <= now) estimateFingerprints.delete(key);
-    const previous = estimateFingerprints.get(requestKey);
-    if (previous && previous.fingerprint !== fingerprint) return res.status(409).json({ code: "IDEMPOTENCY_CONFLICT", error: "Eyni sorğu açarı fərqli parametrlərlə istifadə edilib." });
-    if (!previous && estimateFingerprints.size >= 512) estimateFingerprints.delete(estimateFingerprints.keys().next().value);
-    // Bounded, owner-scoped fingerprints contain neither prompt nor profile.
-    estimateFingerprints.set(requestKey, { fingerprint, expiresAt: now + 15 * 60 * 1000 });
     const controller = createExecutionController();
     const onRequestClose = () => { if (!req.complete && !res.writableEnded) controller.abort(); };
     const onResponseClose = () => { if (!res.writableEnded) controller.abort(); };
@@ -389,15 +652,18 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     res.on("close", onResponseClose);
     res.setHeader("Cache-Control", "no-store");
     try {
-      const preparationEstimate = await estimateBuildPreparation({
-        brief: payload.brief,
-        buildMode: payload.buildMode,
-        fasterThinkingLevel: payload.fasterThinkingLevel,
-        ownerId: req.ownerId,
-        signal: controller.signal,
+      const responseBody = await runWithRouteIdempotency("estimate", req.ownerId, idKey, fingerprint, async () => {
+        const preparationEstimate = await estimateBuildPreparation({
+          brief: payload.brief,
+          buildMode: payload.buildMode,
+          fasterThinkingLevel: payload.fasterThinkingLevel,
+          ownerId: req.ownerId,
+          signal: controller.signal,
+        });
+        await assertExecutionAuthorized(controller.signal);
+        return { preparationEstimate };
       });
-      await assertExecutionAuthorized(controller.signal);
-      if (!res.writableEnded) res.json({ preparationEstimate });
+      if (!res.writableEnded) res.json(responseBody);
     } finally {
       req.off("close", onRequestClose);
       res.off("close", onResponseClose);
@@ -408,6 +674,8 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     "/assess",
     asyncRoute(async (req, res) => {
       const payload = parse(AssessRequestSchema, req.body);
+      const idKey = readRequestHeaderKey(req);
+      const fingerprint = computePayloadFingerprint("assess", payload);
       const abortController = createExecutionController();
       const onReqClose = () => {
         if (!req.complete && !res.writableEnded) abortController.abort();
@@ -419,26 +687,30 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       if (typeof res?.on === "function") res.on("close", onResClose);
 
       try {
-        const language = resolveLanguage(req, payload.language);
-        const personalizationContext = buildStrategyPersonalizationContext({
-          user: req.user,
+        const responseBody = await runWithRouteIdempotency("assess", req.ownerId, idKey, fingerprint, async () => {
+          const language = resolveLanguage(req, payload.language);
+          const personalizationContext = buildStrategyPersonalizationContext({
+            user: req.user,
+          });
+          const marketMode = detectTargetMarket({ brief: payload.brief, answers: payload.answers });
+          const modelImprovement = isModelImprovementEnabled(req);
+          let preparationEstimate;
+          const tracked = await runTrackedBuild({
+            learningLoop, telemetryService, ownerId: req.ownerId, taskType: "build_assess", userPrompt: payload.brief,
+            relevantContext: { personalizationApplied: Boolean(personalizationContext), language, marketMode },
+            execute: (onUsage) => generationServices.assessBrief({ ...payload, language, ownerId: req.ownerId, personalizationContext, signal: abortController.signal, onUsage, onEstimate: value => { preparationEstimate = value; } }),
+            onlyNecessaryData: !modelImprovement,
+            modelImprovement,
+            privacySnapshot: getReqPrivacySnapshot(req),
+          });
+          return {
+            assessment: tracked.result,
+            preparationEstimate,
+          };
         });
-        const marketMode = detectTargetMarket({ brief: payload.brief, answers: payload.answers });
-        const modelImprovement = isModelImprovementEnabled(req);
-        let preparationEstimate;
-        const tracked = await runTrackedBuild({
-          learningLoop, telemetryService, ownerId: req.ownerId, taskType: "build_assess", userPrompt: payload.brief,
-          relevantContext: { personalizationApplied: Boolean(personalizationContext), language, marketMode },
-          execute: (onUsage) => generationServices.assessBrief({ ...payload, language, ownerId: req.ownerId, personalizationContext, signal: abortController.signal, onUsage, onEstimate: value => { preparationEstimate = value; } }),
-          onlyNecessaryData: !modelImprovement,
-          modelImprovement,
-          privacySnapshot: getReqPrivacySnapshot(req),
-        });
-        const assessment = tracked.result;
         if (!res.writableEnded) {
           res.json({
-            assessment,
-            preparationEstimate,
+            ...responseBody,
             ...(req.user ? {} : {
               remainingGuestBriefs: req.remainingGuestBriefs,
               isGuest: true,
@@ -471,6 +743,9 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
 
       const existingSaved = tenantRecords.find((r) => r.clientSaveId === payload.idempotencyKey);
       if (existingSaved) {
+        if (isExpiredGroundedStrategyRecord(existingSaved)) {
+          return null;
+        }
         if (existingSaved.payloadFingerprint) {
           const matchesCanonical = existingSaved.payloadFingerprint === fingerprint;
           const matchesLegacy = existingSaved.payloadFingerprint === computeLegacyPayloadFingerprint("generate", payload);
@@ -580,7 +855,10 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             error.status = 409;
             throw error;
           }
-          return cached.tracked;
+          const replayRecord = cached.tracked?.savedRecord || cached.tracked?.result || null;
+          if (!replayRecord || !isExpiredGroundedStrategyRecord(replayRecord)) {
+            return cached.tracked;
+          }
         }
         generationSignal.throwIfAborted();
         await distLock.assertOwned();
@@ -620,6 +898,22 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         await distLock.assertOwned();
         await assertExecutionAuthorized(generationSignal);
         const strategy = tracked.result;
+        const isGroundedGeneration =
+          isGroundedStrategyRecord(strategy) ||
+          Boolean(tracked.providerMeta?.stageMetrics?.some((stage) => stage.groundingActive));
+        if (isGroundedGeneration) {
+          if (typeof repository.rememberProvenance === "function") {
+            await repository.rememberProvenance(ownerId, strategy, {
+              clientSaveId: payload.idempotencyKey,
+              forceGrounded: true,
+            }).catch(() => {});
+          } else {
+            rememberGroundedStrategyProvenance(ownerId, strategy, {
+              clientSaveId: payload.idempotencyKey,
+              forceGrounded: true,
+            });
+          }
+        }
         const isGuest = !user && (Boolean(req?.securityContext?.guest) || String(ownerId || "").startsWith("guest_"));
         const explicitAutoSave = typeof req?.body?.autoSave === "boolean" ? req.body.autoSave : undefined;
         const shouldAutoSave = isGuest
@@ -656,6 +950,21 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             error.code = "TENANT_DELETED";
             error.status = 404;
             throw error;
+          }
+        }
+        if (isGroundedGeneration && savedRecord) {
+          if (typeof repository.rememberProvenance === "function") {
+            await repository.rememberProvenance(ownerId, savedRecord, {
+              id: savedRecord.id,
+              clientSaveId: savedRecord.clientSaveId || payload.idempotencyKey,
+              forceGrounded: true,
+            }).catch(() => {});
+          } else {
+            rememberGroundedStrategyProvenance(ownerId, savedRecord, {
+              id: savedRecord.id,
+              clientSaveId: savedRecord.clientSaveId || payload.idempotencyKey,
+              forceGrounded: true,
+            });
           }
         }
         const completedResult = { ...tracked, result: savedRecord?.strategy || tracked.result, savedRecord };
@@ -823,36 +1132,34 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     "/refine",
     asyncRoute(async (req, res) => {
       const payload = parse(RefineRequestSchema, req.body);
-      const abortController = createExecutionController();
-      const onReqClose = () => {
-        if (!req.complete && !res.writableEnded) abortController.abort();
-      };
-      const onResClose = () => {
-        if (!res.writableEnded) abortController.abort();
-      };
-      if (typeof req?.on === "function") req.on("close", onReqClose);
-      if (typeof res?.on === "function") res.on("close", onResClose);
+      const effectiveKey = resolveRequestIdempotencyKey(req, payload);
+      if (typeof repository.loadOwnerProvenance === "function") {
+        await repository.loadOwnerProvenance(req.ownerId).catch(() => {});
+      }
+      const ownerRecordsForRefine = typeof repository.readTenant === "function"
+        ? await repository.readTenant(req.ownerId, { clone: false }).catch(() => [])
+        : [];
+      const refineProvenance = typeof repository.resolveProvenance === "function"
+        ? await repository.resolveProvenance(req.ownerId, payload.strategy, ownerRecordsForRefine)
+        : resolveGroundedStrategyProvenance(req.ownerId, payload.strategy, ownerRecordsForRefine);
+      if (isGroundedStrategyRecord(payload.strategy) || refineProvenance.grounded) {
+        throw Object.assign(new Error("Grounded strategy is restricted"), {
+          code: refineProvenance.expired ? "GROUNDED_STRATEGY_EXPIRED" : "GROUNDED_STRATEGY_RESTRICTED",
+          status: refineProvenance.expired ? 410 : 422,
+        });
+      }
 
       const fingerprint = computePayloadFingerprint("refine", payload);
-      const refineKey = payload.idempotencyKey ? `${req.ownerId}:${payload.idempotencyKey}` : null;
+      const refineKey = effectiveKey ? `${req.ownerId}:${effectiveKey}` : null;
+      const subscriberId = randomUUID();
 
-      try {
-        if (refineKey && activeRefinements.has(refineKey)) {
-          const entry = activeRefinements.get(refineKey);
-          if (entry.fingerprint && entry.fingerprint !== fingerprint) {
-            const conflictErr = new Error("Eyni idempotency açarı fərqli parametrlərlə istifadə edilib.");
-            conflictErr.code = "IDEMPOTENCY_CONFLICT";
-            conflictErr.status = 409;
-            throw conflictErr;
-          }
-          const result = await entry.promise;
-          if (!res.writableEnded) {
-            res.json(result);
-          }
-          return;
-        }
-
-        const executeRefine = async () => {
+      const result = await executeSharedRefinement({
+        refineKey,
+        fingerprint,
+        subscriberId,
+        req,
+        res,
+        execute: async (signal) => {
           const language = resolveLanguage(req, payload.language);
           const personalizationContext = buildStrategyPersonalizationContext({
             user: req.user,
@@ -862,30 +1169,16 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           const tracked = await runTrackedBuild({
             learningLoop, telemetryService, ownerId: req.ownerId, taskType: `build_refine_${payload.action}`, userPrompt: payload.action === "custom" ? payload.request : payload.action,
             relevantContext: { personalizationApplied: Boolean(personalizationContext), language, marketMode },
-            execute: (onUsage) => generationServices.refineStrategy({ ...payload, language }, req.ownerId, abortController.signal, personalizationContext, undefined, onUsage),
+            execute: (onUsage) => generationServices.refineStrategy({ ...payload, language }, req.ownerId, signal, personalizationContext, undefined, onUsage),
             onlyNecessaryData: !modelImprovement,
             modelImprovement,
             privacySnapshot: getReqPrivacySnapshot(req),
           });
           return { strategy: tracked.result };
-        };
-
-        const refinePromise = executeRefine();
-        if (refineKey) {
-          activeRefinements.set(refineKey, { promise: refinePromise, fingerprint, abortController });
-          refinePromise.then(
-            () => setTimeout(() => activeRefinements.delete(refineKey), 5 * 60 * 1000).unref(),
-            () => activeRefinements.delete(refineKey),
-          );
-        }
-
-        const result = await refinePromise;
-        if (!res.writableEnded) {
-          res.json(result);
-        }
-      } finally {
-        if (typeof req?.off === "function") req.off("close", onReqClose);
-        if (typeof res?.off === "function") res.off("close", onResClose);
+        },
+      });
+      if (!res.writableEnded && !res.destroyed && !res.closed) {
+        res.json(result);
       }
     }),
   );
@@ -894,9 +1187,25 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     "/save",
     asyncRoute(async (req, res) => {
       const payload = parse(SaveStrategyRequestSchema, req.body);
-      const record = await repository.create(payload, req.ownerId);
-      if (learningLoop && payload.acceptForLearning && record.learningInteractionId) {
-        const latestVersion = payload.versions.at(-1);
+      if (typeof repository.loadOwnerProvenance === "function") {
+        await repository.loadOwnerProvenance(req.ownerId).catch(() => {});
+      }
+      const saveProvenance = typeof repository.resolveProvenance === "function"
+        ? await repository.resolveProvenance(req.ownerId, payload)
+        : resolveGroundedStrategyProvenance(req.ownerId, payload);
+      if (saveProvenance.expired) {
+        return res.status(410).json({ error: "Veb araşdırmalı strategiyanın saxlama müddəti bitib.", code: "GROUNDED_STRATEGY_EXPIRED" });
+      }
+      const authoritativeSavePayload = saveProvenance.grounded
+        ? applyGroundedProvenanceToStrategy(structuredClone(payload), saveProvenance)
+        : payload;
+      const record = await repository.create(authoritativeSavePayload, req.ownerId);
+      if (!record) {
+        return res.status(410).json({ error: "Strategiya saxlama müddəti bitib və ya etibarsızdır.", code: "GROUNDED_STRATEGY_EXPIRED" });
+      }
+      const latestVersion = payload.versions.at(-1);
+      const isGroundedRecord = isGroundedStrategyRecord(record) || isGroundedStrategyRecord(authoritativeSavePayload) || saveProvenance.grounded;
+      if (learningLoop && payload.acceptForLearning && record.learningInteractionId && !isGroundedRecord) {
         const learningUpdate = learningLoop.recordSignal(record.learningInteractionId, req.ownerId, { accepted: true })
           .then(() => payload.versions.length > 1 ? learningLoop.recordIteration({
             parentInteractionId: record.learningInteractionId,
@@ -917,22 +1226,44 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     "/feedback",
     asyncRoute(async (req, res) => {
       const payload = parse(StrategyFeedbackSchema, req.body);
-      const { strategyId, feedback, brief, title } = payload;
+      const { strategyId, clientSaveId, feedback, brief, title, groundingActive: clientGroundingActive } = payload;
 
+      if (typeof repository.loadOwnerProvenance === "function") {
+        await repository.loadOwnerProvenance(req.ownerId).catch(() => {});
+      }
+
+      let existing = null;
       let interactionId = null;
       let strategyTitle = title || "";
+      let isGroundedExisting = false;
 
       if (strategyId) {
-        const existing = await repository.getById(strategyId, req.ownerId);
+        existing = await repository.getById(strategyId, req.ownerId);
         if (existing) {
           interactionId = existing.learningInteractionId || null;
           strategyTitle = existing.strategy?.title || existing.title || strategyTitle;
+          isGroundedExisting = isGroundedStrategyRecord(existing);
         }
       }
 
-      const modelImprovement = isModelImprovementEnabled(req);
+      const provenance = typeof repository.resolveProvenance === "function"
+        ? await repository.resolveProvenance(
+            req.ownerId,
+            existing || { id: strategyId, clientSaveId: clientSaveId || null, title, strategy: { title }, brief },
+            existing ? [existing] : []
+          )
+        : resolveGroundedStrategyProvenance(
+            req.ownerId,
+            existing || { id: strategyId, clientSaveId: clientSaveId || null, title, strategy: { title }, brief },
+            existing ? [existing] : []
+          );
 
-      if (learningLoop && interactionId && feedback) {
+      const serverGrounded = Boolean(isGroundedExisting || provenance.grounded || clientGroundingActive === true);
+      const isUnverifiedOrGrounded = !strategyId || !existing || serverGrounded;
+      const modelImprovement = isModelImprovementEnabled(req);
+      const isRestrictedFeedback = !modelImprovement || isUnverifiedOrGrounded;
+
+      if (learningLoop && interactionId && feedback && !isUnverifiedOrGrounded) {
         logWithoutBlocking(
           learningLoop.recordSignal(interactionId, req.ownerId, {
             explicitRating: feedback === "like" ? "positive" : "negative",
@@ -948,11 +1279,12 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             ownerId: req.ownerId,
             sessionId: req.guestOwnerId,
             strategyId: strategyId || null,
-            strategyTitle,
-            brief: brief || "",
+            strategyTitle: isRestrictedFeedback ? "" : strategyTitle,
+            brief: isRestrictedFeedback ? "" : (brief || ""),
             feedback,
-            onlyNecessaryData: !modelImprovement,
-            modelImprovement,
+            groundingActive: serverGrounded,
+            onlyNecessaryData: isRestrictedFeedback,
+            modelImprovement: !isRestrictedFeedback,
           }),
           "Strategy telemetry feedback"
         );
@@ -982,12 +1314,13 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         strategy: existing.strategy,
       });
 
+      const effectiveKey = resolveRequestIdempotencyKey(req, payload);
       const fingerprint = computePayloadFingerprint("refine_id", req.body, req.params.id);
-      const refineKey = payload.idempotencyKey ? `${req.ownerId}:${payload.idempotencyKey}` : null;
+      const refineKey = effectiveKey ? `${req.ownerId}:${effectiveKey}` : null;
 
       // Check if version with this idempotencyKey was already appended (replay after restart)
-      if (payload.idempotencyKey && Array.isArray(existing.versions)) {
-        const completedVersion = existing.versions.find((v) => v.clientSaveId === payload.idempotencyKey);
+      if (effectiveKey && Array.isArray(existing.versions)) {
+        const completedVersion = existing.versions.find((v) => v.clientSaveId === effectiveKey);
         if (completedVersion) {
           if (completedVersion.payloadFingerprint) {
             const matchesCanonical = completedVersion.payloadFingerprint === fingerprint;
@@ -1003,33 +1336,27 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         }
       }
 
-      if (refineKey && activeRefinements.has(refineKey)) {
-        const entry = activeRefinements.get(refineKey);
-        if (entry.fingerprint && entry.fingerprint !== fingerprint) {
-          const conflictErr = new Error("Eyni idempotency açarı fərqli parametrlərlə istifadə edilib.");
-          conflictErr.code = "IDEMPOTENCY_CONFLICT";
-          conflictErr.status = 409;
-          throw conflictErr;
-        }
-        const result = await entry.promise;
-        if (!res.writableEnded) {
-          res.json(result);
-        }
-        return;
+      if (typeof repository.loadOwnerProvenance === "function") {
+        await repository.loadOwnerProvenance(req.ownerId).catch(() => {});
+      }
+      const existingRefineProvenance = typeof repository.resolveProvenance === "function"
+        ? await repository.resolveProvenance(req.ownerId, existing, [existing])
+        : resolveGroundedStrategyProvenance(req.ownerId, existing, [existing]);
+      if (isGroundedStrategyRecord(existing) || existingRefineProvenance.grounded) {
+        throw Object.assign(new Error("Grounded strategy is restricted"), {
+          code: existingRefineProvenance.expired ? "GROUNDED_STRATEGY_EXPIRED" : "GROUNDED_STRATEGY_RESTRICTED",
+          status: existingRefineProvenance.expired ? 410 : 422,
+        });
       }
 
-      const abortController = createExecutionController();
-      const onReqClose = () => {
-        if (!req.complete && !res.writableEnded) abortController.abort();
-      };
-      const onResClose = () => {
-        if (!res.writableEnded) abortController.abort();
-      };
-      if (typeof req?.on === "function") req.on("close", onReqClose);
-      if (typeof res?.on === "function") res.on("close", onResClose);
-
-      try {
-        const executeRefine = async () => {
+      const subscriberId = randomUUID();
+      const result = await executeSharedRefinement({
+        refineKey,
+        fingerprint,
+        subscriberId,
+        req,
+        res,
+        execute: async (signal) => {
           const language = resolveLanguage(req, payload.language);
           const personalizationContext = buildStrategyPersonalizationContext({
             user: req.user,
@@ -1038,25 +1365,26 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           const tracked = await runTrackedBuild({
             learningLoop, telemetryService, ownerId: req.ownerId, taskType: `build_refine_${payload.action}`, userPrompt: payload.action === "custom" ? payload.request : payload.action,
             relevantContext: { resourceId: existing.id, personalizationApplied: Boolean(personalizationContext), language },
-            execute: (onUsage) => generationServices.refineStrategy({ ...payload, language }, req.ownerId, abortController.signal, personalizationContext, undefined, onUsage),
+            execute: (onUsage) => generationServices.refineStrategy({ ...payload, language }, req.ownerId, signal, personalizationContext, undefined, onUsage),
             onlyNecessaryData: !modelImprovement,
             modelImprovement,
             privacySnapshot: getReqPrivacySnapshot(req),
           });
           const strategy = tracked.result;
           const changeRequest = payload.action === "custom" ? payload.request : payload.action;
-          await assertExecutionAuthorized(abortController.signal);
+          await assertExecutionAuthorized(signal);
           req.securityContext?.markMutationPending?.();
           const updated = await repository.appendVersion(
             req.params.id,
             req.ownerId,
             strategy,
             changeRequest,
-            { clientSaveId: payload.idempotencyKey || null, payloadFingerprint: fingerprint }
+            { clientSaveId: effectiveKey || null, payloadFingerprint: fingerprint }
           );
           const responsePayload = { strategy: publicRecord(updated) };
           req.securityContext?.recordIdempotentResult?.(200, responsePayload);
-          if (modelImprovement && learningLoop && existing.learningInteractionId) {
+          const isGroundedRefine = isGroundedStrategyRecord(strategy) || tracked.providerMeta?.stageMetrics?.some(stage => stage.groundingActive);
+          if (modelImprovement && !isGroundedRefine && learningLoop && existing.learningInteractionId) {
             logWithoutBlocking(
               learningLoop.recordIteration({
                 parentInteractionId: existing.learningInteractionId, interactionId: tracked.interactionId, ownerId: req.ownerId,
@@ -1068,24 +1396,10 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             );
           }
           return responsePayload;
-        };
-
-        const refinePromise = executeRefine();
-        if (refineKey) {
-          activeRefinements.set(refineKey, { promise: refinePromise, fingerprint, abortController });
-          refinePromise.then(
-            () => setTimeout(() => activeRefinements.delete(refineKey), 5 * 60 * 1000).unref(),
-            () => activeRefinements.delete(refineKey),
-          );
-        }
-
-        const result = await refinePromise;
-        if (!res.writableEnded) {
-          res.json(result);
-        }
-      } finally {
-        if (typeof req?.off === "function") req.off("close", onReqClose);
-        if (typeof res?.off === "function") res.off("close", onResClose);
+        },
+      });
+      if (!res.writableEnded && !res.destroyed && !res.closed) {
+        res.json(result);
       }
     }),
   );
@@ -1167,7 +1481,7 @@ export function strategyErrorHandler(error, req, res, next) {
     });
   }
 
-  if (["AI_TIMEOUT", "AI_CONTENT_BLOCKED"].includes(error.code)) {
+  if (["AI_TIMEOUT", "AI_CONTENT_BLOCKED", "GROUNDING_UNAVAILABLE", "GROUNDED_STRATEGY_RESTRICTED"].includes(error.code)) {
     return res.status(httpStatusOf(error)).json(publicBuildFailure(error));
   }
 

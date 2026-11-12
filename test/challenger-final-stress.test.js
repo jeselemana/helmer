@@ -743,6 +743,9 @@ test("SUITE 5.1: sanitizeGroundingMetadata strictly rejects adversarial protocol
     "",
     "   ",
     "https://pinterest.com/pin/low-quality-source",
+    "https://reddit.com./r/marketing",
+    "http://192.168.1.1:8080/report",
+    "https://vertexaisearch.cloud.google.com/grounding-api-redirect/FAKE",
     'https://example.com/' + 'a'.repeat(2001),
   ];
 
@@ -750,7 +753,7 @@ test("SUITE 5.1: sanitizeGroundingMetadata strictly rejects adversarial protocol
     "https://example.com/news/article?id=42#headline",
     "http://subdomain.news.org/path/index.html",
     "https://azertag.az/xeber/2026-baku-market",
-    "http://192.168.1.1:8080/report",
+    "http://reports.example.org:8080/report",
   ];
 
   const testMetadata = {

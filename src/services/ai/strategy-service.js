@@ -15,6 +15,7 @@ import { aiConfig, hasOpenAIConfiguration } from "./config.js";
 import { getOpenAIClient } from "./client.js";
 import { LLMProviderError, extractJsonFromText } from "./llm-router.js";
 import { runBuildOrchestration } from "./build-orchestrator.js";
+import { isGroundedStrategyRecord } from "./grounded-chat-retention.js";
 import { buildRoutingInput } from "./build-estimate.js";
 import {
   IMMEDIATE_ACTION_ITEMS_RULES,
@@ -245,10 +246,23 @@ export function extractGroundingSources(metadata) {
     const web = chunk?.web;
     if (!web?.uri || sources.length >= 20) continue;
     try {
-      const url = new URL(web.uri);
-      if (!["https:", "http:"].includes(url.protocol) || seenUrls.has(url.href)) continue;
+      const url = new URL(String(web.uri).trim());
+      if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.href.length > 2000 || seenUrls.has(url.href)) continue;
+      const host = url.hostname.toLowerCase().replace(/^(?:www\.)+/i, "").replace(/\.+$/, "");
+      if (
+        !host ||
+        host === "vertexaisearch.cloud.google.com" ||
+        host.endsWith(".vertexaisearch.cloud.google.com") ||
+        url.pathname.includes("/grounding-api-redirect") ||
+        (/^(?:[a-z0-9-]+\.)*google\.[a-z.]{2,6}$/i.test(host) && (url.pathname === "/url" || url.pathname.startsWith("/url/"))) ||
+        /\.(?:local|internal|localhost|localdomain|arpa|home|corp|lan)$/i.test(host) ||
+        /^(?:localhost|127\.|0\.|10\.|192\.168\.|169\.254\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|172\.(?:1[6-9]|2\d|3[01])\.|\[?(?:::1|fe80:|fc00:|fd00:))/.test(host) ||
+        !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(host)
+      ) {
+        continue;
+      }
       seenUrls.add(url.href);
-      sources.push({ title: String(web.title || url.hostname).slice(0, 200), url: url.href });
+      sources.push({ title: String(web.title || host).slice(0, 200), url: url.href });
     } catch { /* Ignore malformed source URLs. */ }
   }
   return sources;
@@ -294,6 +308,9 @@ export async function generateStrategy({
 }
 
 export async function refineStrategy(payload, ownerId, signal, personalizationContext = "", onChunk, onUsage) {
+  if (isGroundedStrategyRecord(payload.strategy)) {
+    throw Object.assign(new Error("Grounded strategy is restricted"), { code: "GROUNDED_STRATEGY_RESTRICTED", status: 422 });
+  }
   const effectiveBuildMode = (payload.buildMode || payload.strategy?.orchestration?.buildMode || "auto") === "faster" ? "faster" : "auto";
   const effectiveFasterThinking = (
     payload.fasterThinkingLevel ||
@@ -312,8 +329,25 @@ export async function refineStrategy(payload, ownerId, signal, personalizationCo
   const rawStrategyData = await runBuildOrchestration({
     schema: StrategySchema, name: "helmer_refined_strategy", instructions, refinement: true,
     input: `${buildRefinementInput(payload)}\n${languageDirective}`,
-    routingInput: JSON.stringify({ brief: payload.brief, answers: payload.answers, action: payload.action, request: payload.request,
-      summary: payload.strategy?.summary, objective: payload.strategy?.context?.objective }),
+    searchIntentInput: `${payload.action} ${payload.request || ""}`,
+    routingInput: JSON.stringify({
+      brief: payload.brief,
+      answers: payload.answers,
+      action: payload.action,
+      request: payload.request,
+      summary: payload.strategy?.summary,
+      objective: payload.strategy?.context?.objective,
+      market: payload.strategy?.context?.market,
+      sectionTitles: Array.isArray(payload.strategy?.sections)
+        ? payload.strategy.sections.slice(0, 8).map((s) => s?.title).filter(Boolean)
+        : undefined,
+      kpis: Array.isArray(payload.strategy?.kpis)
+        ? payload.strategy.kpis.slice(0, 6).map((k) => `${k?.name || ""}: ${k?.target || ""}`.trim()).filter(Boolean)
+        : undefined,
+      assumptions: Array.isArray(payload.strategy?.assumptions)
+        ? payload.strategy.assumptions.slice(0, 6)
+        : undefined,
+    }),
     personalizationContext, ownerId, signal, onChunk, onUsage,
     buildMode: effectiveBuildMode,
     fasterThinkingLevel: effectiveFasterThinking,
@@ -332,6 +366,9 @@ export async function summarizeStrategyWithLuna({
   signal = null,
   onUsage = null,
 }) {
+  if (isGroundedStrategyRecord(strategy)) {
+    throw Object.assign(new Error("Grounded strategy is restricted"), { code: "GROUNDED_STRATEGY_RESTRICTED", status: 422 });
+  }
   const isEn = language === "en";
   const modelName = aiConfig.strategySummaryModel || "gpt-5.6-luna";
 

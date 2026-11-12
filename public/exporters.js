@@ -31,6 +31,7 @@ const EXPORT_STRINGS = {
     sectionKpis: "04. Uğur və KPI Hədəfləri",
     sectionRisks: "05. Risklər və Həll Yolları",
     sectionNextSteps: "06. Növbəti Addımlar",
+    sectionSources: "07. İstifadə Olunan Mənbələr",
     priority: "Prioritet",
     phaseBadge: "Mərhələ {idx}",
     expectedOutcome: "🎯 Gözlənilən nəticə:",
@@ -44,6 +45,7 @@ const EXPORT_STRINGS = {
     docHeadingActionPlan: "İcra planı",
     docHeadingKpis: "KPI-lar",
     docHeadingNextSteps: "Növbəti addımlar",
+    docHeadingSources: "İstifadə olunan mənbələr",
     sheetStrategy: "Strategiya",
     sheetActionPlan: "İcra planı",
     sheetKpisAndRisks: "KPI və risklər",
@@ -72,6 +74,7 @@ const EXPORT_STRINGS = {
     sectionKpis: "04. Success Metrics & KPIs",
     sectionRisks: "05. Risks & Mitigations",
     sectionNextSteps: "06. Immediate Next Steps",
+    sectionSources: "07. Verified Web Sources",
     priority: "Priority",
     phaseBadge: "Phase {idx}",
     expectedOutcome: "🎯 Expected outcome:",
@@ -85,6 +88,7 @@ const EXPORT_STRINGS = {
     docHeadingActionPlan: "Execution Roadmap",
     docHeadingKpis: "KPIs",
     docHeadingNextSteps: "Immediate Next Steps",
+    docHeadingSources: "Sources Used",
     sheetStrategy: "Strategy",
     sheetActionPlan: "Action Plan",
     sheetKpisAndRisks: "KPIs & Risks",
@@ -105,13 +109,67 @@ const EXPORT_STRINGS = {
   },
 };
 
+function normalizeExportLang(lang) {
+  const raw = String(lang || getLanguage() || "").trim().toLowerCase();
+  return raw === "en" ? "en" : "az";
+}
+
 function getExportLocale(lang) {
-  const currentLang = lang || getLanguage();
+  const currentLang = normalizeExportLang(lang);
   return EXPORT_STRINGS[currentLang] || EXPORT_STRINGS.az;
 }
 
+function extractSafeExportSources(strategy) {
+  if (!Array.isArray(strategy?.orchestration?.sources)) return [];
+  const safe = [];
+  const seen = new Set();
+  for (const [index, source] of strategy.orchestration.sources.slice(0, 20).entries()) {
+    if (typeof source?.url !== "string") continue;
+    try {
+      const parsed = new URL(source.url.trim());
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.href.length > 2000) continue;
+      if (seen.has(parsed.href)) continue;
+      seen.add(parsed.href);
+      const isRelay = parsed.hostname === "vertexaisearch.cloud.google.com" && parsed.pathname.includes("/grounding-api-redirect/");
+      const rawTitle = typeof source.title === "string" && source.title.trim() ? source.title.trim().slice(0, 200) : "";
+      const displayDomain = isRelay ? (rawTitle || "Google Search") : parsed.hostname.replace(/^www\./, "");
+      const displayTitle = rawTitle || displayDomain;
+      safe.push({
+        index,
+        title: displayTitle,
+        domain: displayDomain,
+        url: parsed.href,
+      });
+    } catch {
+      // Skip malformed URLs
+    }
+  }
+  return safe;
+}
+
+function extractExportEvidence(strategy, sources) {
+  if (!Array.isArray(strategy?.orchestration?.evidence)) return [];
+  const byIndex = new Map(sources.map(source => [source.index, source]));
+  return strategy.orchestration.evidence.flatMap(item => {
+    if (typeof item?.text !== "string" || !Array.isArray(item.sourceIndices)) return [];
+    const citations = item.sourceIndices.map(index => byIndex.get(index)).filter(Boolean);
+    return citations.length ? [{ text: item.text, citations }] : [];
+  });
+}
+
+function renderExportSources(strategy) {
+  const sources = extractSafeExportSources(strategy);
+  const evidence = extractExportEvidence(strategy, sources);
+  const link = source => `<a href="${escapeDocument(source.url)}" target="_blank" rel="noopener noreferrer">${escapeDocument(source.title)}</a>${
+    source.domain !== source.title ? ` (${escapeDocument(source.domain)})` : ""
+  }`;
+  return evidence.length
+    ? evidence.map(item => `<li>${escapeDocument(item.text)} (${item.citations.map(link).join(", ")})</li>`).join("")
+    : sources.map(source => `<li>${link(source)}</li>`).join("");
+}
+
 export function createPdfPrintDocument(strategy, lang = null) {
-  const currentLang = lang || getLanguage();
+  const currentLang = normalizeExportLang(lang);
   const strings = getExportLocale(currentLang);
   const localeCode = currentLang === "en" ? "en-US" : "az-AZ";
 
@@ -209,8 +267,10 @@ export function createPdfPrintDocument(strategy, lang = null) {
     })
     .join("");
 
+  const sourcesHtml = renderExportSources(strategy);
+
   return `<!doctype html>
-<html lang="${currentLang}">
+<html lang="${escapeDocument(currentLang)}">
 <head>
   <meta charset="utf-8">
   <title>${escapeDocument(strategy.title)} — ${escapeDocument(strings.reportTitle)}</title>
@@ -505,6 +565,15 @@ export function createPdfPrintDocument(strategy, lang = null) {
       : ""
   }
 
+  ${
+    sourcesHtml
+      ? `<section class="pdf-section no-break">
+          <h3 class="pdf-section-title">${escapeDocument(strings.sectionSources)}</h3>
+          <ul class="pdf-list">${sourcesHtml}</ul>
+        </section>`
+      : ""
+  }
+
   <footer class="pdf-footer">
     <span>${escapeDocument(strings.footerPlatform)}</span>
     <span>${escapeDocument(strings.footerDocType)}</span>
@@ -548,8 +617,9 @@ export function exportStrategyToPDF(strategy, lang = null) {
 }
 
 export function createDocumentExport(strategy, lang = null) {
-  const currentLang = lang || getLanguage();
+  const currentLang = normalizeExportLang(lang);
   const strings = getExportLocale(currentLang);
+  const sourcesHtml = renderExportSources(strategy);
 
   const sections = (strategy.sections || [])
     .map(
@@ -565,7 +635,10 @@ export function createDocumentExport(strategy, lang = null) {
         .join("")}</ul><p><strong>${escapeDocument(strings.expectedOutcome)}</strong> ${escapeDocument(phase.expectedOutcome)}</p></section>`,
     )
     .join("");
-  const content = `<!doctype html><html lang="${currentLang}"><head><meta charset="utf-8"><title>${escapeDocument(
+  const sourcesSection = sourcesHtml
+    ? `<h2>${escapeDocument(strings.docHeadingSources)}</h2><ul>${sourcesHtml}</ul>`
+    : "";
+  const content = `<!doctype html><html lang="${escapeDocument(currentLang)}"><head><meta charset="utf-8"><title>${escapeDocument(
     strategy.title,
   )}</title><style>body{font:16px/1.65 system-ui;max-width:820px;margin:48px auto;padding:0 24px;color:#172033}h1{font-size:36px}h2{margin-top:36px;border-top:1px solid #dfe3ea;padding-top:24px}h3{margin-top:24px}p{white-space:pre-line}li{margin:7px 0}.summary{font-size:19px;color:#465269}</style></head><body><h1>${escapeDocument(
     strategy.title,
@@ -573,7 +646,7 @@ export function createDocumentExport(strategy, lang = null) {
     .map((kpi) => `<li><strong>${escapeDocument(kpi.name)}</strong> — ${escapeDocument(kpi.reason)} ${escapeDocument(kpi.target)}</li>`)
     .join("")}</ul><h2>${escapeDocument(strings.docHeadingNextSteps)}</h2><ol>${(strategy.nextSteps || [])
     .map((item) => `<li>${escapeDocument(item)}</li>`)
-    .join("")}</ol></body></html>`;
+    .join("")}</ol>${sourcesSection}</body></html>`;
 
   return { content, type: "text/html;charset=utf-8", extension: "html" };
 }
@@ -587,6 +660,10 @@ export function createSpreadsheetExport(strategy, lang = null) {
   );
   (strategy.kpis || []).forEach((kpi) => rows.push(["KPI", kpi.name, kpi.reason, kpi.target, ""]));
   (strategy.risks || []).forEach((risk) => rows.push([strings.risk, risk.risk, risk.mitigation, "", ""]));
+  const evidence = extractExportEvidence(strategy, extractSafeExportSources(strategy));
+  for (const item of evidence) {
+    rows.push([strings.docHeadingSources, "", item.text, "", item.citations.map(source => source.url).join(" | ")]);
+  }
   const content = `\ufeff${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
 
   return { content, type: "text/csv;charset=utf-8", extension: "csv" };
@@ -610,6 +687,9 @@ export function createExcelExport(strategy, lang = null) {
     ...(strategy.risks || []).map((risk) => [strings.risk, risk.risk, risk.mitigation, ""]),
     ...(strategy.nextSteps || []).map((step) => [strings.excelNextStep, step, "", ""]),
   ];
-  const content = `<?xml version="1.0" encoding="UTF-8"?>\n<?mso-application progid="Excel.Sheet"?>\n<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">${worksheet(strings.sheetStrategy, overview)}${worksheet(strings.sheetActionPlan, actionPlan)}${worksheet(strings.sheetKpisAndRisks, metricsAndRisks)}</Workbook>`;
+  const evidence = extractExportEvidence(strategy, extractSafeExportSources(strategy));
+  const sourcesSheet = evidence.length ? worksheet(strings.docHeadingSources,
+    evidence.map(item => [item.text, ...item.citations.map(source => source.url)])) : "";
+  const content = `<?xml version="1.0" encoding="UTF-8"?>\n<?mso-application progid="Excel.Sheet"?>\n<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">${worksheet(strings.sheetStrategy, overview)}${worksheet(strings.sheetActionPlan, actionPlan)}${worksheet(strings.sheetKpisAndRisks, metricsAndRisks)}${sourcesSheet}</Workbook>`;
   return { content, type: "application/vnd.ms-excel;charset=utf-8", extension: "xls" };
 }

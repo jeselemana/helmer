@@ -8,10 +8,29 @@ import {
   readStrategyObject,
   writeStrategyObject,
   deleteStrategyObject,
+  listTenantObjects,
 } from "../http/r2-storage.js";
 import { TenantLockManager } from "./tenant-lock.js";
 import { storageCorruption, writeJsonAtomically } from "./atomic-json-store.js";
 import { invalidateUserContextCache } from "../services/ai/personal-context.js";
+import {
+  MAX_GROUNDED_CHAT_RETENTION_MS,
+  isGroundedStrategyRecord,
+  isExpiredGroundedStrategyRecord,
+  pruneExpiredGroundedStrategies,
+  rememberGroundedStrategyProvenance,
+  resolveGroundedStrategyProvenance,
+  applyGroundedProvenanceToStrategy,
+  exportOwnerProvenanceEntries,
+  hydrateOwnerProvenanceEntries,
+} from "../services/ai/grounded-chat-retention.js";
+
+function parseValidDateMs(value, now = Date.now()) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const parsed = typeof value === "number" ? value : Date.parse(String(value));
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > now + 60000) return NaN;
+  return parsed;
+}
 
 export class FileStrategyRepository {
   /**
@@ -26,6 +45,7 @@ export class FileStrategyRepository {
     this.readCloud = options.readCloud || readStrategyObject;
     this.writeCloud = options.writeCloud || writeStrategyObject;
     this.deleteCloud = options.deleteCloud || deleteStrategyObject;
+    this.listCloudShards = options.listCloudShards || (() => listTenantObjects("strategies-v1/"));
 
     // Resolve directories and legacy file paths
     if (filePath && path.extname(filePath) === ".json") {
@@ -156,10 +176,11 @@ export class FileStrategyRepository {
 
     console.log(`[FileStrategyRepository] Discovered ${legacyRecords.length} legacy strategies. Migrating to per-tenant shards...`);
 
-    // Group by ownerId
+    // Group by ownerId (excluding expired grounded records)
     const byOwner = new Map();
     for (const record of legacyRecords) {
       if (!record || !record.ownerId) continue;
+      if (isExpiredGroundedStrategyRecord(record)) continue;
       if (!byOwner.has(record.ownerId)) {
         byOwner.set(record.ownerId, []);
       }
@@ -169,48 +190,91 @@ export class FileStrategyRepository {
     await fs.mkdir(this.strategiesDir, { recursive: true });
 
     let migratedRecordsCount = 0;
+    let migrationIncomplete = false;
+    const isCloud = this.cloud ?? isR2Configured();
     for (const [ownerId, records] of byOwner.entries()) {
       const tenantKey = this.tenantKey(ownerId);
       const { records: existing, etag, tombstone } = await this.readTenantDataWithEtag(ownerId, tenantKey).catch(() => ({ records: [], etag: null, tombstone: false }));
       if (tombstone) {
         continue;
       }
-      const existingIds = new Set((existing || []).map((r) => r.id));
 
-      const merged = [...existing];
-      for (const rec of records) {
-        if (!existingIds.has(rec.id)) {
-          merged.push(rec);
-          existingIds.add(rec.id);
-          migratedRecordsCount++;
+      const mergeWithSnapshot = (snapshotRecords) => {
+        const base = Array.isArray(snapshotRecords) ? [...snapshotRecords] : [];
+        pruneExpiredGroundedStrategies(base);
+        const existingIds = new Set(base.map((r) => r.id));
+        const mergedList = [...base];
+        let added = 0;
+        for (const rec of records) {
+          if (isExpiredGroundedStrategyRecord(rec)) continue;
+          if (!existingIds.has(rec.id)) {
+            mergedList.push(rec);
+            existingIds.add(rec.id);
+            added++;
+          }
+        }
+        return { mergedList, added };
+      };
+
+      let { mergedList: merged, added: finalAdded } = mergeWithSnapshot(existing);
+      let committed = !isCloud;
+      let tombstoned = false;
+
+      if (isCloud) {
+        let currentEtag = etag;
+        let currentMerged = merged;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            const success = await this.writeCloud(tenantKey, currentMerged, currentEtag);
+            if (success) {
+              merged = currentMerged;
+              committed = true;
+              break;
+            }
+          } catch (err) {
+            console.error(`Failed to migrate shard to R2 for tenant ${tenantKey}:`, err?.message || err);
+            break;
+          }
+          const fresh = await this.readCloud(tenantKey).catch(() => null);
+          const freshRecord = fresh?.record;
+          if (!fresh || fresh.tombstone || (freshRecord && typeof freshRecord === "object" && !Array.isArray(freshRecord) && freshRecord._tombstone)) {
+            tombstoned = Boolean(fresh?.tombstone || freshRecord?._tombstone);
+            break;
+          }
+          currentEtag = fresh.etag || null;
+          const nextMerge = mergeWithSnapshot(Array.isArray(freshRecord) ? freshRecord : []);
+          currentMerged = nextMerge.mergedList;
+          finalAdded = nextMerge.added;
+          merged = currentMerged;
         }
       }
 
+      if (tombstoned) {
+        this.syncedShardTags.delete(tenantKey);
+        await fs.rm(this.tenantFilePath(tenantKey), { force: true }).catch(() => {});
+        if (this.redis?.isReady) {
+          await this.redis.del(this.tenantRedisKey(ownerId)).catch(() => {});
+        }
+        continue;
+      }
+
+      if (!committed) {
+        migrationIncomplete = true;
+        console.error(`Legacy strategy migration skipped local commit for tenant ${tenantKey}: R2 OCC did not converge.`);
+        continue;
+      }
+
+      migratedRecordsCount += finalAdded;
+      this.syncedShardTags.delete(tenantKey);
       await this.writeLocalTenant(tenantKey, merged);
 
       if (this.redis?.isReady) {
         await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(merged)).catch(() => {});
       }
-
-      if (this.cloud ?? isR2Configured()) {
-        let currentEtag = etag;
-        for (let attempt = 0; attempt < 5; attempt++) {
-          try {
-            const success = await this.writeCloud(tenantKey, merged, currentEtag);
-            if (success) break;
-          } catch (err) {
-            console.error(`Failed to migrate shard to R2 for tenant ${tenantKey}:`, err?.message || err);
-            break;
-          }
-          const fresh = await this.readTenantDataWithEtag(ownerId, tenantKey).catch(() => null);
-          if (!fresh || fresh.tombstone) break;
-          currentEtag = fresh.etag;
-        }
-      }
     }
 
-    // Rename legacy file to .migrated backup
-    if (this.legacyFilePath) {
+    // Rename legacy file to .migrated backup only when every tenant committed cleanly
+    if (this.legacyFilePath && !migrationIncomplete) {
       try {
         const backupPath = `${this.legacyFilePath}.migrated`;
         await fs.rename(this.legacyFilePath, backupPath).catch(() => {});
@@ -382,6 +446,11 @@ export class FileStrategyRepository {
           : (Array.isArray(mutatorOutput) ? mutatorOutput : recordsCopy);
         const returnValue = mutatorOutput?.result !== undefined ? mutatorOutput.result : mutatorOutput;
 
+        if (mutatorOutput?.unchanged === true) return returnValue;
+        if (Array.isArray(nextRecords)) {
+          pruneExpiredGroundedStrategies(nextRecords);
+        }
+
         // Perform R2 conditional PUT with OCC ETag
         if (isCloud) {
           const success = await this.writeCloud(tenantKey, nextRecords, etag);
@@ -425,7 +494,202 @@ export class FileStrategyRepository {
     const tenantKey = this.tenantKey(ownerId);
     const { records, tombstone } = await this.readTenantDataWithEtag(ownerId, tenantKey, options);
     if (tombstone) return [];
-    return Array.isArray(records) ? records.filter(record => guestVisible(record, ownerId)) : [];
+    if (!Array.isArray(records)) return [];
+    const hasExpiredGrounded = records.some((record) => isExpiredGroundedStrategyRecord(record));
+    if (hasExpiredGrounded) {
+      await this.pruneGroundedStrategies(ownerId).catch(() => {});
+    }
+    return records.filter((record) => {
+      if (!guestVisible(record, ownerId) || isExpiredGroundedStrategyRecord(record)) {
+        return false;
+      }
+      if (isGroundedStrategyRecord(record)) {
+        rememberGroundedStrategyProvenance(ownerId, record, {
+          strategyId: record.id,
+          clientSaveId: record.clientSaveId,
+        });
+      }
+      return true;
+    });
+  }
+
+  provenanceFilePath(tenantKey) {
+    return path.join(this.strategiesDir, ".provenance", `${tenantKey}.json`);
+  }
+
+  async loadOwnerProvenance(ownerId, now = Date.now()) {
+    if (!ownerId || typeof ownerId !== "string") return [];
+    const tenantKey = this.tenantKey(ownerId);
+    const filePath = this.provenanceFilePath(tenantKey);
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      const { retained, removed } = hydrateOwnerProvenanceEntries(ownerId, parsed, now);
+      if (removed > 0) {
+        if (retained.length === 0) {
+          await fs.rm(filePath, { force: true }).catch(() => {});
+        } else {
+          await writeJsonAtomically(filePath, retained).catch(() => {});
+        }
+      }
+      return retained;
+    } catch {
+      return [];
+    }
+  }
+
+  async persistOwnerProvenance(ownerId, now = Date.now()) {
+    if (!ownerId || typeof ownerId !== "string") return [];
+    const tenantKey = this.tenantKey(ownerId);
+    const filePath = this.provenanceFilePath(tenantKey);
+    return this.lockManager.runInLock(`prov:${tenantKey}`, async () => {
+      let existing = [];
+      try {
+        const raw = await fs.readFile(filePath, "utf8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) existing = parsed;
+      } catch {
+        // File does not exist yet
+      }
+      if (existing.length > 0) {
+        hydrateOwnerProvenanceEntries(ownerId, existing, now);
+      }
+      const entries = exportOwnerProvenanceEntries(ownerId, now);
+      if (entries.length === 0) {
+        await fs.rm(filePath, { force: true }).catch(() => {});
+        return [];
+      }
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await writeJsonAtomically(filePath, entries);
+      return entries;
+    });
+  }
+
+  async rememberProvenance(ownerId, strategyOrRecord, meta = {}) {
+    const entry = rememberGroundedStrategyProvenance(ownerId, strategyOrRecord, {
+      ...meta,
+      forceGrounded: meta.forceGrounded ?? true,
+    });
+    if (entry) {
+      await this.persistOwnerProvenance(ownerId).catch(() => {});
+    }
+    return entry;
+  }
+
+  async resolveProvenance(ownerId, candidate, existingRecords = null) {
+    if (!ownerId || !candidate || typeof candidate !== "object") {
+      return { grounded: false, expired: false, orchestration: null, sourceRecord: null };
+    }
+    await this.loadOwnerProvenance(ownerId);
+    const records = Array.isArray(existingRecords)
+      ? existingRecords
+      : await this.readTenant(ownerId, { clone: false }).catch(() => []);
+    return resolveGroundedStrategyProvenance(ownerId, candidate, records);
+  }
+
+  async pruneGroundedStrategies(ownerId, now = Date.now()) {
+    const removed = await this.mutateTenant(ownerId, (records) => {
+      const count = pruneExpiredGroundedStrategies(records, now);
+      return { unchanged: count === 0, records, result: count };
+    });
+    await this.loadOwnerProvenance(ownerId, now).catch(() => {});
+    await this.persistOwnerProvenance(ownerId, now).catch(() => {});
+    return removed;
+  }
+
+  async pruneInactiveGroundedData(now = Date.now()) {
+    await this.ensure();
+    let totalRemoved = 0;
+    try {
+      const entries = await fs.readdir(this.strategiesDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith(".json") || entry.name.endsWith(".tmp")) continue;
+        const shardPath = path.join(this.strategiesDir, entry.name);
+        try {
+          const raw = await fs.readFile(shardPath, "utf8");
+          const parsed = JSON.parse(raw);
+          if (!Array.isArray(parsed)) continue;
+          const shardOwnerId = parsed.find((r) => r && typeof r.ownerId === "string")?.ownerId || null;
+          const expiredCount = parsed.filter((r) => isExpiredGroundedStrategyRecord(r, now)).length;
+          if (expiredCount > 0) {
+            if (shardOwnerId) {
+              totalRemoved += Number(await this.pruneGroundedStrategies(shardOwnerId, now)) || 0;
+            } else {
+              const removed = pruneExpiredGroundedStrategies(parsed, now);
+              if (removed > 0) {
+                await writeJsonAtomically(shardPath, parsed).catch(() => {});
+                totalRemoved += removed;
+              }
+            }
+          }
+        } catch {
+          // Ignore malformed shard
+        }
+      }
+      const provDir = path.join(this.strategiesDir, ".provenance");
+      const provEntries = await fs.readdir(provDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of provEntries) {
+        if (!entry.isFile() || !entry.name.endsWith(".json") || entry.name.endsWith(".tmp")) continue;
+        const provPath = path.join(provDir, entry.name);
+        try {
+          const raw = await fs.readFile(provPath, "utf8");
+          const parsed = JSON.parse(raw);
+          if (!Array.isArray(parsed)) continue;
+          const retained = parsed.filter((item) => {
+            const ms = parseValidDateMs(item?.firstGroundedAt || item?.orchestration?.firstGroundedAt || item?.createdAt, now);
+            return ms !== null && Number.isFinite(ms) && now - ms < MAX_GROUNDED_CHAT_RETENTION_MS;
+          });
+          if (retained.length !== parsed.length) {
+            totalRemoved += parsed.length - retained.length;
+            if (retained.length === 0) await fs.rm(provPath, { force: true }).catch(() => {});
+            else await writeJsonAtomically(provPath, retained).catch(() => {});
+          }
+        } catch {}
+      }
+      if (this.cloud ?? isR2Configured()) {
+        const cloudKeys = await this.listCloudShards().catch(() => []);
+        for (const rawKey of cloudKeys) {
+          if (typeof rawKey !== "string" || !rawKey.endsWith(".json")) continue;
+          const stripped = rawKey.replace(/^data\//, "").replace(/^strategies-v1\//, "").replace(/\.json$/, "");
+          if (!stripped) continue;
+          try {
+            const snap = await this.readCloud(stripped);
+            const cloudRecords = snap?.record;
+            if (!Array.isArray(cloudRecords)) continue;
+            const expiredCount = cloudRecords.filter((r) => isExpiredGroundedStrategyRecord(r, now)).length;
+            if (expiredCount === 0) continue;
+            const shardOwnerId = cloudRecords.find((r) => r && typeof r.ownerId === "string")?.ownerId || null;
+            if (shardOwnerId) {
+              totalRemoved += Number(await this.pruneGroundedStrategies(shardOwnerId, now)) || 0;
+            } else {
+              const removed = pruneExpiredGroundedStrategies(cloudRecords, now);
+              if (removed > 0) {
+                const ok = await this.writeCloud(stripped, cloudRecords, snap?.etag || null).catch(() => false);
+                if (ok) totalRemoved += removed;
+              }
+            }
+          } catch {}
+        }
+      }
+      if (this.redis?.isReady && typeof this.redis.keys === "function") {
+        const keys = await this.redis.keys("marketify:store:strategies:*").catch(() => []);
+        for (const key of keys) {
+          const ownerId = key.slice("marketify:store:strategies:".length);
+          if (!ownerId) continue;
+          try {
+            const raw = await this.redis.get(key);
+            const parsed = JSON.parse(raw || "null");
+            if (Array.isArray(parsed) && parsed.some((r) => isExpiredGroundedStrategyRecord(r, now))) {
+              totalRemoved += Number(await this.pruneGroundedStrategies(ownerId, now)) || 0;
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      console.warn("[FileStrategyRepository] Background grounded cleanup warning:", err?.message || err);
+    }
+    return totalRemoved;
   }
 
   /**
@@ -447,10 +711,22 @@ export class FileStrategyRepository {
       const aggregated = [];
       for (const entry of entries) {
         if (entry.isFile() && entry.name.endsWith(".json") && !entry.name.endsWith(".tmp")) {
+          const shardPath = path.join(this.strategiesDir, entry.name);
           try {
-            const raw = await fs.readFile(path.join(this.strategiesDir, entry.name), "utf8");
+            const raw = await fs.readFile(shardPath, "utf8");
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) {
+              const shardOwnerId = parsed.find((r) => r && typeof r.ownerId === "string")?.ownerId || null;
+              const removed = pruneExpiredGroundedStrategies(parsed);
+              if (removed > 0) {
+                if (shardOwnerId) {
+                  await this.pruneGroundedStrategies(shardOwnerId).catch(async () => {
+                    await writeJsonAtomically(shardPath, parsed).catch(() => {});
+                  });
+                } else {
+                  await writeJsonAtomically(shardPath, parsed).catch(() => {});
+                }
+              }
               aggregated.push(...parsed);
             }
           } catch {
@@ -477,6 +753,7 @@ export class FileStrategyRepository {
     const byOwner = new Map();
     for (const record of records) {
       if (!record || !record.ownerId) continue;
+      if (isExpiredGroundedStrategyRecord(record)) continue;
       if (!byOwner.has(record.ownerId)) byOwner.set(record.ownerId, []);
       byOwner.get(record.ownerId).push(record);
     }
@@ -498,7 +775,7 @@ export class FileStrategyRepository {
     if (!ownerId) return [];
     const records = await this.readTenant(ownerId, { clone: false });
     return records
-      .filter((record) => record.ownerId === ownerId)
+      .filter((record) => record.ownerId === ownerId && !isExpiredGroundedStrategyRecord(record))
       .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
       .map(({ versions, ownerId: _ownerId, clientSaveId: _clientSaveId, ...record }) => ({
         ...structuredClone(record),
@@ -515,7 +792,7 @@ export class FileStrategyRepository {
   async getById(id, ownerId) {
     if (!id || !ownerId) return null;
     const records = await this.readTenant(ownerId, { clone: false });
-    const found = records.find((record) => record.id === id && record.ownerId === ownerId) || null;
+    const found = records.find((record) => record.id === id && record.ownerId === ownerId && !isExpiredGroundedStrategyRecord(record)) || null;
     return found ? structuredClone(found) : null;
   }
 
@@ -527,40 +804,171 @@ export class FileStrategyRepository {
    */
   async create(payload, ownerId) {
     if (!ownerId) throw new Error("ownerId is required to create a strategy");
+    await this.loadOwnerProvenance(ownerId).catch(() => {});
 
-    return this.mutateTenant(ownerId, (records) => {
-      const duplicate = payload.clientSaveId
-        ? records.find((record) => record.ownerId === ownerId && record.clientSaveId === payload.clientSaveId)
-        : null;
-      if (duplicate) return { records, result: duplicate };
+    const created = await this.mutateTenant(ownerId, (records) => {
+      pruneExpiredGroundedStrategies(records);
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
+      const provenance = resolveGroundedStrategyProvenance(
+        ownerId,
+        {
+          clientSaveId: payload.clientSaveId,
+          strategy: payload.strategy,
+          orchestration: payload.orchestration,
+          searchGrounded: payload.searchGrounded,
+          firstGroundedAt: payload.firstGroundedAt,
+          createdAt: payload.createdAt,
+          versions: payload.versions,
+        },
+        records,
+        nowMs
+      );
+      if (provenance?.expired) {
+        return { records, result: null };
+      }
+
+      if (payload.clientSaveId) {
+        const dupIndex = records.findIndex(
+          (record) => record.ownerId === ownerId && record.clientSaveId === payload.clientSaveId
+        );
+        if (dupIndex !== -1) {
+          if (isExpiredGroundedStrategyRecord(records[dupIndex], nowMs)) {
+            records.splice(dupIndex, 1);
+          } else {
+            return { records, result: records[dupIndex] };
+          }
+        }
+      }
       guestQuota(records, ownerId, 10, 1);
 
-      const now = new Date().toISOString();
-      const versions = (payload.versions || []).map((version) => ({
-        ...version,
-        id: version.id || randomUUID(),
-      }));
+      const isGrounded = Boolean(
+        payload.searchGrounded === true ||
+        provenance?.grounded ||
+        isGroundedStrategyRecord(payload) ||
+        isGroundedStrategyRecord(payload.strategy)
+      );
+
+      if (isGrounded) {
+        const payloadSourceDates = [
+          payload.firstGroundedAt,
+          payload.createdAt,
+          payload.strategy?.orchestration?.firstGroundedAt,
+          payload.strategy?.orchestration?.lastGroundedAt,
+          payload.orchestration?.firstGroundedAt,
+          payload.orchestration?.lastGroundedAt,
+        ].filter((d) => d !== undefined && d !== null && String(d).trim() !== "");
+
+        if (!provenance?.grounded && payloadSourceDates.length === 0) {
+          // Fail closed: undated grounded payloads without server provenance must not fabricate a fresh TTL from client version dates.
+          return { records, result: null };
+        }
+
+        const versionDates = (payload.versions || [])
+          .flatMap((v) => [
+            v?.createdAt,
+            v?.data?.orchestration?.firstGroundedAt,
+            v?.data?.orchestration?.lastGroundedAt,
+          ])
+          .filter((d) => d !== undefined && d !== null && String(d).trim() !== "");
+
+        for (const dateVal of [...payloadSourceDates, ...versionDates]) {
+          const parsedMs = parseValidDateMs(dateVal, nowMs);
+          if (parsedMs === null || !Number.isFinite(parsedMs) || nowMs - parsedMs >= MAX_GROUNDED_CHAT_RETENTION_MS) {
+            return { records, result: null };
+          }
+        }
+      }
+
+      const candidateAuthorityDates = isGrounded
+        ? [
+            provenance?.orchestration?.firstGroundedAt,
+            payload.firstGroundedAt,
+            payload.strategy?.orchestration?.firstGroundedAt,
+            payload.orchestration?.firstGroundedAt,
+            payload.createdAt,
+            provenance?.orchestration?.lastGroundedAt,
+            payload.strategy?.orchestration?.lastGroundedAt,
+          ]
+            .map((d) => parseValidDateMs(d, nowMs))
+            .filter((ms) => ms !== null && Number.isFinite(ms))
+        : [];
+      const authoritativeCreatedAt =
+        isGrounded && candidateAuthorityDates.length > 0
+          ? new Date(Math.min(...candidateAuthorityDates)).toISOString()
+          : now;
+
+      const effectiveProvenance = isGrounded
+        ? {
+            grounded: true,
+            orchestration: {
+              ...(provenance?.orchestration || {}),
+              firstGroundedAt: authoritativeCreatedAt,
+            },
+          }
+        : provenance;
+
+      const effectiveStrategy = isGrounded
+        ? applyGroundedProvenanceToStrategy(
+            structuredClone(payload.strategy),
+            effectiveProvenance || { grounded: true, orchestration: { firstGroundedAt: authoritativeCreatedAt } }
+          )
+        : payload.strategy;
+
+      const versions = (payload.versions || []).map((version) => {
+        const versionCreatedAt =
+          isGrounded && version.createdAt
+            ? (Date.parse(version.createdAt) < Date.parse(authoritativeCreatedAt) ? version.createdAt : authoritativeCreatedAt)
+            : (version.createdAt || authoritativeCreatedAt);
+        return {
+          ...version,
+          id: version.id || randomUUID(),
+          createdAt: versionCreatedAt,
+          ...(isGrounded ? { searchGrounded: true } : {}),
+          data:
+            isGrounded && version.data
+              ? applyGroundedProvenanceToStrategy(
+                  structuredClone(version.data),
+                  effectiveProvenance || { grounded: true, orchestration: { firstGroundedAt: authoritativeCreatedAt } }
+                )
+              : version.data,
+        };
+      });
 
       const record = {
         id: randomUUID(),
         ownerId,
         clientSaveId: payload.clientSaveId,
         payloadFingerprint: payload.payloadFingerprint || null,
-        title: payload.strategy?.title || "Untitled Strategy",
+        title: effectiveStrategy?.title || "Untitled Strategy",
         brief: payload.brief,
         clarification: { answers: payload.answers },
-        strategy: payload.strategy,
+        strategy: effectiveStrategy,
+        ...(isGrounded ? { searchGrounded: true, firstGroundedAt: authoritativeCreatedAt } : {}),
         status: "saved",
         currentVersionId: versions.at(-1)?.id || randomUUID(),
         learningInteractionId: payload.learningInteractionId || null,
         versions,
-        createdAt: now,
+        createdAt: authoritativeCreatedAt,
         updatedAt: now,
       };
+
+      if (isGrounded) {
+        rememberGroundedStrategyProvenance(ownerId, record, {
+          strategyId: record.id,
+          clientSaveId: record.clientSaveId,
+          orchestration: effectiveProvenance?.orchestration,
+        });
+      }
 
       records.push(record);
       return { records, result: record };
     });
+
+    if (created && isGroundedStrategyRecord(created)) {
+      await this.persistOwnerProvenance(ownerId).catch(() => {});
+    }
+    return created;
   }
 
   /**
@@ -575,11 +983,15 @@ export class FileStrategyRepository {
   async appendVersion(id, ownerId, strategy, changeRequest, options = {}) {
     if (!id || !ownerId) return null;
 
-    return this.mutateTenant(ownerId, (records) => {
+    const updatedRecord = await this.mutateTenant(ownerId, (records) => {
       const index = records.findIndex((record) => record.id === id && record.ownerId === ownerId);
       if (index === -1) return { records, result: null };
 
       const record = records[index];
+      if (isExpiredGroundedStrategyRecord(record)) {
+        records.splice(index, 1);
+        return { records, result: null };
+      }
       const completed = options.clientSaveId && (record.versions || []).find(version => version.clientSaveId === options.clientSaveId);
       if (completed) {
         if (completed.payloadFingerprint && completed.payloadFingerprint !== options.payloadFingerprint) {
@@ -590,28 +1002,67 @@ export class FileStrategyRepository {
         }
         return { records, result: record };
       }
+
+      const provenance = resolveGroundedStrategyProvenance(ownerId, {
+        strategyId: id,
+        clientSaveId: options.clientSaveId || record.clientSaveId,
+        strategy,
+        existingRecord: record,
+      });
+      const isGrounded = Boolean(
+        options.searchGrounded === true ||
+        provenance?.grounded ||
+        isGroundedStrategyRecord(record) ||
+        isGroundedStrategyRecord(strategy)
+      );
+      const nowIso = new Date().toISOString();
+      const effectiveStrategy = isGrounded
+        ? applyGroundedProvenanceToStrategy(strategy, provenance || {
+            grounded: true,
+            searchEntryPoint: record.strategy?.orchestration?.searchEntryPoint || null,
+            sources: record.strategy?.orchestration?.sources || [],
+            evidence: record.strategy?.orchestration?.evidence || [],
+            searchQueries: record.strategy?.orchestration?.searchQueries || [],
+            createdAt: record.createdAt || nowIso,
+          })
+        : strategy;
+
       const version = {
         id: randomUUID(),
         versionNumber: (record.versions || []).length + 1,
-        data: strategy,
+        data: effectiveStrategy,
+        ...(isGrounded ? { searchGrounded: true } : {}),
         changeRequest,
         clientSaveId: options.clientSaveId || null,
         payloadFingerprint: options.payloadFingerprint || null,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
       };
 
       records[index] = {
         ...record,
-        title: strategy.title || record.title,
-        strategy,
+        title: effectiveStrategy?.title || record.title,
+        strategy: effectiveStrategy,
+        ...(isGrounded ? { searchGrounded: true } : {}),
         status: "saved",
         currentVersionId: version.id,
         versions: [...(record.versions || []), version],
         updatedAt: version.createdAt,
       };
 
+      if (isGrounded) {
+        rememberGroundedStrategyProvenance(ownerId, records[index], {
+          strategyId: id,
+          clientSaveId: options.clientSaveId || record.clientSaveId,
+        });
+      }
+
       return { records, result: records[index] };
     });
+
+    if (updatedRecord && isGroundedStrategyRecord(updatedRecord)) {
+      await this.persistOwnerProvenance(ownerId).catch(() => {});
+    }
+    return updatedRecord;
   }
 
   /**
@@ -625,12 +1076,17 @@ export class FileStrategyRepository {
     if (!id || !ownerId || !title?.trim()) return null;
     const trimmedTitle = title.trim();
 
-    return this.mutateTenant(ownerId, (records) => {
+    const updatedRecord = await this.mutateTenant(ownerId, (records) => {
       const index = records.findIndex((record) => record.id === id && record.ownerId === ownerId);
       if (index === -1) return { records, result: null };
 
-      const now = new Date().toISOString();
       const record = records[index];
+      if (isExpiredGroundedStrategyRecord(record)) {
+        records.splice(index, 1);
+        return { records, result: null };
+      }
+
+      const now = new Date().toISOString();
       const updatedStrategy = record.strategy ? { ...record.strategy, title: trimmedTitle } : { title: trimmedTitle };
       const updatedVersions = (record.versions || []).map((v, i, arr) => {
         if (i === arr.length - 1 && v.data) {
@@ -647,8 +1103,20 @@ export class FileStrategyRepository {
         updatedAt: now,
       };
 
+      if (isGroundedStrategyRecord(records[index])) {
+        rememberGroundedStrategyProvenance(ownerId, records[index], {
+          strategyId: id,
+          clientSaveId: records[index].clientSaveId,
+        });
+      }
+
       return { records, result: records[index] };
     });
+
+    if (updatedRecord && isGroundedStrategyRecord(updatedRecord)) {
+      await this.persistOwnerProvenance(ownerId).catch(() => {});
+    }
+    return updatedRecord;
   }
 
   /**
@@ -660,13 +1128,22 @@ export class FileStrategyRepository {
   async duplicate(id, ownerId) {
     if (!id || !ownerId) return null;
 
-    return this.mutateTenant(ownerId, (records) => {
-      const original = records.find((record) => record.id === id && record.ownerId === ownerId);
-      if (!original) return { records, result: null };
+    const duplicatedRecord = await this.mutateTenant(ownerId, (records) => {
+      const origIndex = records.findIndex((record) => record.id === id && record.ownerId === ownerId);
+      if (origIndex === -1) return { records, result: null };
+      const original = records[origIndex];
 
+      if (isExpiredGroundedStrategyRecord(original)) {
+        records.splice(origIndex, 1);
+        return { records, result: null };
+      }
       if (original.deleted || !guestVisible(original, ownerId)) return { records, result: null };
       guestQuota(records, ownerId, 10, 1);
       const now = new Date().toISOString();
+      const isGrounded = isGroundedStrategyRecord(original);
+      const preservedCreatedAt = isGrounded
+        ? (original.firstGroundedAt || original.strategy?.orchestration?.firstGroundedAt || original.createdAt || now)
+        : now;
       const newId = randomUUID();
       const newTitle = `${original.title} (Kopiya)`;
       const newStrategy = original.strategy ? JSON.parse(JSON.stringify(original.strategy)) : { title: newTitle };
@@ -684,7 +1161,7 @@ export class FileStrategyRepository {
           versionNumber: 1,
           data: newStrategy,
           changeRequest: "Dublikat strategiya",
-          createdAt: now,
+          createdAt: preservedCreatedAt,
         });
       } else {
         versions[versions.length - 1].data.title = newTitle;
@@ -696,15 +1173,28 @@ export class FileStrategyRepository {
         clientSaveId: randomUUID(),
         title: newTitle,
         strategy: newStrategy,
+        ...(isGrounded ? { searchGrounded: true, firstGroundedAt: preservedCreatedAt } : {}),
         versions,
         currentVersionId: versions.at(-1)?.id || randomUUID(),
-        createdAt: now,
+        createdAt: preservedCreatedAt,
         updatedAt: now,
       };
+
+      if (isGrounded) {
+        rememberGroundedStrategyProvenance(ownerId, duplicateRecord, {
+          strategyId: newId,
+          clientSaveId: duplicateRecord.clientSaveId,
+        });
+      }
 
       records.unshift(duplicateRecord);
       return { records, result: duplicateRecord };
     });
+
+    if (duplicatedRecord && isGroundedStrategyRecord(duplicatedRecord)) {
+      await this.persistOwnerProvenance(ownerId).catch(() => {});
+    }
+    return duplicatedRecord;
   }
 
   /**
@@ -809,7 +1299,14 @@ export class FileStrategyRepository {
     return this.withTenantLocks(previousOwnerId, ownerId, async () => {
       // 1. Read guest records with ETag
       const guestData = await this.readTenantDataWithEtag(previousOwnerId, guestKey);
-      const guestRecords = Array.isArray(guestData.records) ? guestData.records.filter(record => !record.deleted && guestVisible(record, previousOwnerId)) : [];
+      const guestRecords = Array.isArray(guestData.records)
+        ? guestData.records.filter(
+            (record) =>
+              !record.deleted &&
+              guestVisible(record, previousOwnerId) &&
+              !isExpiredGroundedStrategyRecord(record)
+          )
+        : [];
       if (guestRecords.length === 0 || guestData.tombstone) {
         return 0;
       }
@@ -826,11 +1323,13 @@ export class FileStrategyRepository {
           throw new Error("Cannot migrate to a tombstoned/deleted tenant account");
         }
         const userRecords = Array.isArray(destData.records) ? [...destData.records] : [];
+        pruneExpiredGroundedStrategies(userRecords);
         const userExistingIds = new Set(userRecords.map((r) => r.id));
 
         const now = new Date().toISOString();
         claimedCount = 0;
         for (const record of guestRecords) {
+          if (isExpiredGroundedStrategyRecord(record)) continue;
           if (!userExistingIds.has(record.id)) {
             userRecords.push({
               ...record,
@@ -841,9 +1340,6 @@ export class FileStrategyRepository {
             claimedCount++;
           }
         }
-
-        // Commit updated user shard locally first
-        await this.writeLocalTenant(userKey, userRecords);
 
         if (isCloud) {
           try {
@@ -858,6 +1354,10 @@ export class FileStrategyRepository {
             throw err;
           }
         }
+
+        // Commit updated user shard locally and to Redis AFTER authoritative cloud write
+        this.syncedShardTags.delete(userKey);
+        await this.writeLocalTenant(userKey, userRecords);
 
         if (this.redis?.isReady) {
           await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(userRecords)).catch(() => {});

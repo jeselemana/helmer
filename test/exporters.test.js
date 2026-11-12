@@ -49,3 +49,52 @@ test("pdf printable document escapes untrusted content and renders all key secti
   assert.match(html, /05\. Risklər və Həll Yolları/);
   assert.match(html, /06\. Növbəti Addımlar/);
 });
+
+test("exporters include sanitized verified web sources when present and block unsafe URLs or raw redirect strings", () => {
+  const groundedStrategy = {
+    ...strategy,
+    orchestration: {
+      searchGrounded: true,
+      sources: [
+        { title: "reuters.com", url: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE12345" },
+        { title: "Central Bank Report <script>", url: "https://cbar.az/report-2026" },
+        { title: "Evil XSS", url: "javascript:alert(1)" },
+        { title: "Credential Leak", url: "https://user:pass@example.com/secret" },
+      ],
+    },
+  };
+
+  const pdfHtml = createPdfPrintDocument(groundedStrategy);
+  assert.match(pdfHtml, /07\. İstifadə Olunan Mənbələr/);
+  assert.match(pdfHtml, /reuters\.com/);
+  assert.match(pdfHtml, /Central Bank Report &lt;script&gt;/);
+  assert.match(pdfHtml, /cbar\.az/);
+  assert.doesNotMatch(pdfHtml, /javascript:alert|user:pass/);
+
+  const doc = createDocumentExport(groundedStrategy);
+  assert.match(doc.content, /İstifadə olunan mənbələr/);
+  assert.match(doc.content, /reuters\.com/);
+  assert.match(doc.content, /Central Bank Report &lt;script&gt;<\/a> \(cbar\.az\)/);
+  assert.doesNotMatch(doc.content, /javascript:alert|user:pass/);
+});
+
+test("web evidence keeps its own safe source across export formats", () => {
+  const report = {
+    ...strategy,
+    orchestration: {
+      sources: [{ title: "Discarded", url: "javascript:alert(1)" }, { title: "Official", url: "https://example.org/report" }],
+      evidence: [
+        { text: "<img> verified segment", sourceIndices: [1] },
+        { text: "Discard this unsupported statement", sourceIndices: [0] },
+      ],
+    },
+  };
+  for (const content of [
+    createPdfPrintDocument(report), createDocumentExport(report).content,
+    createSpreadsheetExport(report).content, createExcelExport(report).content,
+  ]) {
+    assert.match(content, /verified segment/);
+    assert.match(content, /https:\/\/example\.org\/report/);
+    assert.doesNotMatch(content, /Discard this|javascript:alert/);
+  }
+});

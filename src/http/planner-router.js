@@ -5,6 +5,11 @@ import { summarizeTasksWithLuna, prioritizeTasksWithLuna } from "../services/ai/
 import { aiConfig } from "../services/ai/config.js";
 import { httpStatusOf, publicErrorMessage } from "./error-response.js";
 import { isModelImprovementEnabled } from "./auth-middleware.js";
+import {
+  isGroundedStrategyRecord,
+  isGroundedPlannerTaskInput,
+  resolveGroundedStrategyProvenance,
+} from "../services/ai/grounded-chat-retention.js";
 
 export const TaskInputSchema = z.object({
   text: z.string().trim().min(1).max(1000).optional(),
@@ -19,6 +24,8 @@ export const TaskInputSchema = z.object({
   strategyTitle: z.string().trim().max(300).nullable().optional(),
   source: z.string().trim().max(50).nullable().optional(),
   feedback: z.enum(["like", "dislike"]).nullable().optional(),
+  searchGrounded: z.boolean().optional(),
+  groundingActive: z.boolean().optional(),
 }).strict().refine((data) => Boolean(data.text || data.title), {
   message: "Tapşırıq mətni daxil edilməlidir.",
 });
@@ -52,12 +59,16 @@ export const SummarizeTasksSchema = z.object({
         groupLabel: z.string().trim().max(100).optional(),
         isPriority: z.boolean().optional(),
         priority: z.enum(["high", "medium", "low", "priority", "normal"]).optional(),
+        searchGrounded: z.boolean().optional(),
+        groundingActive: z.boolean().optional(),
       }).strict(),
     ])
   ).min(1).max(50).optional(),
   strategyId: z.string().regex(/^[0-9a-f-]{36}$/i, "Geçərsiz strategiya ID").nullable().optional(),
   strategyTitle: z.string().trim().max(300).nullable().optional(),
   language: z.enum(["az", "en"]).optional(),
+  searchGrounded: z.boolean().optional(),
+  groundingActive: z.boolean().optional(),
 }).strict();
 
 export const PrioritizeTasksSchema = z.object({
@@ -88,6 +99,43 @@ export function createPlannerRouter(plannerRepository, options = {}) {
     return record.count <= limit;
   }
 
+  async function loadOwnerStrategies(ownerId) {
+    if (!strategyRepository || !ownerId) return [];
+    if (typeof strategyRepository.loadOwnerProvenance === "function") {
+      await strategyRepository.loadOwnerProvenance(ownerId).catch(() => {});
+    }
+    if (typeof strategyRepository.readAll === "function") {
+      return strategyRepository.readAll(ownerId).catch(() => []);
+    }
+    if (typeof strategyRepository.list === "function") {
+      return strategyRepository.list(ownerId).catch(() => []);
+    }
+    return [];
+  }
+
+  async function resolveTaskGroundedProvenance(ownerId, item, ownerStrategies = []) {
+    if (!item || typeof item !== "object") return false;
+    if (item.searchGrounded === true || item.groundingActive === true) return true;
+    const strategyId = item.strategyId || null;
+    if (strategyId && strategyRepository && typeof strategyRepository.getById === "function") {
+      const rec = await strategyRepository.getById(strategyId, ownerId);
+      if (rec && isGroundedStrategyRecord(rec)) return true;
+      const resolved = resolveGroundedStrategyProvenance(ownerId, rec || { id: strategyId }, ownerStrategies);
+      if (resolved.grounded) return true;
+    }
+    return isGroundedPlannerTaskInput(
+      ownerId,
+      {
+        strategyId,
+        strategyTitle: item.strategyTitle || null,
+        tasks: [item],
+        source: item.source || (strategyId || item.strategyTitle ? "brief" : "user"),
+        searchGrounded: Boolean(item.searchGrounded || item.groundingActive),
+      },
+      ownerStrategies
+    );
+  }
+
   router.get("/", async (req, res) => {
     try {
       const tasks = await plannerRepository.list(req.ownerId);
@@ -115,30 +163,35 @@ export function createPlannerRouter(plannerRepository, options = {}) {
         });
       }
 
-      const tasksToInsert = parsed.data.tasks.map((item) => {
-        const rawText = item.title || item.text || "";
-        const text = rawText.replace(/^[\s\-*•\d.)\]]+/, "").trim() || rawText.trim();
-        const title = text;
-        const timeframe = item.timeframe || item.groupLabel || "Ümumi";
-        const groupLabel = item.groupLabel || timeframe;
-        const status = item.status || (item.completed ? "completed" : "todo");
-        const isPriority = Boolean(item.isPriority || item.priority === "high");
-        const priority = item.priority || (isPriority ? "high" : "normal");
-        return {
-          title,
-          text,
-          timeframe,
-          groupLabel,
-          status,
-          isPriority,
-          priority,
-          strategyId: item.strategyId || null,
-          strategyTitle: item.strategyTitle || null,
-          source: item.source || (item.strategyId || item.strategyTitle ? "brief" : "user"),
-          feedback: item.feedback || null,
-          completed: status === "completed" || Boolean(item.completed),
-        };
-      });
+      const ownerStrategies = await loadOwnerStrategies(req.ownerId);
+      const tasksToInsert = await Promise.all(
+        parsed.data.tasks.map(async (item) => {
+          const rawText = item.title || item.text || "";
+          const text = rawText.replace(/^[\s\-*•\d.)\]]+/, "").trim() || rawText.trim();
+          const title = text;
+          const timeframe = item.timeframe || item.groupLabel || "Ümumi";
+          const groupLabel = item.groupLabel || timeframe;
+          const status = item.status || (item.completed ? "completed" : "todo");
+          const isPriority = Boolean(item.isPriority || item.priority === "high");
+          const priority = item.priority || (isPriority ? "high" : "normal");
+          const searchGrounded = await resolveTaskGroundedProvenance(req.ownerId, { ...item, title, text }, ownerStrategies);
+          return {
+            title,
+            text,
+            timeframe,
+            groupLabel,
+            status,
+            isPriority,
+            priority,
+            strategyId: item.strategyId || null,
+            strategyTitle: item.strategyTitle || null,
+            source: item.source || (item.strategyId || item.strategyTitle ? "brief" : "user"),
+            ...(searchGrounded ? { searchGrounded: true } : {}),
+            feedback: item.feedback || null,
+            completed: status === "completed" || Boolean(item.completed),
+          };
+        })
+      );
 
       const added = await plannerRepository.addBatch(req.ownerId, tasksToInsert);
       const allTasks = await plannerRepository.list(req.ownerId);
@@ -174,6 +227,8 @@ export function createPlannerRouter(plannerRepository, options = {}) {
       const status = data.status || (data.completed ? "completed" : "todo");
       const isPriority = Boolean(data.isPriority || data.priority === "high");
       const priority = data.priority || (isPriority ? "high" : "normal");
+      const ownerStrategies = await loadOwnerStrategies(req.ownerId);
+      const searchGrounded = await resolveTaskGroundedProvenance(req.ownerId, { ...data, title, text }, ownerStrategies);
 
       const added = await plannerRepository.addBatch(req.ownerId, [
         {
@@ -187,6 +242,7 @@ export function createPlannerRouter(plannerRepository, options = {}) {
           strategyId: data.strategyId || null,
           strategyTitle: data.strategyTitle || null,
           source: data.source || (data.strategyId || data.strategyTitle ? "brief" : "user"),
+          ...(searchGrounded ? { searchGrounded: true } : {}),
           feedback: data.feedback || null,
           completed: status === "completed" || Boolean(data.completed),
         },
@@ -220,18 +276,53 @@ export function createPlannerRouter(plannerRepository, options = {}) {
 
       const { strategyId, strategyTitle, language = "az" } = parsed.data;
       let tasks = parsed.data.tasks || [];
+      let strategyRecord = null;
 
       // Tenant isolation & IDOR check: If strategyId is provided, enforce ownerId match (Rule 3)
       if (strategyId) {
         if (strategyRepository) {
-          const strategyRecord = await strategyRepository.getById(strategyId, req.ownerId);
+          strategyRecord = await strategyRepository.getById(strategyId, req.ownerId);
           if (!strategyRecord) {
             return res.status(404).json({ error: "Strategiya tapılmadı.", code: "NOT_FOUND" });
+          }
+          if (isGroundedStrategyRecord(strategyRecord)) {
+            return res.status(422).json({
+              error: "Veb araşdırması olan strategiya tapşırıqlarını model vasitəsilə xülasələndirmək mümkün deyil.",
+              code: "GROUNDED_STRATEGY_RESTRICTED",
+            });
           }
           if (!tasks.length && Array.isArray(strategyRecord.strategy?.nextSteps)) {
             tasks = strategyRecord.strategy.nextSteps;
           }
         }
+      }
+
+      const ownerStrategies = await loadOwnerStrategies(req.ownerId);
+      if (strategyId && strategyRecord) {
+        const stratProv = resolveGroundedStrategyProvenance(req.ownerId, strategyRecord, ownerStrategies);
+        if (stratProv.grounded) {
+          return res.status(422).json({
+            error: "Veb araşdırması olan strategiya tapşırıqlarını model vasitəsilə xülasələndirmək mümkün deyil.",
+            code: "GROUNDED_STRATEGY_RESTRICTED",
+          });
+        }
+      }
+      const isGroundedTaskSubmission = isGroundedPlannerTaskInput(
+        req.ownerId,
+        {
+          strategyId: strategyId || null,
+          strategyTitle: strategyTitle || null,
+          tasks,
+          source: "brief",
+          searchGrounded: Boolean(parsed.data.searchGrounded || parsed.data.groundingActive),
+        },
+        ownerStrategies
+      );
+      if (isGroundedTaskSubmission) {
+        return res.status(422).json({
+          error: "Veb araşdırması olan strategiya tapşırıqlarını model vasitəsilə xülasələndirmək mümkün deyil.",
+          code: "GROUNDED_STRATEGY_RESTRICTED",
+        });
       }
 
       if (!tasks.length) {
@@ -331,6 +422,22 @@ export function createPlannerRouter(plannerRepository, options = {}) {
         tasksToEvaluate = allUserTasks.filter((t) => idFilter.has(t.id));
       }
 
+      const ownerStrategies = await loadOwnerStrategies(req.ownerId);
+      const nonGroundedTasks = [];
+      for (const task of tasksToEvaluate) {
+        const isGrounded = await resolveTaskGroundedProvenance(req.ownerId, task, ownerStrategies);
+        if (!isGrounded) {
+          nonGroundedTasks.push(task);
+        }
+      }
+      if (tasksToEvaluate.length > 0 && nonGroundedTasks.length === 0) {
+        return res.status(422).json({
+          error: "Veb araşdırması olan strategiya tapşırıqlarını model vasitəsilə prioritetləşdirmək mümkün deyil.",
+          code: "GROUNDED_STRATEGY_RESTRICTED",
+        });
+      }
+      tasksToEvaluate = nonGroundedTasks;
+
       if (!tasksToEvaluate.length) {
         const unchangedBody = {
           tasks: allUserTasks,
@@ -427,18 +534,29 @@ export function createPlannerRouter(plannerRepository, options = {}) {
 
       if (parsed.data.feedback && telemetryService && typeof telemetryService.trackTaskFeedback === "function") {
         const modelImprovement = isModelImprovementEnabled(req);
+        const ownerStrategies = await loadOwnerStrategies(req.ownerId);
+        let strategyExistsAndUngrounded = false;
+        if (updated.strategyId && strategyRepository && typeof strategyRepository.getById === "function") {
+          const existingStrategy = await strategyRepository.getById(updated.strategyId, req.ownerId);
+          strategyExistsAndUngrounded = Boolean(existingStrategy && !isGroundedStrategyRecord(existingStrategy));
+        }
+        const taskGrounded =
+          await resolveTaskGroundedProvenance(req.ownerId, updated, ownerStrategies) ||
+          Boolean(updated.strategyId && strategyRepository && !strategyExistsAndUngrounded);
+        const isRestricted = !modelImprovement || taskGrounded;
         telemetryService.trackTaskFeedback({
           ownerId: req.ownerId,
           sessionId: req.guestOwnerId,
           taskId: updated.id,
-          taskText: updated.title || updated.text || "",
+          taskText: isRestricted ? "" : (updated.title || updated.text || ""),
           feedback: parsed.data.feedback,
           strategyId: updated.strategyId || null,
-          strategyTitle: updated.strategyTitle || null,
+          strategyTitle: isRestricted ? null : (updated.strategyTitle || null),
           source: updated.source || "brief",
-          userNote: parsed.data.userNote || parsed.data.explanation || "",
-          onlyNecessaryData: !modelImprovement,
-          modelImprovement,
+          userNote: isRestricted ? "" : (parsed.data.userNote || parsed.data.explanation || ""),
+          groundingActive: taskGrounded,
+          onlyNecessaryData: isRestricted,
+          modelImprovement: !isRestricted,
         }).catch(() => {});
       }
 

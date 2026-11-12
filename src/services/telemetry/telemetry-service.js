@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { anonymizeIp, categorizeBrief, maskIdentifier, redactPayload, redactSensitiveText } from "./privacy.js";
 import { calculateEstimatedCost } from "./pricing.js";
 import { detectTargetMarket } from "../ai/prompts.js";
+import { isGroundedStrategyRecord, isGroundedAssistantMessage, hasGroundedContent } from "../ai/grounded-chat-retention.js";
 
 function resolveTelemetryTokens(usage) {
   if (!usage || typeof usage !== "object") {
@@ -50,9 +51,10 @@ function resolveTelemetryTokens(usage) {
 }
 
 export class TelemetryService {
-  constructor(repository, privacyPolicy = null) {
+  constructor(repository, privacyPolicy = null, options = {}) {
     this.repository = repository;
     this.privacyPolicy = privacyPolicy;
+    this.strategyRepository = options.strategyRepository || null;
   }
 
   persistEvent(event, ownerId) {
@@ -82,6 +84,7 @@ export class TelemetryService {
     model = "gemini-3.8-flash",
     latencyMs = null,
     usage = null,
+    groundingActive = false,
     status = "success",
     qualityScore = null,
     error = null,
@@ -89,7 +92,8 @@ export class TelemetryService {
     onlyNecessaryData = false,
     modelImprovement = true,
   } = {}) {
-    const isRestricted = onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
+    const effectiveGrounding = Boolean(groundingActive || isGroundedStrategyRecord(strategy));
+    const isRestricted = effectiveGrounding || onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
     const rawMarket = isRestricted ? "global" : detectTargetMarket({ brief, answers, strategy });
     const marketMode = rawMarket === "azerbaijan" ? "LOCAL_AZ_MODE" : "GLOBAL_MODE";
     const category = isRestricted ? "Zəruri Əməliyyat" : categorizeBrief(brief || strategy?.title || "");
@@ -107,6 +111,7 @@ export class TelemetryService {
       marketMode,
       category,
       model,
+      groundingActive: effectiveGrounding,
       latencyMs: Number.isFinite(Number(latencyMs)) ? Math.round(Number(latencyMs)) : null,
       tokens: {
         prompt: cost.inputTokens,
@@ -124,6 +129,7 @@ export class TelemetryService {
       metadata: isRestricted
         ? {
             model,
+            groundingActive: effectiveGrounding,
             tokens: cost.totalTokens,
             latencyMs,
             onlyNecessaryData: true,
@@ -132,6 +138,7 @@ export class TelemetryService {
           }
         : redactPayload({
             model,
+            groundingActive: effectiveGrounding,
             marketMode,
             category,
             tokens: cost.totalTokens,
@@ -285,10 +292,11 @@ export class TelemetryService {
     format = "pdf",
     title = "",
     status = "success",
+    groundingActive = false,
     onlyNecessaryData = false,
     modelImprovement = true,
   } = {}) {
-    const isRestricted = onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
+    const isRestricted = Boolean(groundingActive) || onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
     const cleanFormat = String(format || "pdf").toLowerCase().replace(/[^a-z0-9_-]/g, "");
     const safeTitle = isRestricted ? "" : redactSensitiveText(title || "Strategiya hesabatı", 60);
 
@@ -301,6 +309,7 @@ export class TelemetryService {
       category: isRestricted ? "Zəruri Əməliyyat" : "Sənəd İxracı",
       model: "system-exporter",
       format: cleanFormat,
+      groundingActive: Boolean(groundingActive),
       latencyMs: null,
       tokens: null,
       costUsd: 0,
@@ -421,10 +430,11 @@ export class TelemetryService {
     strategyTitle = null,
     source = "brief",
     userNote = "",
+    groundingActive = false,
     onlyNecessaryData = false,
     modelImprovement = true,
   } = {}) {
-    const isRestricted = onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
+    const isRestricted = Boolean(groundingActive) || onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
     const isLike = feedback === "like";
     const feedbackLabel = isLike ? "Faydalı oldu (Like 👍)" : "Faydalı olmadı (Dislike 👎)";
     const safeTaskSnippet = isRestricted
@@ -450,6 +460,7 @@ export class TelemetryService {
       marketMode: null,
       category: isRestricted ? "Zəruri Əməliyyat" : "İcra Rəyi",
       model: "user-feedback",
+      groundingActive: Boolean(groundingActive),
       latencyMs: null,
       tokens: null,
       costUsd: 0,
@@ -466,6 +477,7 @@ export class TelemetryService {
             feedback,
             rating: isLike ? "positive" : "negative",
             source,
+            groundingActive: Boolean(groundingActive),
             onlyNecessaryData: true,
             dataRestricted: true,
             izahat: "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]",
@@ -498,10 +510,11 @@ export class TelemetryService {
     strategyTitle = null,
     brief = "",
     feedback = "like",
+    groundingActive = false,
     onlyNecessaryData = false,
     modelImprovement = true,
   } = {}) {
-    const isRestricted = onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
+    const isRestricted = Boolean(groundingActive) || !strategyId || onlyNecessaryData === true || modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId));
     const isLike = feedback === "like";
     const feedbackLabel = isLike ? "Razı qaldı (Like 👍)" : "Razı qalmadı (Dislike 👎)";
     const safeTitle = isRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : redactSensitiveText(strategyTitle || brief || "Strategiya", 80);
@@ -520,6 +533,7 @@ export class TelemetryService {
       marketMode: null,
       category: isRestricted ? "Zəruri Əməliyyat" : "Strategiya Rəyi",
       model: "user-feedback",
+      groundingActive: Boolean(groundingActive),
       latencyMs: null,
       tokens: null,
       costUsd: 0,
@@ -535,6 +549,7 @@ export class TelemetryService {
             strategyId,
             feedback,
             rating: isLike ? "positive" : "negative",
+            groundingActive: Boolean(groundingActive),
             onlyNecessaryData: true,
             dataRestricted: true,
             izahat: "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]",
@@ -570,7 +585,18 @@ export class TelemetryService {
         const learningStore = await aiLearningRepository.readStore().catch(() => null);
         if (learningStore && Array.isArray(learningStore.interactions)) {
           for (const item of learningStore.interactions) {
-            const isRestricted = item.onlyNecessaryData === true || (this.privacyPolicy && !await this.privacyPolicy.allows(item.ownerId));
+            const groundingActive = Boolean(
+              item.groundingActive ||
+              item.searchGrounded ||
+              item.mode === "ask_research" ||
+              item.taskType === "deep_research" ||
+              hasGroundedContent(item.relevantContext) ||
+              isGroundedStrategyRecord(item.relevantContext) ||
+              isGroundedStrategyRecord(item) ||
+              isGroundedStrategyRecord(item.modelResponse) ||
+              isGroundedStrategyRecord(item.response)
+            );
+            const isRestricted = groundingActive || item.onlyNecessaryData === true || item.modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(item.ownerId));
             const rawMarket = isRestricted ? "global" : detectTargetMarket({ brief: item.userPrompt });
             const marketMode = rawMarket === "azerbaijan" ? "LOCAL_AZ_MODE" : "GLOBAL_MODE";
             const cost = calculateEstimatedCost(item.modelName, item.inputTokens, item.outputTokens);
@@ -583,7 +609,7 @@ export class TelemetryService {
               marketMode,
               category: isRestricted ? "Zəruri Əməliyyat" : (item.mode === "build" ? categorizeBrief(item.userPrompt) : "İnteraktiv Məsləhət"),
               model: item.modelName || "gemini-3.8-flash",
-              groundingActive: Boolean(item.relevantContext?.searchGrounded),
+              groundingActive,
               latencyMs: item.latencyMs || null,
               tokens: {
                 prompt: cost.inputTokens,
@@ -603,6 +629,7 @@ export class TelemetryService {
                 ? {
                     taskType: item.taskType,
                     model: item.modelName,
+                    groundingActive,
                     tokens: cost.totalTokens,
                     onlyNecessaryData: true,
                     dataRestricted: true,
@@ -622,7 +649,8 @@ export class TelemetryService {
       if (backfillEvents.length === 0 && strategyRepository && typeof strategyRepository.readAll === "function") {
         const strategies = await strategyRepository.readAll().catch(() => []);
         for (const strat of strategies) {
-          const isRestricted = Boolean(this.privacyPolicy && !await this.privacyPolicy.allows(strat.ownerId));
+          const groundingActive = isGroundedStrategyRecord(strat);
+          const isRestricted = groundingActive || Boolean(this.privacyPolicy && !await this.privacyPolicy.allows(strat.ownerId));
           const rawMarket = isRestricted ? "global" : detectTargetMarket({ brief: strat.brief, answers: strat.answers, strategy: strat.strategy });
           const marketMode = rawMarket === "azerbaijan" ? "LOCAL_AZ_MODE" : "GLOBAL_MODE";
           backfillEvents.push({
@@ -634,6 +662,7 @@ export class TelemetryService {
             marketMode,
             category: isRestricted ? "Zəruri Əməliyyat" : categorizeBrief(strat.brief || strat.title || ""),
             model: null,
+            groundingActive,
             latencyMs: null,
             tokens: null,
             costUsd: null,
@@ -647,6 +676,7 @@ export class TelemetryService {
               : redactSensitiveText(strat.brief || strat.title || "Tarixi strategiya", 80),
             metadata: isRestricted
               ? {
+                  groundingActive,
                   usageUnavailable: true,
                   onlyNecessaryData: true,
                   dataRestricted: true,
@@ -658,6 +688,32 @@ export class TelemetryService {
                 }),
             timestamp: strat.createdAt || new Date().toISOString(),
           });
+        }
+      }
+
+      if (backfillEvents.length > 0 && chatRepository && typeof chatRepository.readAll === "function") {
+        const chats = await chatRepository.readAll().catch(() => []);
+        for (const chat of chats) {
+          if (!Array.isArray(chat?.messages)) continue;
+          const chatGrounded = chat.messages.some((m) => isGroundedAssistantMessage(m));
+          if (!chatGrounded) continue;
+          for (const evt of backfillEvents) {
+            if (evt.mode === "ask" && evt.ownerId === chat.ownerId && (evt.groundingActive || evt.metadata?.chatId === chat.id)) {
+              evt.groundingActive = true;
+              evt.onlyNecessaryData = true;
+              evt.modelImprovement = false;
+              evt.category = "Zəruri Əməliyyat";
+              evt.marketMode = "GLOBAL_MODE";
+              evt.qualityScore = null;
+              evt.summary = "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]";
+              evt.metadata = {
+                ...(evt.metadata || {}),
+                groundingActive: true,
+                onlyNecessaryData: true,
+                dataRestricted: true,
+              };
+            }
+          }
         }
       }
 

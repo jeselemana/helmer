@@ -10,6 +10,14 @@ import { publicArtifact } from "../repositories/artifact-repository.js";
 import { GUEST_RESTRICTION_NOTICES } from "../services/ai/prompts.js";
 import { requireAuth } from "./auth-middleware.js";
 import { prepareUploadedContext, validUploadMetadata, assertCachedFileReference } from "../services/artifacts/upload-context.js";
+import {
+  isGroundedAssistantMessage,
+  isGroundedStrategyRecord,
+  isGroundedArtifactRecord,
+  isGroundedPlannerTaskInput,
+  resolveGroundedStrategyProvenance,
+  stripInternalStrategyMetadata,
+} from "../services/ai/grounded-chat-retention.js";
 
 const upload = z.object({
   fileId: z.string().max(100).optional(), name: z.string().min(1).max(255).refine(name => !/[\/\\\x00-\x1f]/.test(name)),
@@ -20,7 +28,7 @@ const upload = z.object({
 // Existing Ask UI fields are accepted explicitly. Persisted artifact metadata always comes from the server.
 export const askRequestSchema = z.object({
   messages: z.array(z.object({
-    role: z.enum(["user", "assistant"]), content: z.string().max(10000), file: upload.optional(),
+    role: z.enum(["user", "assistant", "model"]), content: z.string().max(10000), file: upload.optional(),
     strategyTitle: z.string().max(1000).optional(), taskTitle: z.string().max(1000).optional(), model: z.string().max(100).optional(),
     interactionId: uuid.optional(), createdAt: z.string().max(100).optional(), feedback: z.enum(["positive", "negative"]).nullable().optional(),
     isStreaming: z.boolean().optional(), status: z.string().max(100).optional(), statusText: z.string().max(500).optional(),
@@ -29,6 +37,7 @@ export const askRequestSchema = z.object({
     pluginIds: z.array(z.string().max(41)).max(6).optional(),
     type: z.string().max(100).optional(), jobId: uuid.optional(), steps: z.array(z.unknown()).optional(),
     sources: z.array(z.unknown()).optional(), query: z.string().max(10000).optional(), error: z.string().max(2000).optional(),
+    searchGrounded: z.boolean().optional(), groundingActive: z.boolean().optional(),
     updatedAt: z.string().max(100).optional(), id: uuid.optional(),
   }).strict()).min(1).max(200),
   model: z.string().max(100).optional(), mode: z.enum(["ask", "research"]).optional(), thinkingLevel: z.enum(["low", "medium", "high", "off", "auto"]).optional(),
@@ -41,6 +50,52 @@ export const askRequestSchema = z.object({
 function storedMessage(message) {
   return { role: message.role, content: message.content, ...(message.strategyTitle ? { strategyTitle: message.strategyTitle } : {}), ...(message.taskTitle ? { taskTitle: message.taskTitle } : {}),
     ...(message.file ? { file: { fileId: message.file.fileId, name: message.file.name, size: message.file.size, type: message.file.type, mimeType: message.file.mimeType } } : {}) };
+}
+
+function sanitizeStrategyForCapabilityContext(strategyRecord) {
+  if (!strategyRecord || typeof strategyRecord !== "object") return null;
+  const rawStrategy = strategyRecord.strategy && typeof strategyRecord.strategy === "object"
+    ? strategyRecord.strategy
+    : null;
+  if (!rawStrategy) {
+    return {
+      title: strategyRecord.title,
+      brief: strategyRecord.brief,
+      strategy: stripInternalStrategyMetadata(strategyRecord.strategy),
+    };
+  }
+  return {
+    title: strategyRecord.title,
+    brief: strategyRecord.brief,
+    strategy: stripInternalStrategyMetadata(rawStrategy),
+  };
+}
+
+function isArtifactFromGroundedContext(artifactRecord, chat = null, strategyRecord = null) {
+  if (!artifactRecord) return false;
+  if (isGroundedArtifactRecord(artifactRecord, strategyRecord)) return true;
+  if (Array.isArray(artifactRecord.versions)) {
+    const hasGroundedExec = artifactRecord.versions.some((v) =>
+      v?.execution?.groundingActive === true ||
+      v?.execution?.searchGrounded === true ||
+      v?.execution?.intent === "web_research" ||
+      (Array.isArray(v?.execution?.steps) &&
+        v.execution.steps.some((s) => s?.pluginId === "web" || s?.outputType === "research"))
+    );
+    if (hasGroundedExec) return true;
+  }
+  if (chat && Array.isArray(chat.messages)) {
+    const ownerMsg = chat.messages.find(
+      (msg) => Array.isArray(msg?.artifacts) && msg.artifacts.some((a) => a?.id === artifactRecord.id)
+    );
+    if (ownerMsg && isGroundedAssistantMessage(ownerMsg)) return true;
+  }
+  return false;
+}
+
+function sanitizeArtifactSpecForPrompt(spec) {
+  if (!spec || typeof spec !== "object") return null;
+  return stripInternalStrategyMetadata(spec);
 }
 
 export function createCapabilityRouter({ allowGuestChat = false, registry, workflow, artifacts, chats, strategies, planner, rateLimit, hydrateFile, onComplete, limits = createAskConfig() }) {
@@ -84,10 +139,23 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       const previous = target ? await artifacts.get(target.id, req.ownerId) : null;
       const latestPublished = target ? references.filter(artifact => artifact.id === target.id).at(-1) : null;
       if (previous && previous.versions.at(-1).version !== latestPublished?.version) throw new Error("Artifact update is still being committed");
-      const selection = resolveCapabilityIntent({ registry, pluginIds: payload.pluginIds, prompt, previousArtifact: previous });
+      const chatStrategy =
+        previous && chat?.strategyId && strategies && typeof strategies.getById === "function"
+          ? await strategies.getById(chat.strategyId, req.ownerId).catch(() => null)
+          : null;
+      const chatStrategyMissingOrGrounded = Boolean(
+        previous && chat?.strategyId && strategies && (!chatStrategy || isGroundedStrategyRecord(chatStrategy))
+      );
+      const previousIsGrounded =
+        isArtifactFromGroundedContext(previous, chat, chatStrategy) || chatStrategyMissingOrGrounded;
+      const effectivePreviousForSelection = previousIsGrounded && !payload.artifactId ? null : previous;
+      const selection = resolveCapabilityIntent({ registry, pluginIds: payload.pluginIds, prompt, previousArtifact: effectivePreviousForSelection });
       if (selection.intent === "chat" || (selection.plugins.length === 1 && selection.plugins[0].id === "web")) {
         if (chat) req.preloadedAskChat = chat;
-        if (previous) req.askArtifactContext = JSON.stringify(previous.versions.at(-1).spec);
+        if (previous && !previousIsGrounded) {
+          const safeSpec = sanitizeArtifactSpecForPrompt(previous.versions.at(-1)?.spec);
+          if (safeSpec) req.askArtifactContext = JSON.stringify(safeSpec);
+        }
         return next();
       }
       if (!req.user) return res.status(401).json({ code: "AUTH_REQUIRED" });
@@ -96,17 +164,72 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       const streaming = payload.stream === true || req.headers.accept?.includes("text/event-stream");
       const strategyId = payload.strategyId || chat?.strategyId;
       const taskId = payload.taskId || chat?.taskId;
-      const [strategy, task] = await Promise.all([
-        strategyId ? strategies.getById(strategyId, req.ownerId) : null,
-        taskId ? planner.list(req.ownerId).then(items => items.find(item => item.id === taskId) || null) : null,
+      if (strategies && typeof strategies.loadOwnerProvenance === "function") {
+        await strategies.loadOwnerProvenance(req.ownerId).catch(() => {});
+      }
+      const [strategy, task, allOwnerStrategies] = await Promise.all([
+        strategyId && strategies ? (chatStrategy && strategyId === chatStrategy.id ? chatStrategy : strategies.getById(strategyId, req.ownerId)) : null,
+        taskId && planner ? planner.list(req.ownerId).then(items => items.find(item => item.id === taskId) || null) : null,
+        strategies && typeof strategies.readAll === "function" ? strategies.readAll(req.ownerId).catch(() => []) : Promise.resolve([]),
       ]);
       transport.signal.throwIfAborted();
+      if ((payload.strategyId && !strategy) || (payload.taskId && !task)) return res.status(404).json({ error: "Seçilmiş kontekst tapılmadı.", code: "NOT_FOUND" });
       if ((strategyId && !strategy) || (taskId && !task)) return res.status(404).json({ error: "Seçilmiş kontekst tapılmadı.", code: "NOT_FOUND" });
-      const sourceContext = strategy || task ? JSON.stringify({ strategy: strategy ? { title: strategy.title, brief: strategy.brief, strategy: strategy.strategy } : null, task: task ? { text: task.text, strategyTitle: task.strategyTitle } : null }) : "";
+      const taskStrategy = task?.strategyId && strategies ? await strategies.getById(task.strategyId, req.ownerId) : null;
+      const taskIsGrounded = Boolean(
+        task &&
+          (isGroundedStrategyRecord(taskStrategy) ||
+            (task.strategyId && strategies && !taskStrategy) ||
+            isGroundedPlannerTaskInput(
+              req.ownerId,
+              {
+                strategyId: task.strategyId || null,
+                strategyTitle: task.strategyTitle || null,
+                tasks: [task],
+                source: task.source || null,
+                searchGrounded: Boolean(task.searchGrounded || task.groundingActive),
+              },
+              allOwnerStrategies
+            ))
+      );
+      const strategyProvenance = strategy
+        ? resolveGroundedStrategyProvenance(req.ownerId, strategy, allOwnerStrategies)
+        : { grounded: false };
+      if (
+        isGroundedStrategyRecord(strategy) ||
+        strategyProvenance.grounded ||
+        (chat?.strategy && isGroundedStrategyRecord(chat.strategy)) ||
+        taskIsGrounded
+      ) {
+        return res.status(422).json({
+          code: "GROUNDED_STRATEGY_RESTRICTED",
+          error: "Veb araşdırması olan strategiyanı sənəd generasiyasına və ya növbəti model çağırışına ötürmək mümkün deyil.",
+        });
+      }
+      if (previous && (previousIsGrounded || isArtifactFromGroundedContext(previous, chat, strategy))) {
+        if (payload.artifactId) {
+          return res.status(422).json({
+            code: "GROUNDED_STRATEGY_RESTRICTED",
+            error: "Veb araşdırması ilə yaradılmış sənədi model vasitəsilə redaktə etmək mümkün deyil.",
+          });
+        }
+      }
+      const safePrevious = previous && !previousIsGrounded && !isArtifactFromGroundedContext(previous, chat, strategy) ? previous : null;
+      const sourceContext = strategy || task ? JSON.stringify({ strategy: strategy ? sanitizeStrategyForCapabilityContext(strategy) : null, task: task ? { text: task.text, strategyTitle: task.strategyTitle } : null }) : "";
       const isRetry = chat?.messages.at(-1)?.role === "user" && chat.messages.at(-1).content === prompt;
       const incoming = payload.messages.at(-1);
       const fresh = { ...storedMessage(incoming), ...(incoming.file ? { file: incoming.file } : {}) };
-      const history = chat ? [...chat.messages.map(message => ({ ...message })), ...(isRetry ? [] : [fresh])] : payload.messages.map(message => ({ ...storedMessage(message), ...(message.file ? { file: message.file } : {}) }));
+      const withGroundedMarkers = (message) => ({
+        ...storedMessage(message),
+        ...(message.file ? { file: message.file } : {}),
+        ...(isGroundedAssistantMessage(message) ? { searchGrounded: true } : {}),
+        ...(typeof message.type === "string" ? { type: message.type } : {}),
+        ...(Array.isArray(message.pluginIds) ? { pluginIds: message.pluginIds } : {}),
+        ...(Array.isArray(message.sources) ? { sources: message.sources } : {}),
+        ...(message.groundingMetadata && typeof message.groundingMetadata === "object" ? { groundingMetadata: message.groundingMetadata } : {}),
+        ...(message.groundingActive === true ? { groundingActive: true } : {}),
+      });
+      const history = chat ? [...chat.messages.map(message => ({ ...message })), ...(isRetry ? [] : [fresh])] : payload.messages.map(withGroundedMarkers);
       if (isRetry && incoming.file) history.at(-1).file = incoming.file;
       history.at(-1).pluginIds = selection.plugins.map(plugin => plugin.id);
       for (const message of history) if (message.file) {
@@ -117,7 +240,11 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       }
       allocatedChatId = chat?.id || randomUUID();
       // Establish an owner-scoped chat before artifact persistence; failed runs stay retryable.
-      const safeHistory = history.map((message, index) => chat && index < chat.messages.length ? chat.messages[index] : { ...storedMessage(message), pluginIds: message.pluginIds });
+      const safeHistory = history.map((message, index) => (
+        chat && index < chat.messages.length
+          ? chat.messages[index]
+          : { ...withGroundedMarkers(message), ...(message.pluginIds ? { pluginIds: message.pluginIds } : {}) }
+      ));
       await assertExecutionAuthorized(transport.signal);
       initialChat = await chats.saveChat({ id: allocatedChatId, ownerId: req.ownerId, messages: safeHistory, strategyId, taskId, mustExist: Boolean(chat), expectedRevision: chat ? expectedRevision : null });
       if (req.securityContext) req.securityContext.assertResources = async () => {
@@ -136,7 +263,10 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
         transport.send({ status: "analyzing", statusText: "Məlumatları analiz edirəm...", chatId: allocatedChatId, chatRevision: initialChat.revision });
       }
       transport.signal.throwIfAborted();
-      const result = completedResult = await workflow.execute({ plugins: selection.plugins, ownerId: req.ownerId, chatId: allocatedChatId, prompt, messages: history, sourceContext, previous,
+      const workflowMessages = history
+        .filter((message) => !isGroundedAssistantMessage(message))
+        .map((message) => stripInternalStrategyMetadata(message));
+      const result = completedResult = await workflow.execute({ plugins: selection.plugins, ownerId: req.ownerId, chatId: allocatedChatId, prompt, messages: workflowMessages, sourceContext, previous: safePrevious,
         preferEdit: Boolean(payload.artifactId),
         requestedModel: payload.model, scopes: new Set(["context:read", "artifacts:write", "web:search"]), signal: transport.signal,
         language: req.user?.settings?.language || (req.headers["accept-language"]?.includes("en") ? "en" : "az"),
