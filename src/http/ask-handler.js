@@ -5,7 +5,8 @@ import { createAskConfig } from '../services/ai/ask-config.js';
 import { createAskTransport } from './ask-transport.js';
 import { askRequestSchema } from './capability-router.js';
 import { resolveAskThinkingLevel } from '../services/ai/ask-routing.js';
-import { evaluateSearchRoute } from '../services/ai/search-router.js';
+import { createHelmerDecisionRouter } from '../services/ai/decision-router.js';
+import { hasGroundedAssistantHistory } from '../services/ai/search-router.js';
 import { buildAskPrompt, formatGuestAnswerWithCta, createGuestAnswerStream, detectGuestFunctionalRestriction, GUEST_EXHAUSTED_MESSAGE } from '../services/ai/prompts.js';
 import { assertCachedFileReference, prepareUploadedContext } from '../services/artifacts/upload-context.js';
 import { geminiFileCache } from '../services/ai/gemini-file-cache.js';
@@ -29,8 +30,9 @@ function getReqPrivacySnapshot(req) {
 
 export function createAskHandler({ chatRepository, strategyRepository, plannerRepository, researchService,
   learningLoop, telemetryService, generateAsk, sanitizeGroundingMetadata,
-  configured = hasGeminiConfiguration, limits = createAskConfig() }) {
+  configured = hasGeminiConfiguration, limits = createAskConfig(), decisionRouter = null }) {
   const ASK_GEMINI_MODEL = aiConfig.askGeminiModel;
+  const activeDecisionRouter = decisionRouter || createHelmerDecisionRouter();
   return async function handleAsk(req, res) {
     const learningStartedAt = Date.now();
     let learningInteractionId = null;
@@ -105,7 +107,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       }
 
       const rawThinkingLevel = String(req.body.thinkingLevel || "auto").toLowerCase();
-      if (!["low", "medium", "high", "off", "auto"].includes(rawThinkingLevel)) {
+      if (!["low", "medium", "high", "xhigh", "off", "auto"].includes(rawThinkingLevel)) {
         return res.status(400).json({ code: "VALIDATION_ERROR", error: "Düşünmə səviyyəsi düzgün deyil." });
       }
 
@@ -151,11 +153,37 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       // Parallel Pre-Flight Context Loading & Deduplicated Chat Read
       const contextStartedAt = Date.now();
-      const [existingChat, rawSelectedStrategy, rawSelectedTask, personalizationContext, allOwnerStrategies] = await Promise.all([
+      const hasExplicitStrategyOrTask = Boolean(strategyId || taskId);
+      const preloadedChat = chatId && req.preloadedAskChat && req.preloadedAskChat.id === chatId && req.preloadedAskChat.ownerId === req.ownerId
+        ? req.preloadedAskChat
+        : null;
+      const preloadedRevisionOk = !preloadedChat ||
+        req.body.chatRevision === undefined ||
+        req.body.chatRevision === null ||
+        Number(req.body.chatRevision) === (preloadedChat.revision || 1);
+      let prefetchedSearchDecisionPromise = null;
+      if (req.user && !hasExplicitStrategyOrTask && (!chatId || preloadedChat) && preloadedRevisionOk && !preloadedChat?.strategyId && !preloadedChat?.taskId) {
+        const prefetchMessages = preloadedChat ? [...preloadedChat.messages, messages.at(-1)] : messages;
+        const prefetchExplicitWeb = req.body.pluginIds?.includes("web") === true;
+        const prefetchGroundedHistory = hasGroundedAssistantHistory(prefetchMessages) || prefetchMessages.some(
+          (m) => isGroundedAssistantMessage(m) || Boolean(m?.pluginIds?.includes("web"))
+        );
+        const prefetchHasMedia = prefetchMessages.some((m) => Boolean(m?.file));
+        const prefetchPrompt = typeof messages.at(-1)?.content === "string" ? messages.at(-1).content : "";
+        prefetchedSearchDecisionPromise = activeDecisionRouter.routeAsk({
+          prompt: prefetchPrompt,
+          messages: prefetchMessages,
+          explicitWeb: prefetchExplicitWeb,
+          hasStrategyContext: false,
+          hasGroundedHistory: prefetchGroundedHistory,
+          hasMedia: prefetchHasMedia,
+          signal: transport.signal,
+        });
+        prefetchedSearchDecisionPromise.catch(() => {});
+      }
+      const [existingChat, rawSelectedStrategy, rawSelectedTask, personalizationContext, initialOwnerStrategies] = await Promise.all([
         chatId
-          ? (req.preloadedAskChat && req.preloadedAskChat.id === chatId && req.preloadedAskChat.ownerId === req.ownerId
-              ? Promise.resolve(req.preloadedAskChat)
-              : chatRepository.getById(chatId, req.ownerId))
+          ? (preloadedChat ? Promise.resolve(preloadedChat) : chatRepository.getById(chatId, req.ownerId))
           : Promise.resolve(null),
         strategyId ? strategyRepository.getById(strategyId, req.ownerId) : Promise.resolve(null),
         taskId ? plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === taskId) || null) : Promise.resolve(null),
@@ -169,10 +197,10 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
               mode: "ask",
             })
           : Promise.resolve(""),
-        strategyRepository && typeof strategyRepository.readAll === "function"
+        hasExplicitStrategyOrTask && strategyRepository && typeof strategyRepository.readAll === "function"
           ? strategyRepository.readAll(req.ownerId).catch(() => [])
           : Promise.resolve([]),
-        strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function"
+        hasExplicitStrategyOrTask && strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function"
           ? strategyRepository.loadOwnerProvenance(req.ownerId).catch(() => [])
           : Promise.resolve([]),
       ]);
@@ -212,8 +240,35 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       const effectiveStrategyId = strategyId || existingChat?.strategyId || "";
       const effectiveTaskId = taskId || existingChat?.taskId || "";
-      const selectedStrategy = rawSelectedStrategy || (effectiveStrategyId && strategyRepository ? await strategyRepository.getById(effectiveStrategyId, req.ownerId) : null);
-      const selectedTask = rawSelectedTask || (effectiveTaskId && plannerRepository ? await plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === effectiveTaskId) || null) : null);
+      let allOwnerStrategies = initialOwnerStrategies;
+      let selectedStrategy = rawSelectedStrategy;
+      let selectedTask = rawSelectedTask;
+      if (!hasExplicitStrategyOrTask && (effectiveStrategyId || effectiveTaskId)) {
+        const [chatStrategy, chatTask, ownerStrategies] = await Promise.all([
+          effectiveStrategyId && strategyRepository ? strategyRepository.getById(effectiveStrategyId, req.ownerId) : Promise.resolve(null),
+          effectiveTaskId && plannerRepository ? plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === effectiveTaskId) || null) : Promise.resolve(null),
+          strategyRepository && typeof strategyRepository.readAll === "function"
+            ? strategyRepository.readAll(req.ownerId).catch(() => [])
+            : Promise.resolve([]),
+          strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function"
+            ? strategyRepository.loadOwnerProvenance(req.ownerId).catch(() => [])
+            : Promise.resolve([]),
+        ]);
+        selectedStrategy = chatStrategy;
+        selectedTask = chatTask;
+        allOwnerStrategies = ownerStrategies;
+      } else if ((!selectedStrategy && effectiveStrategyId && strategyRepository) || (!selectedTask && effectiveTaskId && plannerRepository)) {
+        const [chatStrategy, chatTask] = await Promise.all([
+          !selectedStrategy && effectiveStrategyId && strategyRepository
+            ? strategyRepository.getById(effectiveStrategyId, req.ownerId)
+            : Promise.resolve(selectedStrategy),
+          !selectedTask && effectiveTaskId && plannerRepository
+            ? plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === effectiveTaskId) || null)
+            : Promise.resolve(selectedTask),
+        ]);
+        selectedStrategy = chatStrategy;
+        selectedTask = chatTask;
+      }
 
       const strategyProvenance = effectiveStrategyId
         ? resolveGroundedStrategyProvenance(req.ownerId, selectedStrategy || { id: effectiveStrategyId }, allOwnerStrategies)
@@ -338,21 +393,18 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       }
 
       const selectedAskModel = ASK_GEMINI_MODEL;
-      const searchDecision = evaluateSearchRoute({ prompt: lastUserMsg, messages, hasStrategyContext });
       const explicitWeb = req.body.pluginIds?.includes("web") === true;
       if (explicitWeb) messages.at(-1).pluginIds = ["web"];
-      const enableSearch = explicitWeb || searchDecision.enableSearch;
-      const requireGrounding = explicitWeb || searchDecision.requireGrounding;
       const requestedThinkingLevel = resolveAskThinkingLevel({
         requestedThinkingLevel: rawThinkingLevel,
         lastUserMsg,
         hasStrategyContext,
       });
 
-      const hasGroundedHistory = messages.some(
+      const hasGroundedHistory = hasGroundedAssistantHistory(messages) || messages.some(
         (m) => isGroundedAssistantMessage(m) || Boolean(m?.pluginIds?.includes("web"))
       );
-      const messagesForPrompt = messages.filter((msg) => !isGroundedAssistantMessage(msg));
+      const messagesForPrompt = messages;
 
       learningInteractionId = learningLoop.createInteractionId();
       learningPrompt = messages.at(-1).content;
@@ -366,7 +418,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         hasTaskContext: Boolean(selectedTask),
         hasAttachment: Boolean(hasAnyAttachment),
         personalizationApplied: Boolean(personalizationContext),
-        searchGrounded: Boolean(enableSearch || hasGroundedHistory),
+        searchGrounded: Boolean(explicitWeb || hasGroundedHistory),
       };
 
       // One durable completion path for JSON, SSE and exact guest notices.
@@ -417,6 +469,25 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         await complete(GUEST_EXHAUSTED_MESSAGE, undefined, { notice: true, remaining: 0 });
         return;
       }
+
+      const decisionStartedAt = Date.now();
+      const searchDecision = await (prefetchedSearchDecisionPromise || activeDecisionRouter.routeAsk({
+        prompt: lastUserMsg,
+        messages,
+        explicitWeb,
+        hasStrategyContext,
+        hasGroundedHistory,
+        hasMedia: Boolean(hasAnyAttachment),
+        signal: transport.signal,
+      }));
+      if (req.askTimings) {
+        req.askTimings.decisionWaitMs = Date.now() - decisionStartedAt;
+        req.askTimings.decisionLatencyMs = searchDecision?.latencyMs ?? null;
+        req.askTimings.decisionSource = searchDecision?.routerSource || null;
+      }
+      const enableSearch = explicitWeb || searchDecision.enableSearch;
+      const requireGrounding = explicitWeb || searchDecision.requireGrounding;
+      learningContext.searchGrounded = Boolean(enableSearch || hasGroundedHistory);
 
       const fullInstructions = buildAskPrompt({ isGuest, remainingMessages });
       // Owned context is data, never a privileged system message. Authorization

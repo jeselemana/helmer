@@ -3,6 +3,7 @@ import { publicAskErrorCode } from './src/http/ask-errors.js';
 import { sanitizeAskGroundingMetadata } from './src/services/ai/ask-grounding.js';
 import { createAskHandler } from './src/http/ask-handler.js';
 import { createAskService } from './src/services/ai/ask-service.js';
+import { createHelmerDecisionRouter } from './src/services/ai/decision-router.js';
 import { readTenantObject } from "./src/http/r2-storage.js";
 import { z } from "zod";
 import { isR2Configured, loadJSONFromR2, saveJSONToR2, testR2Connection } from "./src/http/r2-storage.js";
@@ -418,7 +419,7 @@ app.use("/api/auth/admin-mfa", createAdminMfaRouter({
   },
 }));
 app.use("/api/strategy", createStrategyRouter(strategyRepository, learningLoop, {
-  telemetryService, redis,
+  telemetryService, redis, decisionRouter: createHelmerDecisionRouter({ redis }),
   hasActiveJobForOwner: ownerId => researchService.hasActiveJobForOwner(ownerId),
 }));
 app.use("/api/up", createUpRouter(upService));
@@ -886,6 +887,7 @@ app.post("/api/ask", foregroundAskRateLimit, createAskHandler({
   chatRepository, strategyRepository, plannerRepository, researchService, learningLoop, telemetryService,
   sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
   generateAsk,
+  decisionRouter: createHelmerDecisionRouter({ redis }),
 }));
 
 // 🧠 ADMIN PANEL – YALNIZ SƏNİN ÜÇÜN

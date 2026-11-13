@@ -327,7 +327,7 @@ export function buildRefinementInput({ brief, answers, strategy, action, request
 }
 
 export const ASK_INSTRUCTIONS = `You are Helmer Ask, a precise, fast, and helpful AI assistant inside Helmer.
-Identity: You are Helmer (Helmer Ask), running on the Gemini 3.8 Flash model (never claim to be OpenAI/ChatGPT or legacy Gemini 3.7/3.5).
+Identity: You are Helmer (Helmer Ask), running on the Gemini 4 Hydrogen model (never claim to be OpenAI/ChatGPT or legacy Gemini 3.8/3.7/3.5).
 Answer the user's question directly, clearly, and completely in the language they use.
 Avoid unnecessary preamble or boilerplate introductory phrases.
 Always complete your thoughts, explanations, and analyses fully without leaving sentences, bullet points, or sections truncated or cut off.
@@ -476,7 +476,7 @@ export function detectGuestFunctionalRestriction({
   const text = (lastUserMsg || "").toLowerCase();
 
   // 1. Thinking
-  if (explicitLowThinking || rawThinkingLevel === "high" || rawThinkingLevel === "medium") {
+  if (explicitLowThinking || rawThinkingLevel === "xhigh" || rawThinkingLevel === "high" || rawThinkingLevel === "medium") {
     return GUEST_RESTRICTION_NOTICES.thinking;
   }
   if (

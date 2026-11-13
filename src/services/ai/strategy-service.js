@@ -178,6 +178,7 @@ export async function assessBrief({
   language = "az",
   buildMode = "auto",
   fasterThinkingLevel = "medium",
+  buildDecision = null,
   ownerId,
   signal,
   personalizationContext = "",
@@ -187,7 +188,9 @@ export async function assessBrief({
 }) {
   const isEn = language === "en";
   const sufficiency = evaluateBriefSufficiency(brief, { round, answers });
-  if (sufficiency.sufficient && round === 0 && (!answers || answers.length === 0)) {
+  const forcedAskQuestions =
+    buildDecision?.hasEnoughContext === false || buildDecision?.briefAction === "ask_questions";
+  if (!forcedAskQuestions && sufficiency.sufficient && round === 0 && (!answers || answers.length === 0)) {
     return {
       status: "ready",
       understanding: isEn
@@ -220,7 +223,7 @@ export async function assessBrief({
     instructions, input, personalizationContext, ownerId, signal, onChunk, onUsage,
     routingInput: buildRoutingInput({ brief, answers, buildMode, fasterThinkingLevel }), onEstimate,
     assessment: true,
-    buildMode, fasterThinkingLevel,
+    buildMode, fasterThinkingLevel, buildDecision,
   });
 
   const assessment = validateAssessment(data);
@@ -275,6 +278,7 @@ export async function generateStrategy({
   language = "az",
   buildMode = "auto",
   fasterThinkingLevel = "medium",
+  buildDecision = null,
   ownerId,
   signal,
   personalizationContext = "",
@@ -297,6 +301,7 @@ export async function generateStrategy({
     onEstimate: preparationEstimate => onChunk?.({ preparationEstimate }),
     buildMode: normalizedMode,
     fasterThinkingLevel: normalizedFasterThinking,
+    buildDecision,
   });
 
   const strategyData = stripInlineGroundingRedirectUrls(rawStrategyData);
@@ -351,6 +356,7 @@ export async function refineStrategy(payload, ownerId, signal, personalizationCo
     personalizationContext, ownerId, signal, onChunk, onUsage,
     buildMode: effectiveBuildMode,
     fasterThinkingLevel: effectiveFasterThinking,
+    buildDecision: payload.buildDecision || null,
   });
   const strategyData = stripInlineGroundingRedirectUrls(rawStrategyData);
   if (Array.isArray(strategyData?.nextSteps)) {

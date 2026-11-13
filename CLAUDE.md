@@ -68,7 +68,7 @@ These directives are MANDATORY and NON-NEGOTIABLE across all coding, refactoring
   - All web source URLs must be strictly sanitized (`https?://` only) to protect against malicious URL schemes (`javascript:`, `data:`).
   - Linked sources MUST be rendered in a compact chip format directly at the end of the response. Titles and domains must be safely rendered without raw `innerHTML`.
 - **Grounding Data Isolation & 2-Year Retention**:
-  - Responses grounded with Google Search must NEVER be forwarded to learning loops, telemetry, or subsequent model prompt turns (`isRestricted = true`). Telemetry and learning loop entries for grounded queries must redact interaction content (`onlyNecessaryData: true`).
+  - Responses grounded with Google Search must NEVER be forwarded to learning loops, telemetry, cross-chat personalization, or Build/Strategy/Artifact generation (`isRestricted = true`). Telemetry and learning loop entries for grounded queries must redact interaction content (`onlyNecessaryData: true`). In Ask mode, synthesized assistant reply text may remain in the active conversation's chat context (without raw grounding metadata/sources) for multi-turn continuity.
   - Grounded assistant turns stored in user chat history have a strict maximum retention of 2 years (`MAX_GROUNDED_CHAT_RETENTION_MS`). Stored records older than 2 years must be pruned during store sanitization and tenant maintenance.
 
 ---

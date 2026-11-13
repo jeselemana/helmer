@@ -6,13 +6,13 @@ import fs from "node:fs/promises";
 import { isComplexAskQuery, resolveAskModelRoute, resolveAskThinkingLevel } from "../src/services/ai/ask-routing.js";
 import { FileChatRepository } from "../src/repositories/file-chat-repository.js";
 
-test("all Ask queries route exclusively to Gemini 3.8 Flash (GPT models eliminated from Ask)", () => {
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Instagram üçün 3 qısa başlıq yaz" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Hərtərəfli dərin analiz və SWOT matrisi qur" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Bunu necə tətbiq edim?", hasStrategyContext: true }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ requestedModel: "terra", lastUserMsg: "qısa sual" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ requestedModel: "luna", lastUserMsg: "dərin analiz" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ requestedModel: "auto", lastUserMsg: "sual" }), "gemini-3.8-flash");
+test("all Ask queries route exclusively to Gemini 4 Hydrogen (GPT models eliminated from Ask)", () => {
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Instagram üçün 3 qısa başlıq yaz" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Hərtərəfli dərin analiz və SWOT matrisi qur" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Bunu necə tətbiq edim?", hasStrategyContext: true }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ requestedModel: "terra", lastUserMsg: "qısa sual" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ requestedModel: "luna", lastUserMsg: "dərin analiz" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ requestedModel: "auto", lastUserMsg: "sual" }), "gemini-4-hydrogen");
 });
 
 test("isComplexAskQuery accurately identifies complex queries and strategy context", () => {
@@ -35,31 +35,32 @@ test("resolveAskThinkingLevel routes auto thinking levels (low, medium, high) an
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "auto", lastUserMsg: "Bu adi uzun bir mətndir ki, ümumi Ask rejimində istifadəçinin daxil etdiyi sualın ölçüsü 150-350 simvol arasında olduqda lüzumsuz gecikmə olmasın və cavab ildırım sürəti ilə low rejimində qaytarılsın." }), "low");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "auto", thinkingEnabled: false, lastUserMsg: "Adi sual" }), "low");
   // Explicit levels are strictly preserved
+  assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "xhigh" }), "xhigh");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "high" }), "high");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "medium" }), "medium");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "low" }), "low");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "off" }), "off");
 });
 
-test("real-time search, pricing, and AI model queries in auto mode route to Gemini 3.8 Flash", () => {
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Bakı bazarında hazırkı qiymətlər nə qədərdir?" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Rəqib analizi və 2026 trendləri" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Gemini 3.8 Flash haqqında nə bilirsən?" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "GPT-6 Astra nə vaxt çıxacaq?" }), "gemini-3.8-flash");
+test("real-time search, pricing, and AI model queries in auto mode route to Gemini 4 Hydrogen", () => {
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Bakı bazarında hazırkı qiymətlər nə qədərdir?" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Rəqib analizi və 2026 trendləri" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Gemini 4 Hydrogen haqqında nə bilirsən?" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "GPT-6 Astra nə vaxt çıxacaq?" }), "gemini-4-hydrogen");
 });
 
-test("Gemini configuration exposes default 3.8 flash", async () => {
+test("Gemini configuration exposes default Ask model gemini-4-hydrogen", async () => {
   const { aiConfig, hasGeminiConfiguration, hasOpenAIConfiguration } = await import("../src/services/ai/config.js");
-  assert.equal(aiConfig.askGeminiModel, "gemini-3.8-flash");
+  assert.equal(aiConfig.askGeminiModel, "gemini-4-hydrogen");
   assert.equal(typeof hasGeminiConfiguration(), "boolean");
   assert.equal(typeof hasOpenAIConfiguration(), "boolean");
 });
 
-test("Ask queries with file attachments route exclusively to Gemini 3.8 Flash", () => {
-  assert.equal(resolveAskModelRoute({ hasAttachment: true, lastUserMsg: "Bu sənədi analiz et" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "terra", lastUserMsg: "swot analizi" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "luna", lastUserMsg: "qısa başlıq" }), "gemini-3.8-flash");
-  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "auto", hasStrategyContext: true }), "gemini-3.8-flash");
+test("Ask queries with file attachments route exclusively to Gemini 4 Hydrogen", () => {
+  assert.equal(resolveAskModelRoute({ hasAttachment: true, lastUserMsg: "Bu sənədi analiz et" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "terra", lastUserMsg: "swot analizi" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "luna", lastUserMsg: "qısa başlıq" }), "gemini-4-hydrogen");
+  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "auto", hasStrategyContext: true }), "gemini-4-hydrogen");
 });
 
 test("AbortController for Ask stream stays active after request body consumption and only aborts if response closes prematurely", async () => {

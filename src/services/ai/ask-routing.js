@@ -13,16 +13,16 @@ export function isComplexAskQuery(lastUserMsg = "", hasStrategyContext = false) 
   return false;
 }
 
-// Ask mode exclusively routes to Gemini 3.8 Flash. GPT models and GPT fallbacks
+// Ask mode exclusively routes to Gemini 4 Hydrogen. GPT models and GPT fallbacks
 // are completely eliminated from Ask.
 export function resolveAskModelRoute() {
-  return "gemini-3.8-flash";
+  return "gemini-4-hydrogen";
 }
 
-// Auto-routing for Gemini 3.8 Flash thinking levels (low, medium, high)
+// Auto-routing for Gemini 4 Hydrogen thinking levels (low, medium, high, xhigh)
 export function resolveAskThinkingLevel({ requestedThinkingLevel = "auto", lastUserMsg = "", hasStrategyContext = false } = {}) {
   const normalized = String(requestedThinkingLevel || "auto").toLowerCase().trim();
-  if (["low", "medium", "high", "off"].includes(normalized)) {
+  if (["low", "medium", "high", "xhigh", "off"].includes(normalized)) {
     return normalized;
   }
   const cleanMsg = String(lastUserMsg || "").trim();

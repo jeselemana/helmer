@@ -8,6 +8,7 @@ import { acquireSharedAskLease } from './owner-execution-lease.js';
 import { requestFingerprint } from './request-fingerprint.js';
 
 const fail = (code, status = 503) => Object.assign(new Error(code), { code, status });
+export const CONCURRENT_PAUSE_CHECK_SYMBOL = Symbol('helmer.aiPolicy.concurrentPauseCheck');
 export const ASK_REQUESTS_PER_MINUTE = 15;
 const ASK_IP_REQUESTS_PER_MINUTE = 60;
 const ASK_RATE_WINDOW_MS = 60000;
@@ -41,8 +42,11 @@ export const DEFAULT_MODEL_PRICING = Object.freeze({
   get 'gemini-4-argon'() {
     return Date.now() < Date.UTC(2026, 11, 1) ? { input: 2.20, output: 11.00 } : { input: 4.40, output: 22.00 };
   },
+  'gemini-4-hydrogen': { input: 1.50, output: 7.50, search: 0.035 },
   'gemini-3.8-flash': { input: 0.75, output: 3.75, search: 0.035 },
   'gemini-3.8-flash-high': { input: 0.75, output: 3.75, search: 0.035 },
+  'gemini-3.5-flash-lite': { input: 0.30, output: 2.50, search: 0.035 },
+  'gemini-decision-1': { input: 0.10, output: 0.00, search: 0 },
   'gpt-5.6-luna': { input: 0.25, output: 1.00, search: 0.030 },
   'gpt-6-luna': { input: 0.25, output: 1.00, search: 0.030 },
   'gpt-5.6-terra': { input: 1.25, output: 5.00, search: 0.035 },
@@ -67,7 +71,7 @@ export function resolveEffectiveModelPricing(model, env = process.env) {
     DEFAULT_MODEL_PRICING[modelKey] ||
     DEFAULT_MODEL_PRICING[String(modelKey).toLowerCase()] ||
     DEFAULT_MODEL_PRICING.default;
-  if (!price || !Number.isFinite(price.input) || !Number.isFinite(price.output) || price.input < 0 || price.output <= 0) {
+  if (!price || !Number.isFinite(price.input) || !Number.isFinite(price.output) || price.input < 0 || price.output < 0) {
     return null;
   }
   const search = Number.isFinite(price.search) ? Number(price.search) : 0.035;
@@ -119,9 +123,41 @@ export class AiPolicy {
   constructor({ redis, env = process.env, fetcher = fetch, allowParallelAskChats = false }) {
     Object.assign(this, { redis, env, fetcher, allowParallelAskChats });
   }
-  async assertEnabled() {
+  async assertEnabled({ maxStaleMs = 0 } = {}) {
     this.ready();
-    if (this.env.AI_EXECUTION_DISABLED === 'true' || (this.redis?.isReady && this.redis.get && await this.redis.get('security:ai-paused') === '1')) throw fail('EXECUTION_DISABLED');
+    if (this.env.AI_EXECUTION_DISABLED === 'true') throw fail('EXECUTION_DISABLED');
+    if (this.redis?.isReady && this.redis.get) {
+      const now = Date.now();
+      if (maxStaleMs > 0 && this._lastEnabledOkAt && (now - this._lastEnabledOkAt < maxStaleMs)) {
+        if (now - this._lastEnabledOkAt >= 250 && !this._inFlightPauseCheck) {
+          this._inFlightPauseCheck = Promise.resolve(this.redis.get('security:ai-paused'))
+            .then(value => {
+              this._lastEnabledOkAt = value === '1' ? 0 : Date.now();
+              return value;
+            }, err => {
+              this._lastEnabledOkAt = 0;
+              throw err;
+            })
+            .finally(() => { this._inFlightPauseCheck = null; });
+          this._inFlightPauseCheck.catch(() => {});
+        }
+        return;
+      }
+      if (!this._inFlightPauseCheck) {
+        this._inFlightPauseCheck = Promise.resolve(this.redis.get('security:ai-paused'))
+          .then(value => {
+            this._lastEnabledOkAt = value === '1' ? 0 : Date.now();
+            return value;
+          }, err => {
+            this._lastEnabledOkAt = 0;
+            throw err;
+          })
+          .finally(() => { this._inFlightPauseCheck = null; });
+      }
+      if (await this._inFlightPauseCheck === '1') throw fail('EXECUTION_DISABLED');
+    } else {
+      this._lastEnabledOkAt = 0;
+    }
   }
   ready() {
     if (this.env.NODE_ENV === 'production' && (this.env.REDIS_URL || this.env.REQUIRE_REDIS === 'true') && !this.redis?.isReady) throw fail('EXECUTION_UNAVAILABLE');
@@ -154,8 +190,8 @@ export class AiPolicy {
       if (req.user?.status && req.user.status !== 'active') return res.status(403).json({ code: 'ACCOUNT_UNAVAILABLE', error: 'Hesab aktiv deyil.' });
       if (req.user && !req.user.emailVerifiedAt) return res.status(403).json({ code: 'EMAIL_VERIFICATION_REQUIRED', error: 'E-poçtunu təsdiqlə.' });
       const previousAuthorization = req.securityContext?.assertAuthorized;
-      if (req.securityContext) req.securityContext.assertAuthorized = async () => {
-        await Promise.all([this.assertEnabled(), req.securityContext.assertLease?.(), previousAuthorization?.()]);
+      if (req.securityContext) req.securityContext.assertAuthorized = async (options = {}) => {
+        await Promise.all([this.assertEnabled(options), req.securityContext.assertLease?.(options), previousAuthorization?.(options)]);
       };
       const guest = !req.user;
       if (guest && (/^\/api\/(?:up|user|artifacts)(?:\/|$)/i.test(req.path) || /^\/api\/ask\/research(?:\/|$)/i.test(req.path))) return res.status(401).json({ code: 'AUTH_REQUIRED' });
@@ -165,7 +201,7 @@ export class AiPolicy {
         if (/^\/api\/strategy(?:\/|$)/i.test(req.path) && !(req.method === 'POST' && /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path))) notice = GUEST_RESTRICTION_NOTICES.strategy;
         if (req.method === 'POST' && /^\/api\/ask\/?$/i.test(req.path)) {
           const body = req.body || {};
-          if (body.thinkingLevel !== undefined && (typeof body.thinkingLevel !== 'string' || !['low', 'medium', 'high', 'off', 'auto'].includes(body.thinkingLevel))) {
+          if (body.thinkingLevel !== undefined && (typeof body.thinkingLevel !== 'string' || !['low', 'medium', 'high', 'xhigh', 'off', 'auto'].includes(body.thinkingLevel))) {
             return res.status(400).json({ code: 'VALIDATION_ERROR', error: 'Düşünmə səviyyəsi düzgün deyil.' });
           }
           const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -192,8 +228,38 @@ export class AiPolicy {
         }
         res.end();
       };
-      try { await this.assertEnabled(); }
-      catch (error) { return res.status(503).json({ code: error.code === 'EXECUTION_DISABLED' ? 'EXECUTION_DISABLED' : 'EXECUTION_UNAVAILABLE', error: 'Sorğu icra edilə bilmədi.' }); }
+      const token = randomUUID();
+      let preClaimedRequest = null;
+      const preId = (!guest && this.redis?.isReady && typeof req.get === 'function') ? req.get('Idempotency-Key') : '';
+      const preBodyId = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey.trim() : '';
+      const canOverlapEnableAndIdempotency =
+        !guest &&
+        this.redis?.isReady &&
+        preId &&
+        /^[A-Za-z0-9_-]{16,100}$/.test(preId) &&
+        (!preBodyId || preBodyId === preId);
+      if (canOverlapEnableAndIdempotency) {
+        const key = `security:request:${createHash('sha256').update(`${req.ownerId}:${req.path}:${preId}`).digest('hex')}`;
+        const fp = requestFingerprint(req.body);
+        const candidate = JSON.stringify({ state: 'reserved', fingerprint: fp, token });
+        const [enabledError, nxResult] = await Promise.all([
+          this.assertEnabled().then(() => null, error => error),
+          this.redis.set(key, candidate, { NX: true, EX: 900 }).then(
+            value => ({ ok: true, value }),
+            error => ({ ok: false, error }),
+          ),
+        ]);
+        if (enabledError) {
+          if (nxResult.ok && nxResult.value) {
+            await this.redis.eval("if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) end; return 0", { keys: [key], arguments: [candidate] }).catch(() => {});
+          }
+          return res.status(503).json({ code: enabledError.code === 'EXECUTION_DISABLED' ? 'EXECUTION_DISABLED' : 'EXECUTION_UNAVAILABLE', error: 'Sorğu icra edilə bilmədi.' });
+        }
+        preClaimedRequest = { key, fp, candidate, nxResult };
+      } else {
+        try { await this.assertEnabled(); }
+        catch (error) { return res.status(error.code === 'EXECUTION_DISABLED' ? 503 : 503).json({ code: error.code === 'EXECUTION_DISABLED' ? 'EXECUTION_DISABLED' : 'EXECUTION_UNAVAILABLE', error: 'Sorğu icra edilə bilmədi.' }); }
+      }
       let controller;
       if (!this.redis?.isReady) {
         if (this.env.NODE_ENV === 'production' && (this.env.REDIS_URL || this.env.REQUIRE_REDIS === 'true')) {
@@ -291,7 +357,6 @@ export class AiPolicy {
       let replayResult;
       const isUpRequest = /^\/api\/up\/challenges(?:\/|$)/i.test(req.path);
       const isDurableStrategyRequest = /^\/api\/strategy\/(?:generate|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path);
-      const token = randomUUID();
       let finished = false, handlerEntered = false;
       if (req.securityContext) {
         req.securityContext.markMutationPending = () => {
@@ -345,14 +410,25 @@ export class AiPolicy {
       try {
         if (guest) await this.turnstile(req);
         this.ready();
-        const id = req.get('Idempotency-Key');
-        if (!id || !/^[A-Za-z0-9_-]{16,100}$/.test(id)) throw fail('IDEMPOTENCY_KEY_REQUIRED', 400);
-        const bodyId = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey.trim() : '';
-        if (bodyId && bodyId !== id) throw fail('IDEMPOTENCY_CONFLICT', 409);
-        requestKey = `security:request:${createHash('sha256').update(`${req.ownerId}:${req.path}:${id}`).digest('hex')}`;
-        fingerprint = requestFingerprint(req.body);
-        const candidate = JSON.stringify({ state: 'reserved', fingerprint, token });
-        if (await this.redis.set(requestKey, candidate, { NX: true, EX: 900 })) requestRecord = candidate;
+        let nxClaimed;
+        let candidate;
+        if (preClaimedRequest) {
+          requestKey = preClaimedRequest.key;
+          fingerprint = preClaimedRequest.fp;
+          candidate = preClaimedRequest.candidate;
+          if (!preClaimedRequest.nxResult.ok) throw preClaimedRequest.nxResult.error;
+          nxClaimed = preClaimedRequest.nxResult.value;
+        } else {
+          const id = req.get('Idempotency-Key');
+          if (!id || !/^[A-Za-z0-9_-]{16,100}$/.test(id)) throw fail('IDEMPOTENCY_KEY_REQUIRED', 400);
+          const bodyId = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey.trim() : '';
+          if (bodyId && bodyId !== id) throw fail('IDEMPOTENCY_CONFLICT', 409);
+          requestKey = `security:request:${createHash('sha256').update(`${req.ownerId}:${req.path}:${id}`).digest('hex')}`;
+          fingerprint = requestFingerprint(req.body);
+          candidate = JSON.stringify({ state: 'reserved', fingerprint, token });
+          nxClaimed = await this.redis.set(requestKey, candidate, { NX: true, EX: 900 });
+        }
+        if (nxClaimed) requestRecord = candidate;
         else {
           previousRequest = await this.redis.get(requestKey);
           const existing = JSON.parse(previousRequest || 'null');
@@ -373,11 +449,17 @@ export class AiPolicy {
         };
         const actor = req.ownerId, ip = this.ipKey(req), day = new Date().toISOString().slice(0, 10);
         if (sharedAsk) {
-          const retryAfter = await reserveAskRate(this.redis, actor, ip, token);
+          const [retryAfter, lease] = await Promise.all([
+            reserveAskRate(this.redis, actor, ip, token),
+            acquireSharedAskLease(this.redis, actor, token),
+          ]);
           if (retryAfter > 0) {
+            await lease?.release().catch(() => {});
             res.setHeader('Retry-After', String(retryAfter));
             throw fail('RATE_LIMITED', 429);
           }
+          if (!lease) throw fail('EXECUTION_BUSY', 429);
+          sharedAskLease = lease;
         } else {
           const keys = [`security:rate:${actor}`, `security:rate-ip:${ip}`];
           const allowed = await this.redis.eval("for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); if n == 1 then redis.call('expire',k,600) end end; return 1", { keys, arguments: ['60'] });
@@ -423,10 +505,7 @@ export class AiPolicy {
             req.guestMessagesAvailable = req.remainingGuestMessages + 1;
           }
         }
-        if (sharedAsk) {
-          sharedAskLease = await acquireSharedAskLease(this.redis, actor, token);
-          if (!sharedAskLease) throw fail('EXECUTION_BUSY', 429);
-        } else {
+        if (!sharedAsk) {
           lock = `security:owner-execution:${actor}`;
           if (!await this.redis.set(lock, token, { NX: true, PX: 180000 })) { lock = null; throw fail('EXECUTION_BUSY', 429); }
         }
@@ -437,8 +516,40 @@ export class AiPolicy {
           requestRecord = candidate;
         }
         controller = new AbortController();
-        req.securityContext.assertLease = async () => {
-          const owned = sharedAskLease ? await sharedAskLease.isOwned() : this.redis.isReady && await this.redis.get(lock) === token;
+        let lastLeaseOkAt = 0;
+        let inFlightLeaseCheck = null;
+        req.securityContext.assertLease = async ({ maxStaleMs = 0 } = {}) => {
+          const now = Date.now();
+          const checkOwned = () => sharedAskLease
+            ? sharedAskLease.isOwned()
+            : (this.redis.isReady ? Promise.resolve(this.redis.get(lock)).then(v => v === token) : Promise.resolve(false));
+          if (maxStaleMs > 0 && lastLeaseOkAt && (now - lastLeaseOkAt < maxStaleMs)) {
+            if (now - lastLeaseOkAt >= 250 && !inFlightLeaseCheck) {
+              inFlightLeaseCheck = checkOwned()
+                .then(owned => {
+                  lastLeaseOkAt = owned ? Date.now() : 0;
+                  return owned;
+                })
+                .catch(() => {
+                  lastLeaseOkAt = 0;
+                  return false;
+                })
+                .finally(() => { inFlightLeaseCheck = null; });
+            }
+            return;
+          }
+          if (!inFlightLeaseCheck) {
+            inFlightLeaseCheck = checkOwned()
+              .then(owned => {
+                lastLeaseOkAt = owned ? Date.now() : 0;
+                return owned;
+              }, err => {
+                lastLeaseOkAt = 0;
+                throw err;
+              })
+              .finally(() => { inFlightLeaseCheck = null; });
+          }
+          const owned = await inFlightLeaseCheck;
           if (!owned) throw fail('EXECUTION_LOCK_LOST');
         };
         req.securityContext.route = req.path;
@@ -478,7 +589,7 @@ export class AiPolicy {
     };
   }
   async reserveProvider(context, params, reservation = {}) {
-    await this.assertEnabled();
+    if (!reservation?.[CONCURRENT_PAUSE_CHECK_SYMBOL]) await this.assertEnabled();
     this.ready();
     const modelKey = params?.model || 'default';
     const price = resolveEffectiveModelPricing(modelKey, this.env);

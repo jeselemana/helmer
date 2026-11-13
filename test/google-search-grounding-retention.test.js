@@ -7,7 +7,7 @@ import { getRelevantUserContext } from '../src/services/ai/personal-context.js';
 import { LearningLoopService } from '../src/services/learning/learning-loop-service.js';
 import { TelemetryService } from '../src/services/telemetry/telemetry-service.js';
 
-test('1. Model Request Isolation: Google Search grounded responses are never passed to subsequent model contents', () => {
+test('1. Ask Conversational Continuity: synthesized grounded assistant text is retained for active Ask turns without forwarding raw grounding metadata', () => {
   const limits = createAskConfig({});
   const fileCache = { resolveFile: () => null };
 
@@ -31,9 +31,12 @@ test('1. Model Request Isolation: Google Search grounded responses are never pas
 
   const contents = buildAskContents(messages, 'owner-test', fileCache, limits);
 
-  // The grounded assistant response must NOT appear in the model contents
+  // Synthesized assistant reply text is preserved so Ask doesn't re-answer prior turns,
+  // while raw groundingMetadata/sources are never serialized into contents.
   const stringified = JSON.stringify(contents);
-  assert.ok(!stringified.includes('5.25% based on Google Search'), 'Grounded response content must be excluded from model request');
+  assert.ok(stringified.includes('5.25% based on Google Search'), 'Synthesized assistant reply text must remain in Ask contents');
+  assert.ok(!stringified.includes('https://example.com/rates'), 'Raw grounding URLs must not be forwarded into contents');
+  assert.ok(!stringified.includes('groundingChunks'), 'Raw groundingMetadata must not be forwarded into contents');
 
   // The ungrounded assistant response MUST remain in contents
   assert.ok(stringified.includes('In 2025 it was conceptual without search'), 'Ungrounded assistant response must be retained in model request');

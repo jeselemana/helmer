@@ -634,7 +634,7 @@ function stepDownThinkingLevel(level) {
 export function createBuildOrchestrator({ gemini = getBuildVertexClient, config = buildConfig, logger = record => console.warn("Build provider failure", record), onStage = () => {} } = {}) {
   const routes = new Map();
   const scoutCheckpoints = new Map();
-  return async function orchestrate({ schema, name, instructions, input, routingInput = input, searchIntentInput = routingInput, personalizationContext = "", ownerId, signal, onChunk, onUsage, onEstimate, assessment = false, estimateOnly = false, refinement = false, buildMode = "auto", fasterThinkingLevel = "medium" }) {
+  return async function orchestrate({ schema, name, instructions, input, routingInput = input, searchIntentInput = routingInput, personalizationContext = "", ownerId, signal, onChunk, onUsage, onEstimate, assessment = false, estimateOnly = false, refinement = false, buildMode = "auto", fasterThinkingLevel = "medium", buildDecision = null }) {
     if (!ownerId) throw failure("EXECUTION_UNAVAILABLE", 503);
     if (typeof input !== "string" || input.length > config.maxInputChars || typeof routingInput !== "string" || routingInput.length > config.maxInputChars ||
         typeof personalizationContext !== "string" || personalizationContext.length > 3000) throw failure("BUILD_CONTEXT_LIMIT", 413);
@@ -924,6 +924,18 @@ export function createBuildOrchestrator({ gemini = getBuildVertexClient, config 
         return result.data;
       }
       const taskSignals = analyzeBuildTaskSignals(searchIntentInput, { refinement, estimateOnly });
+      if (
+        buildDecision?.needsMarketSearch === true &&
+        !estimateOnly &&
+        config.searchEnabled &&
+        !taskSignals.explicitNoSearch &&
+        !taskSignals.isSimpleRefinement
+      ) {
+        taskSignals.mandatorySearch = true;
+        if (!taskSignals.mandatorySearchReasons.includes("decision_market_search")) {
+          taskSignals.mandatorySearchReasons.push("decision_market_search");
+        }
+      }
       if (taskSignals.mandatorySearch && !config.searchEnabled) throw failure("GROUNDING_UNAVAILABLE", 422);
       const routeKey = createHash("sha256").update(`${ownerId}:${normalizedBuildMode}:${normalizedFasterThinking}:${routingInput}`).digest("hex");
       const checkpointKey = `${ownerId}:${routeKey}:${refinement ? "refine" : "gen"}`;

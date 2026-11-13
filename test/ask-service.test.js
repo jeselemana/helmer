@@ -32,7 +32,7 @@ test('JSON and SSE share bounded history, Gemini model, thinking and search conf
   const history = Array.from({ length: 80 }, (_, i) => ({ role: i % 2 ? 'user' : 'assistant', content: `Turn ${i}` }));
   for (const onChunk of [undefined, async () => {}]) {
     const result = await f.generate({ messages: history, thinkingLevel: 'high', enableSearch: true, requireGrounding: true, onChunk });
-    assert.equal(result.text, 'Verified.'); assert.equal(result.model, 'gemini-3.8-flash');
+    assert.equal(result.text, 'Verified.'); assert.equal(result.model, 'gemini-4-hydrogen');
   }
   assert.deepEqual(f.calls[0].contents, f.calls[1].contents);
   for (const call of f.calls) {
@@ -41,6 +41,21 @@ test('JSON and SSE share bounded history, Gemini model, thinking and search conf
     assert.deepEqual(call.config.thinkingConfig, { thinkingLevel: 'HIGH' });
     assert.deepEqual(call.config.tools, [{ googleSearch: {} }]);
     assert.equal(call.contents.at(-1).parts.at(-1).text, 'Turn 79');
+  }
+});
+
+test('Gemini 4 Hydrogen maps low, medium, high and xhigh to thinkingConfig.thinkingLevel and off to thinkingBudget: 0', async () => {
+  const f = fixture([{ text: 'OK' }]);
+  for (const [input, expected] of [
+    ['low', { thinkingLevel: 'LOW' }],
+    ['medium', { thinkingLevel: 'MEDIUM' }],
+    ['high', { thinkingLevel: 'HIGH' }],
+    ['xhigh', { thinkingLevel: 'XHIGH' }],
+    ['off', { thinkingBudget: 0 }],
+  ]) {
+    const result = await f.generate({ messages, thinkingLevel: input });
+    assert.equal(result.model, 'gemini-4-hydrogen');
+    assert.deepEqual(f.calls.at(-1).config.thinkingConfig, expected);
   }
 });
 
@@ -224,6 +239,21 @@ test('optional search never retries authentication, rate, budget or configuratio
     await assert.rejects(createAskService({ getClient: () => client })({ messages, enableSearch: true }));
     assert.equal(calls, 1);
   }
+});
+
+test('Ask service applies fast-streaming directive only at low effort without files', async () => {
+  const f = fixture([{ text: 'OK' }]);
+  await f.generate({ messages, thinkingLevel: 'low' });
+  const lowSystem = f.calls.at(-1).config.systemInstruction;
+  assert.match(lowSystem, /LOW THINKING \/ FAST STREAMING/);
+  assert.match(lowSystem, /untrusted reference data/);
+  assert.ok(lowSystem.endsWith('start streaming your clear, direct answer immediately.'));
+
+  await f.generate({ messages, thinkingLevel: 'high' });
+  assert.doesNotMatch(f.calls.at(-1).config.systemInstruction, /LOW THINKING \/ FAST STREAMING/);
+
+  await f.generate({ messages: [{ role: 'user', content: 'analyze', file: { name: 'doc.txt', textContent: 'data' } }], thinkingLevel: 'low' });
+  assert.doesNotMatch(f.calls.at(-1).config.systemInstruction, /LOW THINKING \/ FAST STREAMING/);
 });
 
 test('Ask web capability never restores rejected low-quality or credential-bearing sources', async t => {

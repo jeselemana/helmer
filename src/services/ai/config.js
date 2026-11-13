@@ -15,7 +15,7 @@ export const aiConfig = Object.freeze({
   enableBuildSearchGrounding: process.env.ENABLE_BUILD_SEARCH_GROUNDING !== "false",
   askModel: process.env.OPENAI_ASK_MODEL || "gpt-5.6-luna",
   askComplexModel: process.env.OPENAI_ASK_COMPLEX_MODEL || "gpt-5.6-terra",
-  askGeminiModel: "gemini-3.8-flash",
+  askGeminiModel: "gemini-4-hydrogen",
   geminiMaxOutputTokens: positiveInteger(process.env.GEMINI_MAX_OUTPUT_TOKENS, 65536),
   askMaxOutputTokens: positiveInteger(process.env.ASK_MAX_OUTPUT_TOKENS, 8192),
   askSearchTimeoutMs: positiveInteger(process.env.ASK_SEARCH_TIMEOUT_MS, 18000),

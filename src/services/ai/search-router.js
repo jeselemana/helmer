@@ -43,6 +43,21 @@ const HARD_EXTERNAL_REALTIME_FACT_PATTERN = /(?:202[4-9]|203[0-9]|\b(?:az[əe]rb
 
 const STRICT_REGULATORY_GROUNDING_PATTERN = /(?:r[əe]smi\s+inflyasiya\s+faizi|m[əe]rk[əe]zi\s+bank[ıi]n\s+faiz\s+d[əe]r[əe]c[əe]si)/i;
 
+const SHORT_VERIFICATION_FOLLOWUP_PATTERN = /^(?:d[əe]qiq\??|[əe]mins[əe]n\??|do[gğ]rudan\??|h[əe]qiq[əe]t[əe]n\??|d[uü]zd[uü]r\??|yenid[əe]n\s+c[əe]hd\s+et|t[əe]krar\s+(?:c[əe]hd\s+et|yoxla|axtar|ara[sş]d[ıi]r)|bir\s+d[əe]\s+(?:yoxla|bax|ara[sş]d[ıi]r)|olmayacaq\??|yoxla|exact(?:ly)?\??|really\??|are\s+you\s+sure\??|sure\??|verify\??|retry|try\s+again|check\s+again|m[əe]nb[əe]\??|sources?\??|link\??)[!?.…\s]*$/i;
+
+export function hasGroundedAssistantHistory(messages = []) {
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  return messages.some(
+    (m) =>
+      m &&
+      m.role === "assistant" &&
+      (m.searchGrounded === true ||
+        m.grounded === true ||
+        (Array.isArray(m.sources) && m.sources.length > 0) ||
+        Boolean(m.groundingMetadata))
+  );
+}
+
 /**
  * Evaluates whether a prompt or query should trigger real-time Google search grounding.
  *
@@ -114,15 +129,22 @@ export function shouldEnableSearch(query = "", options = {}) {
  * @param {string} [params.prompt] Current user message prompt.
  * @param {Array} [params.messages] Conversation history messages.
  * @param {boolean} [params.hasStrategyContext] Whether a strategy context is attached.
+ * @param {boolean} [params.hasGroundedHistory] Whether prior assistant turns used web grounding.
  * @returns {{ enableSearch: boolean, requireGrounding: boolean, intent: string, prompt: string }}
  */
-export function evaluateSearchRoute({ prompt = "", messages = [], hasStrategyContext = false } = {}) {
+export function evaluateSearchRoute({ prompt = "", messages = [], hasStrategyContext = false, hasGroundedHistory } = {}) {
   const lastUserMsg = typeof prompt === "string" && prompt.trim()
     ? prompt.trim()
     : (Array.isArray(messages) ? messages.filter((m) => m && m.role === "user").at(-1)?.content || "" : "");
 
+  const groundedHistory = typeof hasGroundedHistory === "boolean"
+    ? hasGroundedHistory
+    : hasGroundedAssistantHistory(messages);
+
   let enableSearch = false;
-  if (hasStrategyContext) {
+  if (groundedHistory && SHORT_VERIFICATION_FOLLOWUP_PATTERN.test(lastUserMsg) && !ASSISTANT_IDENTITY_GUARD_PATTERN.test(lastUserMsg)) {
+    enableSearch = true;
+  } else if (hasStrategyContext) {
     // When a strategy or task is selected as context, internal terms (competitors, budget, pricing)
     // belong to the strategy document. Only enable live web search if the user explicitly requests
     // online lookup, provides an external URL, or queries external AI models / real-time facts.

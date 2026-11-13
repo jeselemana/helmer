@@ -1651,13 +1651,14 @@ function createAskThinkingControls(isEn, onToggle = null) {
     }
   };
 
-  ["low", "medium", "high"].forEach((lvl) => {
+  ["low", "medium", "high", "xhigh"].forEach((lvl) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = `ask-thinking-pill-btn${state.askThinkingLevel === lvl ? " is-active" : ""}`;
+    btn.dataset.thinkingLevel = lvl;
     btn.setAttribute("role", "radio");
     btn.setAttribute("aria-checked", String(state.askThinkingLevel === lvl));
-    btn.textContent = { low: "Low", medium: "Medium", high: "High" }[lvl];
+    btn.textContent = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra" }[lvl];
 
     btn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -1720,7 +1721,9 @@ function createAskModelSelector(isEn) {
   const getSelectorLabel = () => {
     if (!state.askThinkingEnabled) return "Auto";
     if (state.askThinkingLevel === "low") return "Thinking · Low";
-    return state.askThinkingLevel === "high" ? "Thinking · High" : "Thinking · Med";
+    if (state.askThinkingLevel === "high") return "Thinking · High";
+    if (state.askThinkingLevel === "xhigh") return "Thinking · Extra";
+    return "Thinking · Med";
   };
   const nameSpan = element("span", "ask-model-name", getSelectorLabel());
   const chevron = element("span", "ask-model-chevron-icon");
@@ -1755,8 +1758,13 @@ function createAskModelSelector(isEn) {
   const autoBadge = element("div", "ask-model-option-badge");
   autoBadge.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>';
   const autoInfo = element("div", "ask-model-option-info");
-  autoInfo.append(
+  const autoTitleRow = element("div", "ask-model-title-row");
+  autoTitleRow.append(
     element("strong", "", "Auto"),
+    element("span", "ask-model-chip", isEn ? "New" : "Yeni")
+  );
+  autoInfo.append(
+    autoTitleRow,
     element("small", "", isEn ? "Automatic smart mode" : "Avtomatik rejim")
   );
   autoLeading.append(autoBadge, autoInfo);
@@ -2077,8 +2085,13 @@ function openMobileModelSheet(mode = "ask") {
   const autoIcon = element("div", "mobile-model-card-icon");
   autoIcon.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2L14.4 8.6L21 11L14.4 13.4L12 20L9.6 13.4L3 11L9.6 8.6L12 2Z"/></svg>';
   const autoCopy = element("div", "mobile-model-card-copy");
-  autoCopy.append(
+  const autoTitleRow = element("div", "ask-model-title-row");
+  autoTitleRow.append(
     element("strong", "", t("ask.modelSheet.autoTitle")),
+    element("span", "ask-model-chip", t("ask.modelSheet.newBadge") || (isEn ? "New" : "Yeni"))
+  );
+  autoCopy.append(
+    autoTitleRow,
     element("small", "", t("ask.modelSheet.autoDesc"))
   );
   autoLeading.append(autoIcon, autoCopy);
@@ -2775,7 +2788,7 @@ const state = {
   askThinkingLevel: (() => {
     try {
       const saved = localStorage.getItem("helmer_ask_thinking_level");
-      if (["low", "medium", "high"].includes(saved)) return saved;
+      if (["low", "medium", "high", "xhigh"].includes(saved)) return saved;
     } catch { }
     return "medium";
   })(),
@@ -2862,7 +2875,7 @@ function isAskThinkingActive(message) {
   const meta = getAskMessageMeta(message);
   const level = meta.thinkingLevel || message?.thinkingLevel;
   if (level) {
-    return level === "medium" || level === "high";
+    return level === "medium" || level === "high" || level === "xhigh";
   }
   return Boolean(state.askThinkingEnabled && state.askThinkingLevel && state.askThinkingLevel !== "low" && state.askThinkingLevel !== "off");
 }
@@ -3513,8 +3526,7 @@ function isHomePage() {
 function updateMobileActiveModelName() {
   const el = document.querySelector("#mobileActiveModelName");
   if (!el) return;
-  const isFlash = state.askModel === "gemini-3.8-flash";
-  el.textContent = isFlash ? "Flash" : "Helmer";
+  el.textContent = "Helmer";
 }
 
 function syncMode() {
@@ -7724,7 +7736,7 @@ async function thinkDeeperWithHigh(messageIndex) {
   recordLearningSignal(assistantMsg.interactionId, { regenerated: true });
 
   assistantMsg.content = "";
-  assistantMsg.model = "gemini-3.8-flash";
+  assistantMsg.model = "gemini-4-hydrogen";
   assistantMsg.isStreaming = true;
   setAskMessageMeta(assistantMsg, {
     thinkingLevel: "high",
@@ -7759,7 +7771,7 @@ async function thinkDeeperWithHigh(messageIndex) {
       },
       body: JSON.stringify({
         messages: historyMessages.map(sanitizeAskMessageForApi),
-        model: "gemini-3.8-flash",
+        model: "gemini-4-hydrogen",
         thinkingLevel: "high",
         strategyId: state.askStrategyId || undefined,
         taskId: state.askTaskId || undefined,
@@ -7786,7 +7798,7 @@ async function thinkDeeperWithHigh(messageIndex) {
           },
           body: JSON.stringify({
             messages: historyMessages.map(sanitizeAskMessageForApi),
-            model: "gemini-3.8-flash",
+            model: "gemini-4-hydrogen",
             thinkingLevel: "high",
             strategyId: state.askStrategyId || undefined,
             taskId: state.askTaskId || undefined,
@@ -8162,8 +8174,8 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
     return;
   }
 
-  const chosenModel = "gemini-3.8-flash";
-  const initialPlaceholderModel = "gemini-3.8-flash";
+  const chosenModel = "gemini-4-hydrogen";
+  const initialPlaceholderModel = "gemini-4-hydrogen";
   const assistantMsg = {
     role: "assistant",
     content: "",
@@ -8193,7 +8205,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
   activeAskReader = null;
   activeAskTypewriter = null;
 
-  const apiThinkingLevel = (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking))
+  const apiThinkingLevel = (state.askThinkingEnabled && ["low", "medium", "high", "xhigh", "off"].includes(currentAskThinking))
     ? currentAskThinking
     : undefined;
 
@@ -9304,8 +9316,8 @@ function showLoadingAskModal(initialQuery) {
         },
         body: JSON.stringify({
           messages: thread.map(sanitizeAskMessageForApi),
-          model: "gemini-3.8-flash",
-          thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
+          model: "gemini-4-hydrogen",
+          thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "xhigh", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
           strategyId: state.askStrategyId || undefined,
           taskId: state.askTaskId || undefined,
           chatId: state.askChatId || undefined,
@@ -9328,8 +9340,8 @@ function showLoadingAskModal(initialQuery) {
             },
             body: JSON.stringify({
               messages: thread.map(sanitizeAskMessageForApi),
-              model: "gemini-3.8-flash",
-              thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
+              model: "gemini-4-hydrogen",
+              thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "xhigh", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
               strategyId: state.askStrategyId || undefined,
               taskId: state.askTaskId || undefined,
               chatId: state.askChatId || undefined,
@@ -11494,7 +11506,7 @@ function resetAskForStrategy(strategyId, force = false) {
 }
 
 async function ensureStrategyAskContext() {
-  state.askModel = "gemini-3.8-flash";
+  state.askModel = "gemini-4-hydrogen";
   if (state.savedId) {
     resetAskForStrategy(state.savedId);
     return true;
@@ -12080,7 +12092,7 @@ function buildRefinementPanel() {
       openGuestRestrictionModal(GUEST_RESTRICTION_NOTICES.strategy);
       return;
     }
-    state.askModel = "gemini-3.8-flash";
+    state.askModel = "gemini-4-hydrogen";
     if (state.savedId) resetAskForStrategy(state.savedId);
     else resetAskForStrategy("", true);
     state.strategyAskOpen = true;

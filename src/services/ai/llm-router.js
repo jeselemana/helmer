@@ -383,8 +383,8 @@ export async function routeStructuredGeneration({ schema, name, instructions, in
     });
   }
 
-  // 1. Primary: Try Gemini 3.8 Flash via Vertex AI / Google GenAI
-  if (hasGeminiConfiguration() && (!askRoute || askRoute === "gemini-3.8-flash")) {
+  // 1. Primary: Try Gemini via Vertex AI / Google GenAI
+  if (hasGeminiConfiguration() && (!askRoute || askRoute === "gemini-3.8-flash" || askRoute === "gemini-4-hydrogen")) {
     try {
       const gemini = getGeminiClient();
       const geminiSchema = formatGeminiResponseSchema(schema, name);

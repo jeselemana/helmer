@@ -102,6 +102,7 @@ async function fixture(t, { redis = null, limits, parallel = false } = {}) {
     generateContentStream: async params => { calls.push(params); return f.stream(params); },
   } }, 'gemini');
   const strategyRepository = { getById: async (id, owner) => id === strategyId && owner === strategyOwner ? { id, ownerId: owner, title: 'Private strategy', strategy: { secret: 'Tenant strategy', ...f.strategy } } : null };
+  f.strategyRepository = strategyRepository;
   const plannerRepository = { list: async owner => owner === ownerA ? [{ id: taskId, ownerId: owner, text: 'Private task' }] : [] };
   const app = express(); app.use(express.json());
   // Fixture identities replace only session login. Production privacy, AI policy,
@@ -483,4 +484,41 @@ test('Ask retains production CSRF rejection for foreign, missing and insecure or
     assert.equal((await fetch(url, { method: 'POST', headers })).status, 403);
   }
   assert.equal((await fetch(url, { method: 'POST', headers: { Origin: 'https://helmer.example', 'Sec-Fetch-Site': 'same-origin' } })).status, 200);
+});
+
+test('Ask HTTP: skips strategy provenance reads on plain Ask while enforcing them on strategy-linked chats', async t => {
+  const f = await fixture(t);
+  let readAllCalls = 0, provenanceCalls = 0;
+  f.strategyRepository.readAll = async () => { readAllCalls++; return []; };
+  f.strategyRepository.loadOwnerProvenance = async () => { provenanceCalls++; return []; };
+
+  const plainRes = await f.ask({ stream: false });
+  assert.equal(plainRes.status, 200);
+  assert.equal(readAllCalls, 0);
+  assert.equal(provenanceCalls, 0);
+
+  f.strategy = { searchGrounded: true };
+  const linkedChat = await f.chatRepository.saveChat({ ownerId: f.ownerA, strategyId: f.strategyId, messages: [{ role: 'user', content: 'Hi' }] });
+  const linkedRes = await f.ask({ stream: false, chatId: linkedChat.id, chatRevision: linkedChat.revision, messages: [{ role: 'user', content: 'Follow-up' }] });
+  assert.equal(linkedRes.status, 422);
+  assert.equal((await linkedRes.json()).code, 'GROUNDED_STRATEGY_RESTRICTED');
+  assert.ok(readAllCalls >= 1);
+  assert.ok(provenanceCalls >= 1);
+});
+
+test('Ask HTTP: routes to gemini-4-hydrogen with low, medium, high, xhigh thinking and enforces guest xhigh restriction', async t => {
+  const f = await fixture(t), guest = 'guest_fixture';
+  for (const level of ['low', 'medium', 'high', 'xhigh']) {
+    const response = await f.ask({ stream: false, thinkingLevel: level });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.model, 'gemini-4-hydrogen');
+    assert.equal(f.calls.at(-1).model, 'gemini-4-hydrogen');
+    assert.deepEqual(f.calls.at(-1).config.thinkingConfig, { thinkingLevel: level.toUpperCase() });
+  }
+  const callsBeforeGuest = f.calls.length;
+  const guestXhigh = await f.ask({ thinkingLevel: 'xhigh' }, guest);
+  assert.equal(guestXhigh.status, 401);
+  assert.equal((await guestXhigh.json()).reply, GUEST_RESTRICTION_NOTICES.thinking);
+  assert.equal(f.calls.length, callsBeforeGuest);
 });

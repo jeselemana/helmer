@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PrivacyPolicy, privacySnapshot, executionContext } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
+import { AiPolicy } from '../src/services/security/ai-policy.js';
+import { createHelmerDecisionRouter } from '../src/services/ai/decision-router.js';
 
 function deferred() {
   let resolve;
@@ -212,4 +214,117 @@ test('a failed grounded prelude check publishes no buffered events and releases 
     await assert.rejects(iterator.next(), { code: 'EXECUTION_REVOKED' });
   });
   assert.equal(controller.signal.aborted, true); assert.equal(releases, 1);
+});
+
+test('AiPolicy coalesces stream-chunk pause checks within maxStaleMs while keeping fresh kill-switch enforcement', async () => {
+  let redisGets = 0;
+  let paused = '0';
+  const redis = {
+    isReady: true,
+    get: async key => {
+      assert.equal(key, 'security:ai-paused');
+      redisGets++;
+      return paused;
+    },
+  };
+  const policy = new AiPolicy({ redis, env: {} });
+  await policy.assertEnabled();
+  assert.equal(redisGets, 1);
+
+  await Promise.all([
+    policy.assertEnabled({ maxStaleMs: 1000 }),
+    policy.assertEnabled({ maxStaleMs: 1000 }),
+    policy.assertEnabled({ maxStaleMs: 1000 }),
+  ]);
+  assert.equal(redisGets, 1, 'stream-chunk checks inside maxStaleMs reuse fresh verification without per-chunk Redis RTT');
+
+  paused = '1';
+  await assert.rejects(() => policy.assertEnabled(), { code: 'EXECUTION_DISABLED' });
+  assert.equal(redisGets, 2, 'fresh checks (maxStaleMs=0) always observe kill switch immediately');
+});
+
+test('wrapProvider parallel pre-flight cleanly refunds and releases reservation when authorization rejects', async t => {
+  let refunded = 0, released = 0, calledProvider = false;
+  configureProviderPolicy({
+    assertEnabled: async () => {},
+    reserveProvider: async () => {
+      const release = async () => { released++; };
+      release.refund = async () => { refunded++; };
+      return release;
+    },
+  });
+  t.after(() => configureProviderPolicy(undefined));
+
+  const controller = new AbortController();
+  const context = {
+    ownerId: 'owner',
+    signal: controller.signal,
+    controller,
+    assertAuthorized: async () => {
+      throw Object.assign(new Error('Revoked'), { code: 'EXECUTION_REVOKED' });
+    },
+  };
+  const client = wrapProvider({
+    models: {
+      generateContent: async () => {
+        calledProvider = true;
+        return { text: 'should not execute' };
+      },
+    },
+  }, 'gemini');
+
+  await executionContext.run(context, async () => {
+    await assert.rejects(
+      () => client.models.generateContent({ model: 'gemini-4-hydrogen', contents: 'hi', config: {} }),
+      { code: 'EXECUTION_REVOKED' },
+    );
+  });
+  assert.equal(calledProvider, false);
+  assert.equal(refunded, 1);
+  assert.equal(released, 1);
+});
+
+test('HelmerDecisionRouter uses 0 ms fast-path only for ungrounded pure greetings', async () => {
+  let vertexCalls = 0;
+  const router = createHelmerDecisionRouter({
+    env: { GEMINI_API_KEY: 'AQ.vertex-express', GEMINI_USE_VERTEX: 'true' },
+    hasDecisionApiConfigFn: () => false,
+    getVertexClientFn: () => ({
+      models: {
+        generateContent: async () => {
+          vertexCalls++;
+          return {
+            text: JSON.stringify({ s: true, r: false }),
+          };
+        },
+      },
+    }),
+  });
+
+  const greeting = await router.routeAsk({ prompt: 'Salam!' });
+  assert.equal(greeting.routerSource, 'fast_path');
+  assert.equal(greeting.enableSearch, false);
+  assert.equal(greeting.latencyMs, 0);
+  assert.equal(vertexCalls, 0);
+
+  const afterGrounded = await router.routeAsk({
+    prompt: 'Yaxşı',
+    hasGroundedHistory: true,
+  });
+  assert.equal(vertexCalls, 1);
+  assert.equal(afterGrounded.routerSource, 'vertex_flash_lite');
+
+  const explicitSearch = await router.routeAsk({ prompt: 'Araşdır' });
+  assert.equal(explicitSearch.routerSource, 'fast_path');
+  assert.equal(explicitSearch.enableSearch, true);
+  assert.equal(explicitSearch.latencyMs, 0);
+  assert.equal(vertexCalls, 1);
+
+  const groundedVerify = await router.routeAsk({
+    prompt: 'Dəqiq?',
+    hasGroundedHistory: true,
+  });
+  assert.equal(groundedVerify.routerSource, 'local_rules');
+  assert.equal(groundedVerify.enableSearch, true);
+  assert.equal(vertexCalls, 1);
 });

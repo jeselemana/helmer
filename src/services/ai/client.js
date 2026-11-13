@@ -150,3 +150,139 @@ export function getBuildVertexClient(location = null) {
 
   return buildVertexClients.get(targetLoc);
 }
+
+const decisionVertexClients = new Map();
+
+export function hasDecisionApiConfiguration(env = process.env) {
+  const apiKey = env?.GEMINI_API_KEY?.trim() || "";
+  return Boolean(apiKey && !apiKey.startsWith("AQ."));
+}
+
+export function resolveDecisionVertexConfig(env = process.env, existsSync = fs.existsSync, locationOverride = null) {
+  const location = (
+    locationOverride ||
+    env?.BUILD_VERTEX_LOCATION ||
+    env?.GOOGLE_CLOUD_LOCATION ||
+    env?.GOOGLE_CLOUD_BUILD_LOCATION ||
+    buildConfig.location ||
+    "us"
+  ).trim().toLowerCase();
+
+  const project = (env?.GOOGLE_CLOUD_PROJECT || env?.GCP_PROJECT || "").trim();
+  const credentialPath = env?.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  const apiKey = env?.GEMINI_API_KEY?.trim() || "";
+  const isVertexKey = apiKey.startsWith("AQ.");
+
+  if (/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(project) &&
+      (!credentialPath || existsSync(credentialPath)) &&
+      !(env?.NODE_ENV === "production" && credentialPath)) {
+    const baseUrl = resolveVertexBaseUrl(location);
+    return {
+      vertexai: true,
+      project,
+      location,
+      httpOptions: {
+        baseUrl,
+        apiVersion: "v1beta1",
+        timeout: 10000,
+        retryOptions: { attempts: 1 },
+      },
+    };
+  }
+
+  if (isVertexKey || env?.GEMINI_USE_VERTEX === "true" || hasGeminiConfiguration(env)) {
+    const { options } = resolveGeminiClientOptions(env, existsSync);
+    return {
+      ...options,
+      vertexai: true,
+      ...(options.vertexai && !isVertexKey ? { location } : {}),
+      httpOptions: {
+        ...(options.httpOptions || {}),
+        timeout: 10000,
+      },
+    };
+  }
+
+  throw Object.assign(new Error("Decision Vertex fallback service is not configured."), {
+    code: "AI_NOT_CONFIGURED",
+    status: 503,
+  });
+}
+
+export function getDecisionVertexClient(location = null, env = process.env) {
+  const options = resolveDecisionVertexConfig(env, fs.existsSync, location);
+  const cacheKey = `${options.location || "default"}|${options.project || ""}|${options.apiKey ? "key" : "adc"}`;
+  if (!decisionVertexClients.has(cacheKey)) {
+    decisionVertexClients.set(cacheKey, wrapProvider(new GoogleGenAI(options), "gemini"));
+  }
+  return decisionVertexClients.get(cacheKey);
+}
+
+const SAFETY_BLOCK_PATTERN = /(?:safety|content_blocked|prohibited_content|blocklist|blocked)/i;
+
+export async function callDecisionsApi({
+  model = "gemini-decision-1",
+  input,
+  questions,
+  signal,
+  fetcher = fetch,
+  env = process.env,
+} = {}) {
+  const apiKey = env?.GEMINI_API_KEY?.trim() || "";
+  if (!apiKey || apiKey.startsWith("AQ.")) {
+    throw Object.assign(new Error("Decisions API developer key is not configured."), {
+      code: "AI_NOT_CONFIGURED",
+      status: 503,
+    });
+  }
+
+  const response = await fetcher("https://generativelanguage.googleapis.com/v1beta/decisions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
+    },
+    body: JSON.stringify({ model, input, questions }),
+    signal,
+  });
+
+  const rawText = await response.text();
+  let payload = null;
+  if (rawText) {
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      payload = null;
+    }
+  }
+
+  if (!response.ok) {
+    const errObj = payload?.error && typeof payload.error === "object" ? payload.error : {};
+    const statusText = `${errObj.status || ""} ${errObj.code || ""} ${errObj.message || ""} ${rawText}`.trim();
+    const isSafetyBlock = response.status === 400 && SAFETY_BLOCK_PATTERN.test(statusText);
+    if (isSafetyBlock) {
+      throw Object.assign(new Error("Decision request blocked by safety policy."), {
+        code: "AI_CONTENT_BLOCKED",
+        status: 400,
+        isSafetyBlock: true,
+        providerCode: errObj.status || "CONTENT_BLOCKED",
+      });
+    }
+    throw Object.assign(
+      new Error(`Decisions API request failed with status ${response.status}.`),
+      {
+        code: response.status === 429 ? "RATE_LIMITED" : "DECISION_API_ERROR",
+        status: response.status,
+      }
+    );
+  }
+
+  if (!payload || typeof payload !== "object") {
+    throw Object.assign(new Error("Decisions API returned invalid JSON payload."), {
+      code: "DECISION_API_INVALID_RESPONSE",
+      status: 502,
+    });
+  }
+
+  return payload;
+}

@@ -120,7 +120,7 @@ test("script.js: applies is-chat-active ONLY during active chat, wires model/pro
 
   // updateMobileActiveModelName function & Rule 4 compliance
   assert.ok(js.includes("function updateMobileActiveModelName()"), "updateMobileActiveModelName is declared");
-  assert.ok(js.includes('el.textContent = isFlash ? "Flash" : "Helmer"'), "Model name is safely set using textContent per Rule 4");
+  assert.ok(js.includes('el.textContent = "Helmer"'), "Model name is safely set using textContent per Rule 4");
   assert.ok(!js.includes("mobileActiveModelName.innerHTML ="), "Raw innerHTML is never used for model name");
 
   // Open / close state toggling on chat model button

@@ -1,10 +1,11 @@
 import { parseResponse } from "openai/lib/ResponsesParser.mjs";
+import { CONCURRENT_PAUSE_CHECK_SYMBOL } from './ai-policy.js';
 import { executionContext } from './privacy-policy.js';
 import { providerUsage } from './provider-usage.js';
 import { isValidBuildOutputReservation, resolveBuildOutputReservation } from "../ai/build-config.js";
 let policy;
 export function configureProviderPolicy(value) { policy = value; }
-export async function assertPlatformEnabled() { await policy?.assertEnabled?.(); }
+export async function assertPlatformEnabled(options) { await policy?.assertEnabled?.(options); }
 export function wrapProvider(client, kind, { buildVertex = false } = {}) {
   if (client.__helmerProtected) return client;
   function protect(target, method, type) {
@@ -31,11 +32,27 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
           }
         }
       };
-      const authorize = () => measure('authorizationMs', () => context.assertAuthorized?.());
-      const enabled = () => measure('platformMs', () => assertPlatformEnabled());
+      const authorize = options => measure('authorizationMs', () => context.assertAuthorized?.(options));
+      const enabled = options => measure('platformMs', () => assertPlatformEnabled(options));
       context.signal?.throwIfAborted();
-      await Promise.all([enabled(), authorize()]);
-      const release = await policy.reserveProvider(context, params, buildVertex ? { outputTokenReservation } : undefined);
+      const reserveOptions = {
+        ...(buildVertex ? { outputTokenReservation } : {}),
+        [CONCURRENT_PAUSE_CHECK_SYMBOL]: true,
+      };
+      const [enabledResult, authResult, reserveResult] = await Promise.allSettled([
+        enabled(),
+        authorize(),
+        policy.reserveProvider(context, params, reserveOptions),
+      ]);
+      if (enabledResult.status === 'rejected' || authResult.status === 'rejected') {
+        if (reserveResult.status === 'fulfilled' && reserveResult.value) {
+          await reserveResult.value.refund?.().catch(() => {});
+          await reserveResult.value().catch(() => {});
+        }
+        throw enabledResult.status === 'rejected' ? enabledResult.reason : authResult.reason;
+      }
+      if (reserveResult.status === 'rejected') throw reserveResult.reason;
+      const release = reserveResult.value;
       let checking = false;
       const authorizationTimer = setInterval(async () => {
         if (checking) return;
@@ -136,7 +153,6 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
       };
       try {
         context.signal?.throwIfAborted();
-        await Promise.all([enabled(), authorize()]);
         const signals = [context.signal, type === 'gemini' ? params.config?.abortSignal : options?.signal].filter(Boolean);
         const signal = signals.length ? AbortSignal.any(signals) : undefined;
         let payload;
@@ -168,10 +184,11 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
           let bufferPrelude = type === 'gemini' && options?.bufferGroundingPrelude === true &&
             params.config?.tools?.some(tool => tool.googleSearch);
           let prelude = [];
-          const validate = async event => {
+          const validate = async (event, { streamChunk = false } = {}) => {
             observe(event);
             signal?.throwIfAborted();
-            await Promise.all([enabled(), authorize()]);
+            const checkOptions = streamChunk ? { maxStaleMs: 2500 } : undefined;
+            await Promise.all([enabled(checkOptions), authorize(checkOptions)]);
           };
           const drain = async function* () {
             const batch = prelude;
@@ -201,7 +218,7 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
                 if (hasSources || prelude.length >= 16) yield* drain();
                 if (hasSources) bufferPrelude = false;
               } else {
-                await validate(event);
+                await validate(event, { streamChunk: true });
                 yield event;
               }
             }

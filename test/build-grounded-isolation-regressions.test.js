@@ -753,7 +753,7 @@ test('Build -> Planner -> Ask & Planner feedback telemetry preserve grounded pro
   assert.ok(events.items.some(e => e.onlyNecessaryData === true || e.metadata?.onlyNecessaryData === true));
 });
 
-test('Ask legacy sources-only assistant/model messages are excluded from prompts and redacted on success & failure; PersonalContext & LearningLoop stay isolated', async t => {
+test('Ask legacy sources-only assistant/model messages retain synthesized text in active Ask context without raw sources, and redact LearningLoop, Telemetry, and PersonalContext', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-sec1-legacy-ask-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
@@ -778,13 +778,15 @@ test('Ask legacy sources-only assistant/model messages are excluded from prompts
     ],
   });
 
-  // 1. Unit check on buildAskContents with legacy sources-only turn (model role too)
+  // 1. Unit check on buildAskContents with legacy sources-only turn (model role too):
+  // synthesized reply text stays in active Ask context, raw sources/URLs do not
   const unitContents = buildAskContents([
     { role: 'user', content: 'Hi' },
     { role: 'model', content: 'LEGACY_MODEL_SOURCES_ONLY_SECRET', sources: [{ title: 'S', url: 'https://example.com' }] },
     { role: 'user', content: 'Follow up' },
   ], ownerId, { resolveFile: () => null }, createAskConfig({}));
-  assert.ok(!JSON.stringify(unitContents).includes('LEGACY_MODEL_SOURCES_ONLY_SECRET'));
+  assert.ok(JSON.stringify(unitContents).includes('LEGACY_MODEL_SOURCES_ONLY_SECRET'));
+  assert.ok(!JSON.stringify(unitContents).includes('https://example.com'));
 
   // 2. Ask HTTP success + failure redaction with legacy sources-only chat
   const askCalls = [];
@@ -841,7 +843,8 @@ test('Ask legacy sources-only assistant/model messages are excluded from prompts
     }),
   });
   assert.equal(okRes.status, 200);
-  assert.ok(!JSON.stringify(askCalls[0].contents).includes('LEGACY_SOURCES_ONLY_ASSISTANT_SECRET'));
+  assert.ok(JSON.stringify(askCalls[0].contents).includes('LEGACY_SOURCES_ONLY_ASSISTANT_SECRET'));
+  assert.ok(!JSON.stringify(askCalls[0].contents).includes('https://example.com/legacy'));
 
   failProvider = true;
   const freshChat = await chatRepo.getById(chat.id, ownerId);

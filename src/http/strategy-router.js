@@ -25,6 +25,7 @@ import { buildStrategyPersonalizationContext } from "../services/ai/personal-con
 import { detectTargetMarket, getGuestBuildCtaNotice, GUEST_BUILD_EXHAUSTED_MESSAGE } from "../services/ai/prompts.js";
 import { BuildEstimateRequestSchema } from "../services/ai/build-estimate.js";
 import { buildConfig } from "../services/ai/build-config.js";
+import { createHelmerDecisionRouter } from "../services/ai/decision-router.js";
 import {
   isGroundedStrategyRecord,
   isExpiredGroundedStrategyRecord,
@@ -111,6 +112,7 @@ function publicBuildFailure(error) {
     AI_INVALID_OUTPUT: "Strategiyanın cavab formatını tamamlamaq mümkün olmadı. Yenidən cəhd edin.",
     AI_MAX_TOKENS: "Strategiyanın cavab həcmi limitə çatdı. Yenidən cəhd edin.",
     AI_CONTENT_BLOCKED: "Bu sorğunu tamamlamaq mümkün olmadı. Sorğunu nəzərdən keçirin.",
+    AI_SAFETY_BLOCKED: "Bu sorğunu tamamlamaq mümkün olmadı. Sorğunu nəzərdən keçirin.",
     GROUNDING_UNAVAILABLE: "Canlı araşdırma üçün mənbə ilə dəstəklənən məlumat tapılmadı. Yenidən cəhd edin.",
     GROUNDED_STRATEGY_RESTRICTED: "Veb araşdırması olan strategiyanı model ilə redaktə etmək mümkün deyil. Orijinal brifdən yeni strategiya yaradın.",
   };
@@ -376,6 +378,20 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
   const telemetryService = options?.telemetryService || null;
   const routeIdempotencyState = new Map();
   const generationServices = options.generationServices || { assessBrief, generateStrategy, refineStrategy };
+  const decisionRouter = options?.decisionRouter || createHelmerDecisionRouter({ redis: options?.redis || null });
+  const resolvePreFlightBuildDecision = async ({ payload, existingStrategy = null, isBriefGeneration = true, signal }) => {
+    const decision = await decisionRouter.routeBuild({
+      prompt: payload.action === "custom" ? payload.request : (payload.brief || ""),
+      hasAttachments: Boolean(payload.hasAttachments),
+      isBriefGeneration,
+      hasExistingBrief: Boolean(existingStrategy || payload.strategy),
+      existingBriefSummary: existingStrategy?.summary || payload.strategy?.summary || "",
+      signal,
+    });
+    const effectiveBuildMode =
+      payload.buildMode || (decision?.briefDepth === 0 ? "faster" : undefined);
+    return { buildDecision: decision, effectiveBuildMode };
+  };
   const isGenerationRequest = req => req.method === "POST" && /^\/(?:estimate|assess|generate|generate-stream|refine|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path);
 
   const readRequestHeaderKey = (req) => {
@@ -694,12 +710,27 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           });
           const marketMode = detectTargetMarket({ brief: payload.brief, answers: payload.answers });
           const modelImprovement = isModelImprovementEnabled(req);
+          const { buildDecision, effectiveBuildMode } = await resolvePreFlightBuildDecision({
+            payload,
+            isBriefGeneration: true,
+            signal: abortController.signal,
+          });
           let preparationEstimate;
           const tracked = await runTrackedBuild({
             learningLoop, telemetryService, ownerId: req.ownerId, taskType: "build_assess", userPrompt: payload.brief,
             relevantContext: { personalizationApplied: Boolean(personalizationContext), language, marketMode },
-            execute: (onUsage) => generationServices.assessBrief({ ...payload, language, ownerId: req.ownerId, personalizationContext, signal: abortController.signal, onUsage, onEstimate: value => { preparationEstimate = value; } }),
-            onlyNecessaryData: !modelImprovement,
+            execute: (onUsage) => generationServices.assessBrief({
+              ...payload,
+              ...(effectiveBuildMode ? { buildMode: effectiveBuildMode } : {}),
+              buildDecision,
+              language,
+              ownerId: req.ownerId,
+              personalizationContext,
+              signal: abortController.signal,
+              onUsage,
+              onEstimate: value => { preparationEstimate = value; },
+            }),
+            onlyNecessaryData: !modelImprovement || Boolean(buildDecision?.needsMarketSearch),
             modelImprovement,
             privacySnapshot: getReqPrivacySnapshot(req),
           });
@@ -868,16 +899,28 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         });
         const marketMode = detectTargetMarket({ brief: payload.brief, answers: payload.answers });
         const modelImprovement = isModelImprovementEnabled(req);
+        const { buildDecision, effectiveBuildMode } = await resolvePreFlightBuildDecision({
+          payload,
+          isBriefGeneration: true,
+          signal: generationSignal,
+        });
         const tracked = await runTrackedBuild({
           learningLoop,
           telemetryService,
           ownerId,
           taskType: "build_generate",
           userPrompt: payload.brief,
-          relevantContext: { personalizationApplied: Boolean(personalizationContext), language, marketMode },
+          relevantContext: {
+            personalizationApplied: Boolean(personalizationContext),
+            language,
+            marketMode,
+            decisionRouterSource: buildDecision?.routerSource,
+          },
           execute: (onUsage) =>
             generationServices.generateStrategy({
               ...payload,
+              ...(effectiveBuildMode ? { buildMode: effectiveBuildMode } : {}),
+              buildDecision,
               language,
               ownerId,
               personalizationContext,
@@ -889,7 +932,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
                 }
               },
             }),
-          onlyNecessaryData: !modelImprovement,
+          onlyNecessaryData: !modelImprovement || Boolean(buildDecision?.needsMarketSearch),
           modelImprovement,
           privacySnapshot: getReqPrivacySnapshot(req),
         });
@@ -1166,11 +1209,22 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           });
           const marketMode = detectTargetMarket({ brief: payload.brief, answers: payload.answers, strategy: payload.strategy });
           const modelImprovement = isModelImprovementEnabled(req);
+          const { buildDecision, effectiveBuildMode } = await resolvePreFlightBuildDecision({
+            payload,
+            existingStrategy: payload.strategy,
+            isBriefGeneration: false,
+            signal,
+          });
           const tracked = await runTrackedBuild({
             learningLoop, telemetryService, ownerId: req.ownerId, taskType: `build_refine_${payload.action}`, userPrompt: payload.action === "custom" ? payload.request : payload.action,
             relevantContext: { personalizationApplied: Boolean(personalizationContext), language, marketMode },
-            execute: (onUsage) => generationServices.refineStrategy({ ...payload, language }, req.ownerId, signal, personalizationContext, undefined, onUsage),
-            onlyNecessaryData: !modelImprovement,
+            execute: (onUsage) => generationServices.refineStrategy({
+              ...payload,
+              ...(effectiveBuildMode ? { buildMode: effectiveBuildMode } : {}),
+              buildDecision,
+              language,
+            }, req.ownerId, signal, personalizationContext, undefined, onUsage),
+            onlyNecessaryData: !modelImprovement || Boolean(buildDecision?.needsMarketSearch),
             modelImprovement,
             privacySnapshot: getReqPrivacySnapshot(req),
           });
@@ -1362,11 +1416,22 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             user: req.user,
           });
           const modelImprovement = isModelImprovementEnabled(req);
+          const { buildDecision, effectiveBuildMode } = await resolvePreFlightBuildDecision({
+            payload,
+            existingStrategy: payload.strategy,
+            isBriefGeneration: false,
+            signal,
+          });
           const tracked = await runTrackedBuild({
             learningLoop, telemetryService, ownerId: req.ownerId, taskType: `build_refine_${payload.action}`, userPrompt: payload.action === "custom" ? payload.request : payload.action,
             relevantContext: { resourceId: existing.id, personalizationApplied: Boolean(personalizationContext), language },
-            execute: (onUsage) => generationServices.refineStrategy({ ...payload, language }, req.ownerId, signal, personalizationContext, undefined, onUsage),
-            onlyNecessaryData: !modelImprovement,
+            execute: (onUsage) => generationServices.refineStrategy({
+              ...payload,
+              ...(effectiveBuildMode ? { buildMode: effectiveBuildMode } : {}),
+              buildDecision,
+              language,
+            }, req.ownerId, signal, personalizationContext, undefined, onUsage),
+            onlyNecessaryData: !modelImprovement || Boolean(buildDecision?.needsMarketSearch),
             modelImprovement,
             privacySnapshot: getReqPrivacySnapshot(req),
           });
