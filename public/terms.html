@@ -4,445 +4,91 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f8f9fb" />
-    <title>İstifadə Şərtləri (Terms of Service) | Helmer Workspace</title>
+    <title>İstifadəçi Razılaşması (İstifadə Şərtləri) | Helmer Strategy OS</title>
     <meta
       name="description"
-      content="Helmer Workspace platformasının istifadə qaydaları, hüquqi şərtləri və xidmət müqaviləsi."
+      content="Helmer Strategy OS platformasının istifadə qaydaları, hüquqi şərtləri, qeyri-kommersiya statusu və xidmət razılaşması."
     />
     <link rel="canonical" href="https://helmeros.com/terms" />
     <meta name="robots" content="index, follow" />
-    <meta property="og:title" content="İstifadə Şərtləri (Terms of Service) | Helmer Workspace" />
+    <meta property="og:title" content="İstifadəçi Razılaşması (Terms of Service) | Helmer Strategy OS" />
     <meta
       property="og:description"
-      content="Helmer Workspace platformasının istifadə qaydaları, hüquqi şərtləri və xidmət müqaviləsi."
+      content="Helmer Strategy OS platformasının istifadə qaydaları, hüquqi şərtləri və xidmət razılaşması."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://helmeros.com/terms" />
     <meta property="og:image" content="https://helmeros.com/MarketifyAINewFavicon.png" />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="İstifadə Şərtləri (Terms of Service) | Helmer Workspace" />
+    <meta name="twitter:title" content="İstifadəçi Razılaşması (Terms of Service) | Helmer Strategy OS" />
     <meta
       name="twitter:description"
-      content="Helmer Workspace platformasının istifadə qaydaları, hüquqi şərtləri və xidmət müqaviləsi."
+      content="Helmer Strategy OS platformasının istifadə qaydaları, hüquqi şərtləri və xidmət razılaşması."
     />
     <meta name="twitter:image" content="https://helmeros.com/MarketifyAINewFavicon.png" />
     <link rel="icon" type="image/png" href="/MarketifyAINewFavicon.png?v=4" />
     <link rel="shortcut icon" href="/favicon.ico?v=4" />
     <link rel="apple-touch-icon" href="/MarketifyAINewFavicon.png?v=4" />
+    <script src="/theme.js" data-storage-key="helmer_theme"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap"
       rel="stylesheet"
     />
+    <link rel="stylesheet" href="/tokens.css" />
     <link rel="stylesheet" href="/legal.css" />
   </head>
-  <body>
+  <body data-legal-doc="terms">
     <header class="legal-header">
       <div class="legal-header-inner">
         <a href="/" class="legal-brand">
-          <img src="/MarketifyAINewFavicon.png?v=4" alt="Helmer Workspace" />
-          <span>Helmer Workspace</span>
+          <img src="/MarketifyAINewFavicon.png?v=4" alt="Helmer Strategy OS" />
+          <span>Helmer Strategy OS</span>
         </a>
-        <nav class="legal-nav">
-          <a href="/terms" class="legal-nav-link active" id="navTerms">İstifadə Şərtləri</a>
-          <a href="/privacy" class="legal-nav-link" id="navPrivacy">Məxfilik Siyasəti</a>
-          <a href="/" class="legal-nav-link" id="navHome">Workspace</a>
-          <div class="lang-switch" role="group" aria-label="Language selection">
-            <button type="button" class="lang-btn active" id="btnAz" onclick="setLang('az')">AZ</button>
-            <button type="button" class="lang-btn" id="btnEn" onclick="setLang('en')">EN</button>
-          </div>
+
+        <nav class="legal-header-tabs" aria-label="Legal documents">
+          <a href="/terms" class="legal-tab-link active" id="navTerms" aria-current="page">İstifadə Şərtləri</a>
+          <a href="/privacy" class="legal-tab-link" id="navPrivacy">Məxfilik Siyasəti</a>
         </nav>
+
+        <div class="legal-header-actions">
+          <div class="lang-switch" role="group" aria-label="Language selection">
+            <button type="button" class="lang-btn active" id="btnAz" aria-pressed="true">AZ</button>
+            <button type="button" class="lang-btn" id="btnEn" aria-pressed="false">EN</button>
+          </div>
+          <button
+            type="button"
+            class="legal-utility-btn legal-icon-btn"
+            data-theme-toggle
+            aria-label="Dark Mode-a keç"
+            aria-pressed="false"
+          >
+            <svg class="legal-theme-icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+            </svg>
+            <svg class="legal-theme-icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+            </svg>
+          </button>
+          <button type="button" class="legal-utility-btn" id="legalPrintBtn">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/>
+            </svg>
+            <span id="legalPrintLabel">Çap et / PDF</span>
+          </button>
+        </div>
       </div>
     </header>
 
-    <main class="legal-container">
-      <div class="legal-card">
-        <!-- AZERBAIJANI VERSION -->
-        <article id="contentAz" class="legal-content">
-          <div class="legal-title-section">
-            <span class="legal-badge">Hüquqi Sənəd</span>
-            <h1 class="legal-title">HELMER STRATEGY OS — İSTİFADƏ ŞƏRTLƏRİ</h1>
-            <table class="legal-table">
-              <thead>
-                <tr>
-                  <th>Sənəd Rekvizitləri</th>
-                  <th>Təfsilat</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><strong>Qüvvəyə minmə tarixi</strong></td>
-                  <td>3 oktyabr 2026</td>
-                </tr>
-                <tr>
-                  <td><strong>Xidmət operatoru</strong></td>
-                  <td>Innova Group Azerbaijan</td>
-                </tr>
-                <tr>
-                  <td><strong>Rəsmi internet informasiya ehtiyatı</strong></td>
-                  <td><a href="https://helmeros.com">helmeros.com</a></td>
-                </tr>
-                <tr>
-                  <td><strong>Hüquqi və texniki əlaqə ünvanı</strong></td>
-                  <td><a href="mailto:support@helmeros.com">support@helmeros.com</a></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="legal-highlight-box">
-            <strong>✦ Preambula və Süni İntellekt İnfrastrukturu</strong>
-            <p>Helmer Strategy OS platforması analitik tədqiqatların aparılması, biznes strategiyalarının modelləşdirilməsi, bazar araşdırmaları və strukturlaşdırılmış analitik məlumatların hasil edilməsi məqsədilə süni intellekt alqoritmlərindən, böyük dil modellərindən (LLM), tətbiqi proqramlaşdırma interfeyslərindən (API) və üçüncü tərəf hesablama texnologiyalarından istifadə edir. İstifadə olunan sistem modelləri, texniki provayderlər və arxitektur həllər platformanın əməliyyat zərurətlərinə müvafiq qaydada Innova Group Azerbaijan tərəfindən birtərəfli şəkildə dəyişdirilə və ya yenilənə bilər.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 1. Ümumi Müddəalar və Tərəflərin Razılığı</h3>
-            <p>1.1. Bu İstifadə Şərtləri (“Şərtlər”) Innova Group Azerbaijan tərəfindən idarə olunan Helmer Strategy OS platformasına (“Helmer Strategy OS”, “Helmer”, “Platforma”, “Xidmət”) giriş və ondan istifadə qaydalarını, eləcə də tərəflərin hüquq və vəzifələrini tənzimləyir.</p>
-            <p>1.2. Platformadan hər hansı formada istifadə edilməsi, o cümlədən hesabın qeydiyyatdan keçirilməsi və ya sistemə sorğuların göndərilməsi istifadəçinin bu Şərtlərlə tam tanış olduğunu, onların hüquqi qüvvəsini anladığını və icrasına dair qeyd-şərtsiz razılıq verdiyini təsdiq edir. Bu Şərtlərlə razılaşmayan şəxslərin Platformadan istifadə hüququ yoxdur.</p>
-            <p>1.3. Helmer Strategy OS strateji və biznes təhlillərinə yardımçı xarakterli rəqəmsal proqram təminatı mühitidir.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 2. Yaş Həddi və Hüquqi Fəaliyyət Qabiliyyəti</h3>
-            <p>2.1. Azərbaycan Respublikasının Mülki Məcəlləsinin müvafiq tələblərinə uyğun olaraq, Platforma yalnız tam fəaliyyət qabiliyyətli və 18 yaşına çatmış şəxslərin istifadəsi üçün nəzərdə tutulur.</p>
-            <p>2.2. Platformadan istifadə edən hər bir şəxs ən azı 18 yaşının tamam olduğunu, müqavilə bağlamaq və öhdəlik götürmək üçün zəruri hüquq və fəaliyyət qabiliyyətinə malik olduğunu rəsmi qaydada bəyan və təsdiq edir.</p>
-            <p>2.3. Platformanın 18 yaşına çatmamış şəxslər tərəfindən istifadə edildiyi aşkar edildikdə, Innova Group Azerbaijan xəbərdarlıq etmədən müvafiq hesaba xidmət göstərilməsini dərhal və birtərəfli qaydada dayandırmaq və ya xitam vermək hüququnu özündə saxlayır.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 3. Peşəkar Məsləhətin İstisnası və Etibarlılıq Qadağası (Non-Reliance)</h3>
-            <p>3.1. Platforma vasitəsilə təqdim olunan bütün analitik strukturlar, biznes modelləri, bazar təhlilləri, büdcə bölgüləri və fəaliyyət planları sırf yardımçı, konseptual və məlumatlandırıcı xarakter daşıyır.</p>
-            <p>3.2. Platformanın fəaliyyəti və təqdim etdiyi nəticələr peşəkar hüquqi, maliyyə, investisiya, vergi və ya lisenziyalaşdırılan digər sahələr üzrə ekspert rəyini əvəz etmir. İstifadəçi ilə Innova Group Azerbaijan arasında heç bir fiduciar, konsaltinq və ya digər peşəkar vəkillik münasibəti formalaşmır.</p>
-            <p>3.3. Süni intellekt texnologiyalarının təbiəti etibarilə sistem tərəfindən hasil edilən çıxışların qeyri-dəqiq, natamam, köhnəlmiş və ya təhrif olunmuş faktlar ehtiva etməsi mümkündür (alqoritmik hallusinasiya riski). İstifadəçi Platformanın məlumatlarına əsaslanan hər hansı kommersiya, əməliyyat, maliyyə və ya hüquqi qərar qəbul etməzdən əvvəl həmin məlumatların düzgünlüyünü müstəqil ixtisaslaşmış mütəxəssislər vasitəsilə yoxlamaq məsuliyyətini şəxsən daşıyır.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 4. Əqli Mülkiyyət, Məzmun və Fərdiləşdirmə / Model İnkişafı Asılılığı</h3>
-            <p>4.1. <strong>İstifadəçi Məzmunu:</strong> İstifadəçi tərəfindən sistemə daxil edilən fərdi biznes təsvirləri, briflər, təhlil sənədləri və digər materiallar (“İstifadəçi Məzmunu”) üzərindəki hüquqlar tam olaraq istifadəçiyə məxsus olaraq qalır. İstifadəçi bu materialları sistemə daxil etməklə Innova Group Azerbaijan-a yalnız Xidmətin texniki icrasının və funksiyalarının təmin edilməsi üçün zəruri olan həcmdə məhdud emal icazəsi verir.</p>
-            <p>4.2. <strong>Modellərin Təkmilləşdirilməsi Funksionallığı (Opt-In):</strong> Yeni yaradılan hesablarda fərdiləşdirilmiş xidmət rejimi və modellərin təkmilləşdirilməsi funksionallığı ilkin olaraq qeyri-aktiv (deaktiv) vəziyyətdə təqdim olunur. İstifadəçi şəxsi profil parametrləri bölməsindən bu funksionallıqları öz açıq iradəsi ilə aktivləşdirmək (opt-in) və ya istədiyi vaxt sərbəst şəkildə deaktiv etmək (opt-out) hüququna malikdir.</p>
-            <p>4.3. <strong>Birtərəfli Asılılıq Şərti:</strong> Modellərin təkmilləşdirilməsi funksionallığını aktivləşdirmək üçün fərdiləşdirilmiş xidmət rejimi (yaddaş konteksti) aktiv olmalıdır. İstifadəçi fərdiləşdirilmiş xidmət rejimini deaktiv etdikdə modellərin təkmilləşdirilməsi funksionallığı da sistem tərəfindən avtomatik və dərhal dayandırılır. Bununla yanaşı, istifadəçi fərdiləşdirilmiş xidmət rejimini açıq saxlamaqla yalnız modellərin təkmilləşdirilməsi funksionallığını müstəqil şəkildə deaktiv edə bilər; bu halda yeni sorğuların məzmunu model təkmilləşdirilməsinə cəlb olunmur və yalnız zəruri əməliyyat qeydləri saxlanılır.</p>
-            <p>4.4. <strong>Generasiya Edilən Çıxışlar:</strong> Qanunvericiliyin və tərəfdaş provayderlərin icazə verdiyi hüdudlarda istifadəçi öz sorğuları nəticəsində formalaşmış analitik çıxışlardan kommersiya və qeyri-kommersiya məqsədləri üçün sərbəst istifadə edə bilər. Alqoritmik sistemlərin ümumi təbiətinə müvafiq olaraq, oxşar sorğu daxil edən digər şəxslər üçün bənzər nəticələrin hasil edilməsi mümkündür və bu hal çıxışların unikallığına dair iddia irəli sürmək hüququ yaratmır.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 5. Zəmanətlərin İstisnası və Biznes Qərarları</h3>
-            <p>5.1. Xidmət və onun bütün funksional imkanları “olduğu kimi” (“as is”) və “mövcud olduğu dərəcədə” (“as available”) prinsipi ilə təqdim edilir.</p>
-            <p>5.2. Innova Group Azerbaijan hər hansı kommersiya uğuruna, satış dövriyyəsinin və ya gəlirliliyin artırılmasına, bazar payının qazanılmasına, investisiyaların cəlb edilməsinə və ya Platformanın təqdim etdiyi analitik təkliflərin reallaşmasına dair heç bir birbaşa və ya dolayısı zəmanət vermir. Platformanın məlumatlarına əsaslanaraq həyata keçirilən bütün fəaliyyətin riskləri və iqtisadi nəticələri birbaşa istifadəçinin şəxsi məsuliyyətindədir.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 6. Qadağan Olunmuş İstifadə</h3>
-            <p>6.1. Platformadan qanunvericiliyin tələblərini pozan məqsədlər üçün istifadə edilməsi, kibertəhlükəsizlik baryerlərinin aşılmasına yönəlmiş müdaxilələr (o cümlədən prompt injection, model dekompilyasiyası, arxitekturanın tərsinə mühəndisliyi), sistem resurslarının kütləvi sorğularla həddən artıq yüklənməsi və üçüncü tərəflərin qanuni hüquqlarının pozulması qadağandır.</p>
-            <p>6.2. İstifadə qaydalarının pozulması faktı aşkar edildikdə, Innova Group Azerbaijan istifadəçinin Platformaya giriş hüququnu xəbərdarlıq etmədən dayandırmaq və ya birdəfəlik ləğv etmək hüququna malikdir.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 7. Zərərlərin Əvəzinin Ödənilməsi (Təqsirə Əsaslanan Məsuliyyət)</h3>
-            <p>İstifadəçinin bu Şərtləri qəsdən və ya kobud şəkildə pozması, Platformadan qanunsuz məqsədlər üçün istifadə etməsi və ya sistemə daxil etdiyi materiallarla üçüncü şəxslərin hüquqlarını (o cümlədən əqli mülkiyyət və ya məxfilik hüquqlarını) təqsirli şəkildə pozması nəticəsində Innova Group Azerbaijan-a, onun vəzifəli şəxslərinə və texnoloji tərəfdaşlarına qarşı üçüncü tərəflər tərəfindən irəli sürülmüş əsaslı iddialar üzrə vurulmuş birbaşa zərərin və rəsmi məhkəmə xərclərinin əvəzi qanunvericiliklə müəyyən edilmiş qaydada təqsirkar istifadəçi tərəfindən kompensasiya edilir.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 8. Məsuliyyətin Hədləri və Qanuni İstisnalar</h3>
-            <p>8.1. <strong>Dolayı Zərərlər üzrə:</strong> Qanunvericiliyin yol verdiyi hədlərdə Innova Group Azerbaijan Platformadan istifadə və ya ondan istifadənin qeyri-mümkünlüyü, habelə sistem nəticələrinə istinad edilməsi ilə əlaqədar yaranan dolayı zərərlərə, qaçırılmış faydaya, itirilmiş mənfəətə və ya biznesin dayanması nəticəsində yaranan itkilərə görə məsuliyyət daşımır.</p>
-            <p>8.2. <strong>Məsuliyyətin Həcmi:</strong> Xidmətin təmənnasız göstərildiyi nəzərə alınaraq, Innova Group Azerbaijan-ın Platforma ilə bağlı yarana biləcək birbaşa məsuliyyəti tətbiq olunan qanunvericiliyin yol verdiyi ağlabatan və minimum hədlə məhdudlaşır; ödənişli xidmətlər təqdim edildiyi halda isə bu məsuliyyət istifadəçinin iddia anından əvvəlki son 12 (on iki) ay ərzində müvafiq xidmət üçün faktiki ödədiyi məbləğdən artıq ola bilməz.</p>
-            <p>8.3. <strong>Məhdudlaşdırılması Mümkün Olmayan Hallar:</strong> Bu Şərtlərin heç bir müddəası Innova Group Azerbaijan-ın qəsd və ya kobud ehtiyatsızlığı nəticəsində dəyən zərərə, həyat və sağlamlığa vurulmuş ziyana, habelə Azərbaycan Respublikasının qanunvericiliyi (o cümlədən istehlakçıların hüquqlarının müdafiəsi və mülki hüquq normaları) ilə məhdudlaşdırılması və ya istisna edilməsi qadağan olunan digər məsuliyyət hallarına şamil edilmir və onları aradan qaldırmır.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 9. Xidmətin Fəaliyyəti və Texniki Dəyişikliklər</h3>
-            <p>9.1. Platformanın işində texniki profilaktika, qlobal infrastruktur yeniləmələri və ya asılı xarici şəbəkələrin fəaliyyəti ilə əlaqədar fasilələrin və ya gecikmələrin yaranması mümkündür. Innova Group Azerbaijan sistemin tam fasiləsiz işləməsinə dair zəmanət vermir.</p>
-            <p>9.2. Innova Group Azerbaijan Platformanın funksional imkanlarını, təqdim olunan modelləri, texniki limitləri və interfeys parametrlərini zərurət olduqda birtərəfli qaydada dəyişdirmək hüququnu saxlayır.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 10. Hesab Təhlükəsizliyi</h3>
-            <p>İstifadəçi öz hesabının giriş vasitələrinin və aktiv sessiya açarlarının konfidensiallığını qorumağa görə şəxsən cavabdehdir. Hesaba icazəsiz müdaxilə və ya təhlükəsizlik pozuntusu şübhəsi yarandıqda istifadəçi dərhal Platformanın dəstək xidmətinə məlumat verməlidir.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 11. Şərtlərin Dəyişdirilməsi və Müstəqil Qüvvə</h3>
-            <p>11.1. Innova Group Azerbaijan bu Şərtləri zərurət olduqda birtərəfli qaydada yeniləyə bilər. Yenilənmiş Şərtlər Platformada dərc edildiyi andan qüvvəyə minir.</p>
-            <p>11.2. Bu Şərtlərin hər hansı müddəasının məhkəmə tərəfindən etibarsız və ya icraedilməz hesab edilməsi digər bəndlərin hüquqi qüvvəsinə təsir göstərmir.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Maddə 12. Mübahisələrin Həlli və Tətbiq Olunan Hüquq</h3>
-            <p>12.1. Bu Şərtlər Azərbaycan Respublikasının maddi və prosessual qanunvericiliyinə uyğun olaraq tənzimlənir və şərh edilir.</p>
-            <p>12.2. Tərəflər arasında yaranan bütün fikir ayrılıqları qarşılıqlı danışıqlar yolu ilə həll edilir. Razılıq əldə edilmədikdə, mübahisələr Azərbaycan Respublikasının müvafiq yurisdiksiyaya malik səlahiyyətli məhkəmələri tərəfindən araşdırılır.</p>
-          </div>
-        </article>
-
-        <!-- ENGLISH VERSION -->
-        <article id="contentEn" class="legal-content" style="display: none;">
-          <div class="legal-title-section">
-            <span class="legal-badge">Legal Document</span>
-            <h1 class="legal-title">HELMER STRATEGY OS — TERMS OF SERVICE</h1>
-            <table class="legal-table">
-              <thead>
-                <tr>
-                  <th>Document Details</th>
-                  <th>Specifics</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><strong>Effective Date</strong></td>
-                  <td>October 3, 2026</td>
-                </tr>
-                <tr>
-                  <td><strong>Service Operator</strong></td>
-                  <td>Innova Group Azerbaijan</td>
-                </tr>
-                <tr>
-                  <td><strong>Official Internet Information Resource</strong></td>
-                  <td><a href="https://helmeros.com">helmeros.com</a></td>
-                </tr>
-                <tr>
-                  <td><strong>Legal & Technical Contact Address</strong></td>
-                  <td><a href="mailto:support@helmeros.com">support@helmeros.com</a></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="legal-highlight-box">
-            <strong>✦ Preamble and Artificial Intelligence Infrastructure</strong>
-            <p>Helmer Strategy OS platform utilizes artificial intelligence algorithms, large language models (LLMs), application programming interfaces (APIs), and third-party computing technologies for conducting analytical research, business strategy modeling, market research, and producing structured analytical intelligence. The system models, technical providers, and architectural solutions utilized may be unilaterally modified or updated by Innova Group Azerbaijan in accordance with the operational necessities of the platform.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 1. General Provisions and Parties' Consent</h3>
-            <p>1.1. These Terms of Service (“Terms”) govern the access to and use of the Helmer Strategy OS platform (“Helmer Strategy OS”, “Helmer”, “Platform”, “Service”) operated by Innova Group Azerbaijan, as well as the rights and obligations of the parties.</p>
-            <p>1.2. Any form of use of the Platform, including account registration or submitting queries to the system, confirms that the user has fully reviewed these Terms, understands their legal binding force, and gives unconditional consent to their performance. Persons who do not agree with these Terms have no right to use the Platform.</p>
-            <p>1.3. Helmer Strategy OS is a digital software environment of an auxiliary nature designed for strategic and business analyses.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 2. Age Limit and Legal Capacity</h3>
-            <p>2.1. In accordance with the relevant requirements of the Civil Code of the Republic of Azerbaijan, the Platform is intended for use solely by fully capable individuals who have reached 18 years of age.</p>
-            <p>2.2. Each individual using the Platform officially declares and confirms that they are at least 18 years of age and possess the necessary legal capacity and authority to enter into contracts and undertake obligations.</p>
-            <p>2.3. If it is determined that the Platform is being used by individuals under 18 years of age, Innova Group Azerbaijan reserves the right to immediately and unilaterally suspend or terminate service to the respective account without prior notice.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 3. Non-Reliance and Exclusion of Professional Advice</h3>
-            <p>3.1. All analytical structures, business models, market analyses, budget allocations, and action plans provided through the Platform are purely auxiliary, conceptual, and informational in nature.</p>
-            <p>3.2. The Platform’s operations and provided outputs do not substitute for expert opinions in professional legal, financial, investment, tax, or other licensed domains. No fiduciary, consulting, or other professional agency relationship is established between the user and Innova Group Azerbaijan.</p>
-            <p>3.3. By the nature of artificial intelligence technologies, outputs generated by the system may contain inaccurate, incomplete, outdated, or distorted facts (algorithmic hallucination risk). The user personally bears the responsibility to independently verify the accuracy of such information through specialized professionals before making any commercial, operational, financial, or legal decisions based on the Platform’s data.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 4. Intellectual Property, Content, and Personalization / Model Improvement Dependency</h3>
-            <p>4.1. <strong>User Content:</strong> Rights to individual business descriptions, briefs, analysis documents, and other materials submitted by the user to the system (“User Content”) remain fully owned by the user. By submitting these materials to the system, the user grants Innova Group Azerbaijan a limited processing license solely to the extent necessary to ensure the technical execution and functions of the Service.</p>
-            <p>4.2. <strong>Model Improvement Functionality (Opt-In):</strong> For newly created accounts, both the personalized service mode and the model improvement functionality are disabled (inactive) by default. The user has the right to explicitly enable (opt in) or freely deactivate (opt out) these functionalities at any time from their personal profile settings.</p>
-            <p>4.3. <strong>One-Way Dependency Condition:</strong> Personalized service mode (memory context) must be active in order to enable the model improvement functionality. When the personalized service mode is deactivated by the user, the model improvement functionality is also automatically and immediately discontinued by the system. Conversely, the user may independently deactivate the model improvement functionality while keeping personalized service mode active; in that case, new interaction content is excluded from model improvement and only necessary operational records are retained.</p>
-            <p>4.4. <strong>Generated Outputs:</strong> Within the limits permitted by applicable law and partner providers, the user may freely use analytical outputs generated as a result of their queries for commercial and non-commercial purposes. In accordance with the general nature of algorithmic systems, similar results may be generated for other individuals submitting similar queries, and this circumstance does not grant the right to assert claims regarding the uniqueness of the outputs.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 5. Disclaimer of Warranties and Business Decisions</h3>
-            <p>5.1. The Service and all its functional capabilities are provided on an “as is” and “as available” basis.</p>
-            <p>5.2. Innova Group Azerbaijan provides no direct or implied warranty regarding any commercial success, increase in sales turnover or profitability, acquisition of market share, attracting investments, or the implementation of analytical proposals presented by the Platform. All risks and economic outcomes of activities conducted on the basis of the Platform’s data are the direct personal responsibility of the user.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 6. Prohibited Use</h3>
-            <p>6.1. Using the Platform for purposes that violate statutory requirements, interventions aimed at bypassing cybersecurity barriers (including prompt injection, model decompilation, reverse engineering of architecture), overloading system resources with mass queries, and infringing upon the lawful rights of third parties are strictly prohibited.</p>
-            <p>6.2. When a violation of usage rules is detected, Innova Group Azerbaijan has the right to suspend or permanently terminate the user’s access to the Platform without prior notice.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 7. Indemnification of Damages (Fault-Based Liability)</h3>
-            <p>In the event that the user intentionally or grossly violates these Terms, uses the Platform for unlawful purposes, or culpably infringes third-party rights (including intellectual property or privacy rights) with materials submitted to the system, the direct damages and official court expenses incurred by Innova Group Azerbaijan, its officers, and technology partners as a result of substantiated claims brought by third parties shall be compensated by the culpable user in accordance with applicable legislation.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 8. Limitations of Liability and Statutory Exceptions</h3>
-            <p>8.1. <strong>Indirect Damages:</strong> To the extent permitted by law, Innova Group Azerbaijan bears no liability for indirect damages, lost profits, loss of anticipated revenue, loss of earnings, or losses resulting from business interruption arising out of the use or inability to use the Platform, or reliance upon system results.</p>
-            <p>8.2. <strong>Scope of Liability:</strong> Considering that the Service is provided free of charge, Innova Group Azerbaijan’s direct liability arising in connection with the Platform is limited to the reasonable and minimum threshold permitted by applicable law; in cases where paid services are provided, such liability shall not exceed the actual amount paid by the user for the respective service during the preceding 12 (twelve) months prior to the claim.</p>
-            <p>8.3. <strong>Non-Excludable Statutory Liabilities:</strong> No provision of these Terms shall apply to or eliminate liability for damages caused by the intent or gross negligence of Innova Group Azerbaijan, harm to life and health, or other liability cases whose limitation or exclusion is prohibited by the legislation of the Republic of Azerbaijan (including consumer protection and civil law norms).</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 9. Service Operations and Technical Modifications</h3>
-            <p>9.1. Interruptions or delays may occur in the operation of the Platform due to technical maintenance, global infrastructure updates, or the operation of dependent external networks. Innova Group Azerbaijan does not guarantee uninterrupted operation of the system.</p>
-            <p>9.2. Innova Group Azerbaijan reserves the right to unilaterally modify the Platform’s functional capabilities, provided models, technical limits, and interface parameters whenever necessary.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 10. Account Security</h3>
-            <p>The user is personally responsible for maintaining the confidentiality of their account credentials and active session keys. The user must immediately notify the Platform’s support service upon suspecting unauthorized access to the account or a security breach.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 11. Amendments to Terms and Severability</h3>
-            <p>11.1. Innova Group Azerbaijan may unilaterally update these Terms when necessary. Updated Terms take effect from the moment of their publication on the Platform.</p>
-            <p>11.2. If any provision of these Terms is deemed invalid or unenforceable by a court, this shall not affect the legal validity of the remaining provisions.</p>
-          </div>
-
-          <div class="legal-doc-section">
-            <h3>Article 12. Dispute Resolution and Applicable Law</h3>
-            <p>12.1. These Terms are governed by and construed in accordance with the substantive and procedural laws of the Republic of Azerbaijan.</p>
-            <p>12.2. All disagreements arising between the parties shall be resolved through mutual negotiations. If an agreement cannot be reached, disputes shall be adjudicated by the competent courts possessing jurisdiction in the Republic of Azerbaijan.</p>
-          </div>
-
-          <div class="legal-doc-precedence">
-            <p><strong>Governing Language Precedence:</strong> This document is translated from the original Azerbaijani version for convenience. In the event of any conflict, discrepancy, ambiguity, or dispute between this English translation and the original Azerbaijani text, the original Azerbaijani version shall govern and prevail.</p>
-          </div>
-        </article>
-      </div>
-    </main>
-
-    <footer class="legal-footer">
-      <div class="legal-footer-inner">
-        <div class="legal-footer-links">
-          <a href="/privacy" id="footerPrivacy">Məxfilik Siyasəti</a>
-          <a href="/terms" id="footerTerms">İstifadə Şərtləri</a>
-          <a href="/">Workspace</a>
-          <a href="mailto:support@helmeros.com">support@helmeros.com</a>
+    <main class="legal-main" id="legalPageRoot">
+      <noscript>
+        <div class="legal-hero">
+          <h1 class="legal-hero-title">HELMER STRATEGY OS — İSTİFADƏÇİ RAZILAŞMASI (TERMS OF SERVICE)</h1>
+          <p class="legal-hero-subtitle">Bu səhifəni tam görüntüləmək üçün JavaScript-i aktivləşdirin və ya support@helmeros.com ünvanı ilə əlaqə saxlayın.</p>
         </div>
-        <p>© 2026 Innova Group Azerbaijan / Helmer Strategy OS. Bütün hüquqlar qorunur.</p>
-      </div>
-    </footer>
-
-    <script>
-      function setLang(lang) {
-        const isEn = lang === 'en';
-        document.documentElement.lang = isEn ? 'en' : 'az';
-        document.getElementById('contentAz').style.display = isEn ? 'none' : 'block';
-        document.getElementById('contentEn').style.display = isEn ? 'block' : 'none';
-        document.getElementById('btnAz').classList.toggle('active', !isEn);
-        document.getElementById('btnEn').classList.toggle('active', isEn);
-        
-        // Navigation labels
-        document.getElementById('navTerms').textContent = isEn ? 'Terms of Service' : 'İstifadə Şərtləri';
-        document.getElementById('navPrivacy').textContent = isEn ? 'Privacy Policy' : 'Məxfilik Siyasəti';
-        document.getElementById('footerTerms').textContent = isEn ? 'Terms of Service' : 'İstifadə Şərtləri';
-        document.getElementById('footerPrivacy').textContent = isEn ? 'Privacy Policy' : 'Məxfilik Siyasəti';
-
-        try { localStorage.setItem('helmer_language', lang); } catch (e) {}
-        updateSupportChat();
-      }
-
-      let currentUserName = "";
-      function updateSupportChat() {
-        const isEn = document.documentElement.lang === "en";
-        const tooltip = document.getElementById("supportChatTooltipText");
-        const bubble = document.getElementById("supportChatBubble");
-        const title = document.getElementById("supportPopoverTitle");
-        const subtitle = document.getElementById("supportPopoverSubtitle");
-        const label = document.getElementById("supportEmailLabel");
-        const copyBtn = document.getElementById("supportCopyEmailBtn");
-        const closeBtn = document.getElementById("supportPopoverClose");
-        if (tooltip) {
-          tooltip.textContent = isEn
-            ? (currentUserName ? "Hi " + currentUserName + ", need help?" : "Hi, need help?")
-            : (currentUserName ? "Salam " + currentUserName + ", kömək lazımdır?" : "Salam, kömək lazımdır?");
-        }
-        if (bubble) bubble.setAttribute("aria-label", isEn ? "Support & Contact" : "Kömək və Dəstək");
-        if (title) title.textContent = isEn ? "Help & Support" : "Kömək və Dəstək";
-        if (subtitle) subtitle.textContent = isEn ? "Get in touch with us for questions or feedback." : "Suallarınız və ya təklifləriniz üçün bizə yazın.";
-        if (label) label.textContent = isEn ? "Send an email" : "E-poçt vasitəsilə yazın";
-        if (copyBtn) copyBtn.textContent = isEn ? "Copy email" : "Ünvanı kopyala";
-        if (closeBtn) closeBtn.setAttribute("aria-label", isEn ? "Close" : "Bağla");
-      }
-
-      // Initial language detection
-      (function() {
-        const urlParams = new URLSearchParams(window.location.search);
-        const paramLang = urlParams.get('lang');
-        if (paramLang === 'en' || paramLang === 'az') {
-          setLang(paramLang);
-        } else {
-          try {
-            const stored = localStorage.getItem('helmer_language');
-            if (stored === 'en') setLang('en');
-          } catch (e) {}
-        }
-
-        const widget = document.getElementById("supportChatWidget");
-        const popover = document.getElementById("supportChatPopover");
-        const bubble = document.getElementById("supportChatBubble");
-        const closeBtn = document.getElementById("supportPopoverClose");
-        const copyBtn = document.getElementById("supportCopyEmailBtn");
-
-        function openPopover() {
-          if (!popover || !bubble || !widget) return;
-          popover.hidden = false;
-          bubble.setAttribute("aria-expanded", "true");
-          widget.classList.add("is-popover-open");
-        }
-
-        function closePopover() {
-          if (!popover || !bubble || !widget) return;
-          popover.hidden = true;
-          bubble.setAttribute("aria-expanded", "false");
-          widget.classList.remove("is-popover-open");
-        }
-
-        if (bubble) {
-          bubble.addEventListener("click", function(e) {
-            e.stopPropagation();
-            if (popover.hidden) {
-              openPopover();
-            } else {
-              closePopover();
-            }
-          });
-        }
-
-        if (closeBtn) {
-          closeBtn.addEventListener("click", function(e) {
-            e.stopPropagation();
-            closePopover();
-          });
-        }
-
-        if (copyBtn) {
-          copyBtn.addEventListener("click", function(e) {
-            e.stopPropagation();
-            const isEn = document.documentElement.lang === "en";
-            try {
-              navigator.clipboard.writeText("support@helmeros.com");
-              copyBtn.textContent = isEn ? "Copied!" : "Kopyalandı!";
-              setTimeout(function() {
-                copyBtn.textContent = isEn ? "Copy email" : "Ünvanı kopyala";
-              }, 2000);
-            } catch (err) {}
-          });
-        }
-
-        document.addEventListener("click", function(e) {
-          if (widget && !widget.contains(e.target) && popover && !popover.hidden) {
-            closePopover();
-          }
-        });
-
-        document.addEventListener("keydown", function(e) {
-          if (e.key === "Escape" && popover && !popover.hidden) {
-            closePopover();
-          }
-        });
-
-        try {
-          fetch("/api/auth/me")
-            .then(function(r) { return r.ok ? r.json() : null; })
-            .then(function(data) {
-              if (data && data.user) {
-                if (data.user.fullName) {
-                  currentUserName = data.user.fullName.trim().split(/\s+/)[0];
-                } else if (data.user.username) {
-                  var u = data.user.username.trim();
-                  currentUserName = u.charAt(0).toUpperCase() + u.slice(1);
-                }
-                updateSupportChat();
-              }
-            })
-            .catch(function() {});
-        } catch (e) {}
-      })();
-    </script>
+      </noscript>
+    </main>
 
     <div class="support-chat-widget" id="supportChatWidget">
       <div class="support-chat-tooltip" role="tooltip">
@@ -462,18 +108,12 @@
           <a href="mailto:support@helmeros.com" class="support-email-option">
             <div class="support-email-icon-wrap" aria-hidden="true">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect width="20" height="16" x="2" y="4" rx="2"/>
-                <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>
+                <rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>
               </svg>
             </div>
             <div class="support-email-text-wrap">
               <span class="support-email-label" id="supportEmailLabel">E-poçt vasitəsilə yazın</span>
               <span class="support-email-address">support@helmeros.com</span>
-            </div>
-            <div class="support-email-arrow" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="9 18 15 12 9 6"/>
-              </svg>
             </div>
           </a>
           <button type="button" class="support-copy-email-btn" id="supportCopyEmailBtn">Ünvanı kopyala</button>
@@ -486,5 +126,7 @@
         <span class="support-chat-status-dot" aria-hidden="true"></span>
       </button>
     </div>
+
+    <script type="module" src="/legal-page.js"></script>
   </body>
 </html>

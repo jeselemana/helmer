@@ -30,10 +30,6 @@ const AUTH_PATHS = new Set([
 
 let pendingReturnPath = "/workspace";
 
-function openLegalDoc(type) {
-  window.dispatchEvent(new CustomEvent("helmer:open-legal", { detail: { type } }));
-}
-
 function legalNoticeElement() {
   const terms = document.createElement("p");
   terms.className = "auth-terms";

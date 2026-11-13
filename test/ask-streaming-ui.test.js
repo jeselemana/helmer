@@ -156,7 +156,7 @@ test('first words paint immediately and same-packet completion preserves a bound
   assert.equal(reduced.currentText, reduced.targetText); assert.equal(frames.size, 0);
 });
 
-test('compact Ask preserves final source chips and cancels generation when closed', async t => {
+test('compact Ask omits inline source chips and cancels generation when closed', async t => {
   const w = harness(t);
   w.AbortController = AbortController;
   w.TextDecoder = TextDecoder;
@@ -180,8 +180,7 @@ test('compact Ask preserves final source chips and cancels generation when close
   `);
   for (let i = 0; i < 20 && !w.saved; i++) await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(w.saved, true);
-  assert.equal(w.document.querySelectorAll('.loading-ask-modal .ask-grounding-chip').length, 1);
-  assert.equal(w.document.querySelector('.loading-ask-modal .ask-grounding-chip-title').textContent, 'Official source');
+  assert.equal(w.document.querySelectorAll('.loading-ask-modal .ask-grounding-chip').length, 0);
   let signal;
   w.fetch = (_url, options) => new Promise((_resolve, reject) => {
     signal = options.signal;

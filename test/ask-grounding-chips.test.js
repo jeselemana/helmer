@@ -76,14 +76,8 @@ test("2. Frontend script.js: implements renderAskSourceChips and wires it to Ask
   assert.match(scriptContent, /target = "_blank"/, "Must open links in new tab");
   assert.match(scriptContent, /rel = "noopener noreferrer"/, "Must have rel=noopener noreferrer for security");
 
-  // Must be wired into renderAsk
-  assert.match(scriptContent, /renderAskSourceChips\(message\.groundingMetadata\)/, "Must render source chips in renderAsk");
-
-  // Must be wired into updateActiveAskMessageContent
-  assert.match(scriptContent, /updateActiveAskMessageContent[\s\S]*?renderAskSourceChips/, "Must update active streaming bubble with source chips");
-
-  // Must be wired into buildStrategyAskMessage
-  assert.match(scriptContent, /buildStrategyAskMessage[\s\S]*?renderAskSourceChips/, "Must render source chips in strategy ask view");
+  // Must wire openGroundingSourcesModal in message details/actions
+  assert.match(scriptContent, /openGroundingSourcesModal\(message\.groundingMetadata\)/, "Must open grounding sources modal from message details");
 
   // Must support inline markdown links safely
   assert.match(scriptContent, /ask-inline-link/, "Must support safe inline links");

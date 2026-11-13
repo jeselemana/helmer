@@ -140,7 +140,8 @@ export function createAskService({ getClient = getGeminiClient, fileCache = gemi
     if (config.toolConfig?.functionCallingConfig?.mode === 'NONE') config.toolConfig.functionCallingConfig.mode = 'AUTO';
     let usedUngroundedFallback = false, published = false;
     const run = async attemptConfig => {
-      let text = '', outputBytes = 0, usage = null, groundingMetadata = null, publishedLength = 0, lastGrounding;
+      let text = '', outputBytes = 0, usage = null, groundingMetadata = null, publishedLength = 0;
+      let lastChunkGroundingKey = '', currentGroundingKey = '', lastEmittedGroundingKey = '';
       const timeout = new AbortController();
       const attemptSignal = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
       let timer;
@@ -159,11 +160,20 @@ export function createAskService({ getClient = getGeminiClient, fileCache = gemi
         const raw = response.candidates?.[0]?.groundingMetadata || response.groundingMetadata;
         if (raw) {
           const next = sanitizeGroundingMetadata(raw);
-          if (next) groundingMetadata = sanitizeGroundingMetadata({
-            groundingChunks: [...(groundingMetadata?.groundingChunks || []), ...(next.groundingChunks || [])],
-            webSearchQueries: [...(groundingMetadata?.webSearchQueries || []), ...(next.webSearchQueries || [])],
-            searchSuggestions: [...(groundingMetadata?.searchSuggestions || []), ...(next.searchSuggestions || [])],
-          });
+          if (next) {
+            const nextKey = JSON.stringify(next);
+            if (nextKey !== lastChunkGroundingKey) {
+              lastChunkGroundingKey = nextKey;
+              groundingMetadata = groundingMetadata
+                ? sanitizeGroundingMetadata({
+                    groundingChunks: [...(groundingMetadata.groundingChunks || []), ...(next.groundingChunks || [])],
+                    webSearchQueries: [...(groundingMetadata.webSearchQueries || []), ...(next.webSearchQueries || [])],
+                    searchSuggestions: [...(groundingMetadata.searchSuggestions || []), ...(next.searchSuggestions || [])],
+                  })
+                : next;
+              currentGroundingKey = groundingMetadata ? JSON.stringify(groundingMetadata) : '';
+            }
+          }
         }
         const delta = response.text || '';
         text += delta;
@@ -174,9 +184,12 @@ export function createAskService({ getClient = getGeminiClient, fileCache = gemi
           assertExecutionActive(undefined, signal);
           if (text.length > publishedLength) {
             published = true;
-            await onChunk(text.slice(publishedLength), groundingMetadata !== lastGrounding ? groundingMetadata || undefined : undefined);
+            const emitGrounding = currentGroundingKey && currentGroundingKey !== lastEmittedGroundingKey
+              ? groundingMetadata
+              : undefined;
+            await onChunk(text.slice(publishedLength), emitGrounding);
             publishedLength = text.length;
-            lastGrounding = groundingMetadata;
+            if (emitGrounding) lastEmittedGroundingKey = currentGroundingKey;
           }
         }
         // Metadata-only prelude must not disable the first-text search deadline.

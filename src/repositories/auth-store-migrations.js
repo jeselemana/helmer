@@ -1,6 +1,6 @@
 export const AUTH_USER_SCHEMA_VERSION = 3;
 
-function migrateUser(user) {
+export function migrateUser(user) {
   if (!user || typeof user !== "object") return user;
   const currentSettings = user.settings && typeof user.settings === "object" ? user.settings : {};
   return {

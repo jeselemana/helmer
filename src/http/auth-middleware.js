@@ -34,14 +34,16 @@ export function createIdentityMiddleware({ authStore, userRepository }) {
       const canPreloadStore = typeof userRepository?.readStore === "function";
       const [session, preloadedStore] = await Promise.all([
         authStore.getSession(sessionId),
-        canPreloadStore ? userRepository.readStore({ force: true }).catch(() => null) : Promise.resolve(null),
+        canPreloadStore ? userRepository.readStore({ force: true, clone: false, raw: true }).catch(() => null) : Promise.resolve(null),
       ]);
       if (!session) {
         clearSessionCookie(req, res);
         return next();
       }
       let user = Array.isArray(preloadedStore?.users)
-        ? (preloadedStore.users.find((item) => item.id === session.userId) || null)
+        ? (typeof userRepository?.extractUserById === "function"
+            ? userRepository.extractUserById(preloadedStore, session.userId)
+            : (preloadedStore.users.find((item) => item.id === session.userId) || null))
         : await userRepository.findById(session.userId);
       const needsCloudRevalidation = Boolean(
         !user ||

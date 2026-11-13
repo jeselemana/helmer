@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { TenantLockManager } from "./tenant-lock.js";
 import { storageCorruption, writeJsonAtomically } from "./atomic-json-store.js";
-import { migrateAuthUserStore } from "./auth-store-migrations.js";
+import { migrateAuthUserStore, migrateUser } from "./auth-store-migrations.js";
 import { normalizeEmail, normalizeUsername, isReservedUsername } from "../auth/validation.js";
 import {
   isR2Configured,
@@ -41,6 +41,7 @@ export class FileUserRepository {
     this.lastR2Sync = 0;
     this.syncPromise = null;
     this.inFlightStoreRead = null;
+    this._localRawSnapshot = null;
   }
 
   async ensure() {
@@ -58,6 +59,7 @@ export class FileUserRepository {
       // R2 is authoritative, including an empty store or deleted cloud object.
       const { store } = await this.readAuthoritativeStore({ force: Boolean(force) });
       await writeJsonAtomically(this.filePath, store);
+    this._localRawSnapshot = null;
       this.cache = store;
       this.lastR2Sync = Date.now();
       this.lastMtimeMs = (await fs.stat(this.filePath)).mtimeMs;
@@ -68,19 +70,15 @@ export class FileUserRepository {
     finally { this.syncPromise = null; }
   }
 
-  async readAuthoritativeStore({ force = false } = {}) {
+  async readRawAuthoritativeStore({ force = false, clone = true } = {}) {
     if (this.cloud) {
       try {
-        const { record, etag, notFound } = await this.readCloud({ force });
+        const { record, etag, notFound } = await this.readCloud({ force, clone });
         if (record && !Array.isArray(record) && Array.isArray(record.users)) {
-          const store = migrateAuthUserStore(record);
-          this.cache = store;
-          return { store, etag };
+          return { raw: record, etag };
         }
         if (notFound || record === null) {
-          const store = migrateAuthUserStore(null);
-          this.cache = store;
-          return { store, etag: etag || null };
+          return { raw: null, etag: etag || null };
         }
         throw storageCorruption("Invalid cloud user storage.");
       } catch (err) {
@@ -89,41 +87,57 @@ export class FileUserRepository {
       }
     }
 
-    // Local file mode: always read fresh from disk
+    // Local file mode: revalidate via nanosecond stat before skipping disk read/parse.
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      const store = migrateAuthUserStore(JSON.parse(raw || "{}"));
-      this.cache = store;
-      try {
-        this.lastMtimeMs = (await fs.stat(this.filePath)).mtimeMs;
-      } catch {}
-      return { store, etag: null };
+      const stat = await fs.stat(this.filePath, { bigint: true });
+      const statKey = `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+      if (this._localRawSnapshot?.key === statKey) {
+        const parsed = this._localRawSnapshot.parsed;
+        return { raw: clone && parsed ? structuredClone(parsed) : parsed, etag: null };
+      }
+      const rawText = await fs.readFile(this.filePath, "utf8");
+      const parsed = JSON.parse(rawText || "{}");
+      this._localRawSnapshot = { key: statKey, parsed };
+      this.lastMtimeMs = Number(stat.mtimeNs) / 1e6;
+      return { raw: clone && parsed ? structuredClone(parsed) : parsed, etag: null };
     } catch (error) {
       if (error.code === "ENOENT") {
-        const store = migrateAuthUserStore(null);
-        this.cache = store;
-        return { store, etag: null };
+        this._localRawSnapshot = null;
+        return { raw: null, etag: null };
       }
       if (error instanceof SyntaxError) throw storageCorruption("User storage contains invalid JSON.", error);
       throw error;
     }
   }
 
-  async readStore({ force = false } = {}) {
+  async readAuthoritativeStore({ force = false, clone = true } = {}) {
+    const { raw, etag } = await this.readRawAuthoritativeStore({ force, clone });
+    const store = migrateAuthUserStore(raw);
+    this.cache = store;
+    return { store, etag };
+  }
+
+  async readStore({ force = false, clone = true, raw = false } = {}) {
     let pending = (this.cloud && !force) ? this.inFlightStoreRead : null;
     if (!pending) {
-      pending = this.readAuthoritativeStore({ force: Boolean(force) });
+      pending = this.readRawAuthoritativeStore({ force: Boolean(force), clone: false });
       if (this.cloud && !force) {
         this.inFlightStoreRead = pending;
         const clear = () => { if (this.inFlightStoreRead === pending) this.inFlightStoreRead = null; };
         pending.then(clear, clear);
       }
     }
-    const { store } = await pending;
+    const { raw: rawRecord } = await pending;
     this.lastR2Sync = Date.now();
+    if (raw) {
+      const users = Array.isArray(rawRecord) ? rawRecord : (Array.isArray(rawRecord?.users) ? rawRecord.users : []);
+      return clone ? { users: structuredClone(users) } : { users };
+    }
+    const store = migrateAuthUserStore(rawRecord);
+    this.cache = store;
     // Share the read, never mutable account objects or a time-based auth cache.
-    return this.cloud ? structuredClone(store) : store;
+    return clone ? structuredClone(store) : store;
   }
 
   async writeStore(store) {
@@ -147,6 +161,7 @@ export class FileUserRepository {
     }
 
     await writeJsonAtomically(this.filePath, store);
+    this._localRawSnapshot = null;
 
     try {
       this.lastMtimeMs = (await fs.stat(this.filePath)).mtimeMs;
@@ -199,9 +214,16 @@ export class FileUserRepository {
     return this.withLock(operation);
   }
 
+  extractUserById(store, id) {
+    if (!id || !Array.isArray(store?.users)) return null;
+    const found = store.users.find((item) => item.id === id) || null;
+    return found ? structuredClone(migrateUser(found)) : null;
+  }
+
   async findById(id) {
-    const { users } = await this.readStore();
-    return users.find((item) => item.id === id) || null;
+    if (!id) return null;
+    const store = await this.readStore({ clone: false, raw: true });
+    return this.extractUserById(store, id);
   }
 
   async findByUsername(username) {

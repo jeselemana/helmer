@@ -1,9 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { PrivacyPolicy, privacySnapshot, executionContext } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
 import { AiPolicy } from '../src/services/security/ai-policy.js';
 import { createHelmerDecisionRouter } from '../src/services/ai/decision-router.js';
+import { FileUserRepository } from '../src/repositories/file-user-repository.js';
+import { FilePlannerRepository } from '../src/repositories/file-planner-repository.js';
 
 function deferred() {
   let resolve;
@@ -327,4 +333,86 @@ test('HelmerDecisionRouter uses 0 ms fast-path only for ungrounded pure greeting
   assert.equal(groundedVerify.routerSource, 'local_rules');
   assert.equal(groundedVerify.enableSearch, true);
   assert.equal(vertexCalls, 1);
+});
+
+test('FileUserRepository.findById isolates a single registered user, invalidates on update, and forwards raw/clone flags to cloud', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-user-latency-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const filePath = path.join(dir, 'users.json');
+  const repo = new FileUserRepository(filePath, null, { cloud: false });
+
+  const userA = await repo.create({
+    email: 'registered.a@example.com',
+    username: 'registered_a',
+    passwordHash: 'hash_a',
+    fullName: 'User A',
+  });
+  await repo.create({
+    email: 'registered.b@example.com',
+    username: 'registered_b',
+    passwordHash: 'hash_b',
+    fullName: 'User B',
+  });
+
+  const firstRead = await repo.findById(userA.id);
+  const secondRead = await repo.findById(userA.id);
+  assert.ok(firstRead && secondRead);
+  assert.notEqual(firstRead, secondRead);
+  firstRead.settings.displayName = 'Mutated Locally';
+  assert.notEqual((await repo.findById(userA.id)).settings?.displayName, 'Mutated Locally');
+
+  await repo.update(userA.id, { fullName: 'User A Updated' });
+  const afterUpdate = await repo.findById(userA.id);
+  assert.equal(afterUpdate.fullName, 'User A Updated');
+
+  const cloudCalls = [];
+  const rawStore = JSON.parse(await fs.readFile(filePath, 'utf8'));
+  const cloudRepo = new FileUserRepository(filePath, null, {
+    cloud: true,
+    readCloud: async opts => {
+      cloudCalls.push(opts);
+      return { record: rawStore, etag: '"etag-1"', notFound: false, isCloud: true };
+    },
+  });
+  const cloudUser = await cloudRepo.findById(userA.id);
+  assert.equal(cloudUser.fullName, 'User A Updated');
+  const rawStoreView = await cloudRepo.readStore({ force: true, clone: false, raw: true });
+  assert.equal(cloudRepo.extractUserById(rawStoreView, userA.id).fullName, 'User A Updated');
+  assert.deepEqual(cloudCalls, [
+    { force: false, clone: false },
+    { force: true, clone: false },
+  ]);
+});
+
+test('FilePlannerRepository.getById enforces tenant isolation and coalesces cloud reads with clone: false', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-planner-latency-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const ownerA = randomUUID(), ownerB = randomUUID();
+  const repo = new FilePlannerRepository(dir, null, { cloud: false });
+
+  const [taskA] = await repo.addBatch(ownerA, [{ text: 'Registered owner task' }]);
+  assert.equal((await repo.getById(taskA.id, ownerA))?.text, 'Registered owner task');
+  assert.equal(await repo.getById(taskA.id, ownerB), null);
+  assert.equal(await repo.getById(randomUUID(), ownerA), null);
+
+  let cloudReads = 0;
+  const seenOptions = [];
+  const cloudRepo = new FilePlannerRepository(dir, null, {
+    cloud: true,
+    readCloud: async (_ownerId, opts) => {
+      cloudReads++;
+      seenOptions.push(opts);
+      await new Promise(resolve => setTimeout(resolve, 15));
+      return { record: [taskA], etag: '"planner-etag-1"', notFound: false, isCloud: true };
+    },
+  });
+
+  const [r1, r2] = await Promise.all([
+    cloudRepo.getById(taskA.id, ownerA),
+    cloudRepo.getById(taskA.id, ownerA),
+  ]);
+  assert.equal(cloudReads, 1);
+  assert.equal(seenOptions[0].clone, false);
+  assert.notEqual(r1, r2);
+  assert.equal(r1.text, 'Registered owner task');
 });

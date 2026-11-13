@@ -50,6 +50,7 @@ export class FilePlannerRepository {
 
     // Track last synced ETag/digest per tenantKey to skip redundant disk/Redis writes on unchanged R2 reads
     this.syncedShardTags = new Map();
+    this.inFlightTenantReads = new Map();
 
     // Migration memoization promise
     this._migrationPromise = null;
@@ -324,11 +325,23 @@ export class FilePlannerRepository {
    * @param {string} tenantKey
    * @returns {Promise<{ records: any[], etag: string | null, notFound?: boolean, tombstone?: boolean, deletedAt?: string }>}
    */
-  async readTenantDataWithEtag(ownerId, tenantKey) {
+  async readCloudSnapshot(tenantKey, { clone = true } = {}) {
+    let pending = this.inFlightTenantReads.get(tenantKey);
+    if (!pending) {
+      pending = Promise.resolve().then(() => this.readCloud(tenantKey, { clone: false }));
+      this.inFlightTenantReads.set(tenantKey, pending);
+      const clear = () => { if (this.inFlightTenantReads.get(tenantKey) === pending) this.inFlightTenantReads.delete(tenantKey); };
+      pending.then(clear, clear);
+    }
+    const res = await pending;
+    return clone ? structuredClone(res) : res;
+  }
+
+  async readTenantDataWithEtag(ownerId, tenantKey, options = {}) {
     // 1. Try Cloudflare R2
     if (this.cloud) {
       try {
-        const res = await this.readCloud(tenantKey);
+        const res = await this.readCloudSnapshot(tenantKey, options);
         const { record, etag, notFound, tombstone } = res || {};
         if (tombstone || (record && typeof record === "object" && !Array.isArray(record) && record._tombstone)) {
           this.syncedShardTags.delete(tenantKey);
@@ -339,12 +352,13 @@ export class FilePlannerRepository {
           return { records: [], etag, notFound: false, tombstone: true, deletedAt: record?.deletedAt };
         }
         if (record && Array.isArray(record)) {
-          const serialized = JSON.stringify(record);
-          const tagKey = etag ? `${etag}:${serialized.length}` : createHash("sha256").update(serialized).digest("hex");
+          const tagKey = etag
+            ? `${etag}:${record.length}:${record[0]?.id || ""}:${record[0]?.updatedAt || ""}:${record.at(-1)?.id || ""}:${record.at(-1)?.updatedAt || ""}`
+            : createHash("sha256").update(JSON.stringify(record)).digest("hex");
           if (this.syncedShardTags.get(tenantKey) !== tagKey) {
             await this.writeLocalTenant(tenantKey, record).catch(() => {});
             if (this.redis?.isReady) {
-              await this.redis.set(this.tenantRedisKey(ownerId), serialized).catch(() => {});
+              await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(record)).catch(() => {});
             }
             this.syncedShardTags.set(tenantKey, tagKey);
           }
@@ -488,10 +502,10 @@ export class FilePlannerRepository {
    * @param {string} ownerId
    * @returns {Promise<any[]>}
    */
-  async readTenant(ownerId) {
+  async readTenant(ownerId, options = {}) {
     await this.ensureMigrated();
     const tenantKey = this.tenantKey(ownerId);
-    const { records, tombstone } = await this.readTenantDataWithEtag(ownerId, tenantKey);
+    const { records, tombstone } = await this.readTenantDataWithEtag(ownerId, tenantKey, options);
     if (tombstone) return [];
     return records.filter((r) => !r.deleted && guestVisible(r, ownerId));
   }
@@ -562,6 +576,13 @@ export class FilePlannerRepository {
    * @param {string} ownerId
    * @returns {Promise<any[]>}
    */
+  async getById(id, ownerId) {
+    if (!id || !ownerId) return null;
+    const records = await this.readTenant(ownerId, { clone: false });
+    const found = records.find((task) => task.id === id && task.ownerId === ownerId && !task.deleted) || null;
+    return found ? structuredClone(found) : null;
+  }
+
   async list(ownerId) {
     if (!ownerId) return [];
     const records = await this.readTenant(ownerId);

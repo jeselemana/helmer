@@ -33,6 +33,14 @@ export const REDIS_CIRCUIT_KEYS = Object.freeze({
   FAILURES_TTL_SECONDS: 300,
 });
 
+export const VERTEX_CIRCUIT_KEYS = Object.freeze({
+  FAILURES: "helmer:decision_vertex:failures",
+  CIRCUIT_OPEN: "helmer:decision_vertex:circuit_open",
+  THRESHOLD: REDIS_CIRCUIT_KEYS.THRESHOLD,
+  OPEN_TTL_SECONDS: REDIS_CIRCUIT_KEYS.OPEN_TTL_SECONDS,
+  FAILURES_TTL_SECONDS: REDIS_CIRCUIT_KEYS.FAILURES_TTL_SECONDS,
+});
+
 const URL_OR_DOMAIN_PATTERN =
   /https?:\/\/[^\s]+|www\.[^\s]+|\b[a-zA-Z0-9-]+\.(?:az|com|org|net|io|co|ai|edu|gov|tr|ru|tech|biz|info|me|app)\b/i;
 
@@ -269,13 +277,28 @@ function isTimeoutError(error) {
   );
 }
 
+function isNetworkError(error) {
+  if (!error) return false;
+  if (error.name === "TypeError") return true;
+  const code = String(error.code || error.cause?.code || "").toUpperCase();
+  return (
+    code === "ECONNREFUSED" ||
+    code === "ENOTFOUND" ||
+    code === "ECONNRESET" ||
+    code === "EAI_AGAIN" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_SOCKET"
+  );
+}
+
 function isCircuitBreakerFailure(error) {
   if (!error || error.isSafetyBlock === true || error.code === "AI_SAFETY_BLOCKED" || error.code === "AI_CONTENT_BLOCKED") {
     return false;
   }
   if (error.code === "AI_NOT_CONFIGURED") return false;
   const status = Number(error.status);
-  return status === 503 || status === 429 || isTimeoutError(error);
+  return status === 404 || status === 429 || status >= 500 || isTimeoutError(error) || isNetworkError(error);
 }
 
 function buildComposedSignal(timeoutMs, callerSignal) {
@@ -310,6 +333,22 @@ export class HelmerDecisionRouter {
     this.localFailuresBeforeOpen = localFailuresBeforeOpen;
     this.localFailures = 0;
     this.localCircuitOpenedUntil = 0;
+    this.vertexLocalFailures = 0;
+    this.vertexLocalCircuitOpenedUntil = 0;
+  }
+
+  _circuitDescriptor(target = "primary") {
+    return target === "vertex"
+      ? {
+          keys: VERTEX_CIRCUIT_KEYS,
+          failuresField: "vertexLocalFailures",
+          openedUntilField: "vertexLocalCircuitOpenedUntil",
+        }
+      : {
+          keys: REDIS_CIRCUIT_KEYS,
+          failuresField: "localFailures",
+          openedUntilField: "localCircuitOpenedUntil",
+        };
   }
 
   _isSyntheticUnmockedStudioConfig() {
@@ -326,43 +365,45 @@ export class HelmerDecisionRouter {
     return /^test-/i.test(project) || (!project && /^test-/i.test(apiKey));
   }
 
-  async _isCircuitOpen() {
+  async _isCircuitOpen(target = "primary") {
+    const { keys, openedUntilField } = this._circuitDescriptor(target);
     if (this.redis && typeof this.redis.get === "function") {
       try {
-        const val = await this.redis.get(REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN);
+        const val = await this.redis.get(keys.CIRCUIT_OPEN);
         return val === "1" || val === 1 || val === true;
       } catch {
         return false;
       }
     }
-    return Date.now() < this.localCircuitOpenedUntil;
+    return Date.now() < this[openedUntilField];
   }
 
-  async _recordFailure() {
+  async _recordFailure(target = "primary") {
+    const { keys, failuresField, openedUntilField } = this._circuitDescriptor(target);
     if (this.redis && typeof this.redis.incr === "function") {
       try {
-        const count = Number(await this.redis.incr(REDIS_CIRCUIT_KEYS.FAILURES));
+        const count = Number(await this.redis.incr(keys.FAILURES));
         if (typeof this.redis.expire === "function") {
-          await this.redis.expire(REDIS_CIRCUIT_KEYS.FAILURES, REDIS_CIRCUIT_KEYS.FAILURES_TTL_SECONDS);
+          await this.redis.expire(keys.FAILURES, keys.FAILURES_TTL_SECONDS);
         }
-        if (count >= REDIS_CIRCUIT_KEYS.THRESHOLD && typeof this.redis.set === "function") {
+        if (count >= keys.THRESHOLD && typeof this.redis.set === "function") {
           try {
-            await this.redis.set(REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN, "1", {
-              EX: REDIS_CIRCUIT_KEYS.OPEN_TTL_SECONDS,
+            await this.redis.set(keys.CIRCUIT_OPEN, "1", {
+              EX: keys.OPEN_TTL_SECONDS,
             });
           } catch {
             if (typeof this.redis.setEx === "function") {
               await this.redis.setEx(
-                REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN,
-                REDIS_CIRCUIT_KEYS.OPEN_TTL_SECONDS,
+                keys.CIRCUIT_OPEN,
+                keys.OPEN_TTL_SECONDS,
                 "1"
               );
             } else {
-              await this.redis.set(REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN, "1");
+              await this.redis.set(keys.CIRCUIT_OPEN, "1");
               if (typeof this.redis.expire === "function") {
                 await this.redis.expire(
-                  REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN,
-                  REDIS_CIRCUIT_KEYS.OPEN_TTL_SECONDS
+                  keys.CIRCUIT_OPEN,
+                  keys.OPEN_TTL_SECONDS
                 );
               }
             }
@@ -373,18 +414,19 @@ export class HelmerDecisionRouter {
         // Fall through gracefully on Redis errors
       }
     }
-    this.localFailures += 1;
-    if (this.localFailures >= this.localFailuresBeforeOpen) {
-      this.localCircuitOpenedUntil = Date.now() + REDIS_CIRCUIT_KEYS.OPEN_TTL_SECONDS * 1000;
+    this[failuresField] += 1;
+    if (this[failuresField] >= this.localFailuresBeforeOpen) {
+      this[openedUntilField] = Date.now() + keys.OPEN_TTL_SECONDS * 1000;
     }
   }
 
-  async _resetFailures() {
-    this.localFailures = 0;
-    this.localCircuitOpenedUntil = 0;
+  async _resetFailures(target = "primary") {
+    const { keys, failuresField, openedUntilField } = this._circuitDescriptor(target);
+    this[failuresField] = 0;
+    this[openedUntilField] = 0;
     if (this.redis && typeof this.redis.del === "function") {
       try {
-        await this.redis.del(REDIS_CIRCUIT_KEYS.FAILURES);
+        await this.redis.del(keys.FAILURES);
       } catch {
         // Ignore Redis reset failures
       }
@@ -438,7 +480,7 @@ export class HelmerDecisionRouter {
     }
   }
 
-  async _callVertexFallback({ systemInstruction, serializedContext, schema, signal }) {
+  async _callVertexFallback({ systemInstruction, serializedContext, schema, timeoutMs = null, signal }) {
     if (signal?.aborted) {
       throw signal.reason || new Error("Aborted");
     }
@@ -448,30 +490,56 @@ export class HelmerDecisionRouter {
         status: 503,
       });
     }
-    const client = this.getVertexClientFn(null, this.env);
-    const { signal: composedSignal } = buildComposedSignal(2500, signal);
-    const response = await client.models.generateContent({
-      model: DECISION_FALLBACK_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: `${systemInstruction}\n\n${serializedContext}` }],
+    if (await this._isCircuitOpen("vertex")) {
+      throw Object.assign(new Error("Vertex fallback circuit breaker is open."), {
+        code: "VERTEX_CIRCUIT_OPEN",
+        isCircuitOpen: true,
+      });
+    }
+    const vertexTimeoutMs = Math.min(1200, Math.max(Number(timeoutMs) * 2 || 800, 800));
+    const { signal: composedSignal, timeoutSignal } = buildComposedSignal(vertexTimeoutMs, signal);
+    try {
+      const client = this.getVertexClientFn(null, this.env);
+      const response = await client.models.generateContent({
+        model: DECISION_FALLBACK_MODEL,
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: `${systemInstruction}\n\n${serializedContext}` }],
+          },
+        ],
+        config: {
+          thinkingConfig: { thinkingLevel: "MINIMAL" },
+          temperature: 0.0,
+          maxOutputTokens: 64,
+          responseMimeType: "application/json",
+          abortSignal: composedSignal,
         },
-      ],
-      config: {
-        thinkingConfig: { thinkingLevel: "MINIMAL" },
-        temperature: 0.0,
-        maxOutputTokens: 64,
-        responseMimeType: "application/json",
-        abortSignal: composedSignal,
-      },
-    });
-    const rawText =
-      response?.text ||
-      response?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("") ||
-      "";
-    const parsed = extractJsonFromText(rawText);
-    return schema.parse(parsed);
+      });
+      const rawText =
+        response?.text ||
+        response?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("") ||
+        "";
+      const parsed = schema.parse(extractJsonFromText(rawText));
+      await this._resetFailures("vertex");
+      return parsed;
+    } catch (error) {
+      if (signal?.aborted && !timeoutSignal.aborted) {
+        throw error;
+      }
+      const normalizedError =
+        timeoutSignal.aborted && !isTimeoutError(error)
+          ? Object.assign(new Error("Vertex fallback request timed out."), {
+              name: "TimeoutError",
+              code: "TIMEOUT",
+              isTimeout: true,
+            })
+          : error;
+      if (isCircuitBreakerFailure(normalizedError)) {
+        await this._recordFailure("vertex");
+      }
+      throw normalizedError;
+    }
   }
 
   _logDecision(mode, result) {
@@ -629,6 +697,7 @@ export class HelmerDecisionRouter {
         systemInstruction: fallbackSystemInstruction,
         serializedContext,
         schema: ASK_FALLBACK_SCHEMA,
+        timeoutMs,
         signal,
       });
       const enableSearch = Boolean(parsed.s || parsed.r);
@@ -753,6 +822,7 @@ export class HelmerDecisionRouter {
         systemInstruction: fallbackSystemInstruction,
         serializedContext,
         schema: BUILD_FALLBACK_SCHEMA,
+        timeoutMs,
         signal,
       });
       return {

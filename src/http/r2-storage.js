@@ -223,7 +223,7 @@ function setR2EtagCache(fullKey, entry) {
   _r2EtagCache.set(fullKey, { ...entry, verifiedAt: Date.now() });
 }
 
-async function readConditionalJsonFromR2(fullKey, errorLabel, { force = false } = {}) {
+async function readConditionalJsonFromR2(fullKey, errorLabel, { force = false, clone = true } = {}) {
   if (!isR2Configured()) return { record: null, etag: null, isCloud: false, notFound: true, tombstone: false };
   const s3 = getS3Client();
   if (!s3) return { record: null, etag: null, isCloud: false, notFound: true, tombstone: false };
@@ -231,7 +231,7 @@ async function readConditionalJsonFromR2(fullKey, errorLabel, { force = false } 
   const freshCached = !force ? _r2EtagCache.get(fullKey) : null;
   if (freshCached && freshCached.verifiedAt && (Date.now() - freshCached.verifiedAt < R2_REVALIDATE_TTL_MS)) {
     return {
-      record: freshCached.record ? structuredClone(freshCached.record) : freshCached.record,
+      record: (clone && freshCached.record) ? structuredClone(freshCached.record) : freshCached.record,
       etag: freshCached.etag,
       notFound: false,
       isCloud: true,
@@ -295,7 +295,7 @@ async function readConditionalJsonFromR2(fullKey, errorLabel, { force = false } 
   const res = await pending;
   return {
     ...res,
-    record: res.record ? structuredClone(res.record) : res.record,
+    record: (clone && res.record) ? structuredClone(res.record) : res.record,
   };
 }
 
@@ -397,9 +397,12 @@ function resolveTenantStorageKey(prefixOrKey, maybeTenantKey = null) {
  * @param {string} [maybeTenantKey] - 64-char hex SHA-256 hash of ownerId (optional)
  * @returns {Promise<{ record: any, etag: string | null, notFound?: boolean, isCloud: boolean, tombstone?: boolean }>}
  */
-export async function readTenantObject(prefixOrKey, maybeTenantKey = null) {
-  const fullKey = resolveTenantStorageKey(prefixOrKey, maybeTenantKey);
-  return readConditionalJsonFromR2(fullKey, `readTenantObject (${fullKey})`);
+export async function readTenantObject(prefixOrKey, maybeTenantKey = null, options = {}) {
+  const hasOptsAsSecond = maybeTenantKey && typeof maybeTenantKey === "object";
+  const actualTenantKey = hasOptsAsSecond ? null : maybeTenantKey;
+  const actualOptions = hasOptsAsSecond ? maybeTenantKey : options;
+  const fullKey = resolveTenantStorageKey(prefixOrKey, actualTenantKey);
+  return readConditionalJsonFromR2(fullKey, `readTenantObject (${fullKey})`, actualOptions);
 }
 
 /**
@@ -489,8 +492,8 @@ export async function deleteTenantObject(prefixOrKey, maybeTenantKey = null) {
 }
 
 // Strategy domain helpers
-export async function readStrategyObject(tenantKey) {
-  return readTenantObject("strategies-v1", tenantKey);
+export async function readStrategyObject(tenantKey, options = {}) {
+  return readTenantObject("strategies-v1", tenantKey, options);
 }
 
 export async function writeStrategyObject(tenantKey, record, etag = null) {
@@ -502,8 +505,8 @@ export async function deleteStrategyObject(tenantKey) {
 }
 
 // Chat domain helpers
-export async function readChatObject(tenantKey) {
-  return readTenantObject("chats-v1", tenantKey);
+export async function readChatObject(tenantKey, options = {}) {
+  return readTenantObject("chats-v1", tenantKey, options);
 }
 
 export async function writeChatObject(tenantKey, record, etag = null) {
@@ -515,8 +518,8 @@ export async function deleteChatObject(tenantKey) {
 }
 
 // Planner domain helpers
-export async function readPlannerObject(tenantKey) {
-  return readTenantObject("planner-v1", tenantKey);
+export async function readPlannerObject(tenantKey, options = {}) {
+  return readTenantObject("planner-v1", tenantKey, options);
 }
 
 export async function writePlannerObject(tenantKey, record, etag = null) {

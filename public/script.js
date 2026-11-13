@@ -9,7 +9,6 @@ import {
   getLanguage,
   setLanguage,
   formatDate as i18nFormatDate,
-  LEGAL_DOCS_I18N,
   TRANSLATIONS,
 } from "./i18n.js?v=8.5";
 
@@ -5848,10 +5847,6 @@ function renderAsk() {
           content.appendChild(thinking);
         } else {
           content.appendChild(renderAskRichText(message.content));
-          if (message.groundingMetadata) {
-            const chips = renderAskSourceChips(message.groundingMetadata);
-            if (chips) content.appendChild(chips);
-          }
           if (
             Object.values(GUEST_RESTRICTION_NOTICES).includes(message.content) ||
             (typeof GUEST_RESTRICTION_NOTICES_EN !== "undefined" && Object.values(GUEST_RESTRICTION_NOTICES_EN).includes(message.content))
@@ -7134,11 +7129,6 @@ function renderAskResearchMessageContent(content, message, messageIndex, isEn) {
       const sourcesCard = renderResearchSourcesList(message.sources, isEn);
       if (sourcesCard) card.appendChild(sourcesCard);
     }
-
-    if (message.groundingMetadata) {
-      const chips = renderAskSourceChips(message.groundingMetadata);
-      if (chips) card.appendChild(chips);
-    }
   } else if (isFailed) {
     const errorBody = element("div", "ask-research-error-body");
     const errorMsg = element("span", "ask-research-error-text", message.error || (isEn ? "Research failed." : "Araşdırma zamanı xəta baş verdi."));
@@ -7570,13 +7560,6 @@ function updateActiveAskMessageContent(message, showCaret = true) {
           streamWrap.prepend(richContent);
         } else {
           patchAskRichTextElement(richContent, message.content);
-        }
-
-        if (message.groundingMetadata && streamWrap._renderedGroundingRef !== message.groundingMetadata) {
-          streamWrap.querySelector(".ask-grounding-container")?.remove();
-          const chips = renderAskSourceChips(message.groundingMetadata);
-          if (chips) streamWrap.appendChild(chips);
-          streamWrap._renderedGroundingRef = message.groundingMetadata;
         }
       }
     });
@@ -9393,10 +9376,6 @@ function showLoadingAskModal(initialQuery) {
         if (data.done) {
           reply = data.reply || reply;
           renderReply();
-          if (data.groundingMetadata) {
-            const chips = renderAskSourceChips(data.groundingMetadata);
-            if (chips) loadingItem.querySelector(".ask-thread-msg-content")?.appendChild(chips);
-          }
           rememberSavedAskChat(data.chat);
         }
       });
@@ -11586,10 +11565,6 @@ function buildStrategyAskMessage(message, messageIndex) {
     content.appendChild(thinking);
   } else {
     content.appendChild(renderAskRichText(message.content));
-    if (message.groundingMetadata) {
-      const chips = renderAskSourceChips(message.groundingMetadata);
-      if (chips) content.appendChild(chips);
-    }
   }
 
   if (!isStreaming) appendArtifactCards(content, message);
@@ -14342,7 +14317,12 @@ function renderSettings() {
       element("strong", "", t("settings.legal.termsTitle")),
       element("p", "", t("settings.legal.termsDesc"))
     );
-    termsRow.append(termsInfo, button(isEn ? "View Terms →" : "Baxış keçir →", "secondary-button", () => openLegalModal("terms")));
+    const termsNavLink = element("a", "secondary-button", isEn ? "View Terms →" : "Baxış keçir →");
+    termsNavLink.href = "/terms";
+    termsNavLink.style.display = "inline-flex";
+    termsNavLink.style.alignItems = "center";
+    termsNavLink.style.textDecoration = "none";
+    termsRow.append(termsInfo, termsNavLink);
 
     const privacyRow = element("div", "settings-legal-row");
     const privacyInfo = element("div");
@@ -14350,7 +14330,12 @@ function renderSettings() {
       element("strong", "", t("settings.legal.privacyTitle")),
       element("p", "", t("settings.legal.privacyDesc"))
     );
-    privacyRow.append(privacyInfo, button(isEn ? "View Policy →" : "Baxış keçir →", "secondary-button", () => openLegalModal("privacy")));
+    const privacyNavLink = element("a", "secondary-button", isEn ? "View Policy →" : "Baxış keçir →");
+    privacyNavLink.href = "/privacy";
+    privacyNavLink.style.display = "inline-flex";
+    privacyNavLink.style.alignItems = "center";
+    privacyNavLink.style.textDecoration = "none";
+    privacyRow.append(privacyInfo, privacyNavLink);
 
     const reportRow = element("div", "settings-legal-row");
     const reportInfo = element("div");
@@ -17497,14 +17482,6 @@ function renderLimitsView() {
   workspace.appendChild(view);
 }
 
-const LEGAL_DOCS = new Proxy({}, {
-  get(target, prop) {
-    const lang = getLanguage();
-    const docs = LEGAL_DOCS_I18N[lang] || LEGAL_DOCS_I18N.az;
-    return docs[prop] || docs.terms;
-  },
-});
-
 function openPersonalizationConsentModal(onAccept) {
   const isEn = getLanguage() === "en";
   const overlay = document.querySelector("#legalModalOverlay");
@@ -17553,11 +17530,9 @@ function openPersonalizationConsentModal(onAccept) {
     "personalization-consent-privacy-link",
     isEn ? "Read Privacy Policy →" : "Məxfilik Siyasətini oxu →"
   );
-  privacyLink.href = "#privacy";
-  privacyLink.addEventListener("click", (event) => {
-    event.preventDefault();
-    openLegalModal("privacy");
-  });
+  privacyLink.href = "/privacy";
+  privacyLink.target = "_blank";
+  privacyLink.rel = "noopener noreferrer";
   body.appendChild(privacyLink);
 
   const footer = element("div", "legal-modal-footer personalization-consent-footer");
@@ -17575,36 +17550,6 @@ function openPersonalizationConsentModal(onAccept) {
   acceptBtn.focus();
 }
 
-function openLegalModal(type) {
-  const isEn = getLanguage() === "en";
-  const overlay = document.querySelector("#legalModalOverlay");
-  if (!overlay) return;
-  const doc = LEGAL_DOCS[type] || LEGAL_DOCS.terms;
-
-  overlay.replaceChildren();
-  const card = element("div", "legal-modal-card");
-
-  const header = element("header", "legal-modal-header");
-  const titleGroup = element("div", "legal-modal-title-group");
-  titleGroup.append(element("h2", "", doc.title), element("p", "", doc.subtitle));
-
-  const closeBtn = button("✕", "legal-modal-close", closeLegalModal);
-  closeBtn.setAttribute("aria-label", isEn ? "Close" : "Bağla");
-
-  header.append(titleGroup, closeBtn);
-
-  const body = element("div", "legal-modal-body");
-  body.innerHTML = doc.html;
-
-  const footer = element("div", "legal-modal-footer");
-  footer.appendChild(button(isEn ? "Close" : "Bağla", "primary-button", closeLegalModal));
-
-  card.append(header, body, footer);
-  overlay.append(card, buildSupportChatBubble());
-  overlay.hidden = false;
-  document.body.style.overflow = "hidden";
-}
-
 function closeLegalModal() {
   const overlay = document.querySelector("#legalModalOverlay");
   if (overlay) {
@@ -17613,10 +17558,6 @@ function closeLegalModal() {
   }
   document.body.style.overflow = "";
 }
-
-window.addEventListener("helmer:open-legal", (event) => {
-  openLegalModal(event.detail?.type || "terms");
-});
 
 function openDeleteAccountModal() {
   const isEn = getLanguage() === "en";
@@ -17758,14 +17699,10 @@ function openLegalReportModal({ messageContent = "", model = "" } = {}) {
     </div>
     <div class="legal-report-notice-text">
       ${isEn
-      ? 'AI responses may contain inaccuracies and should not be construed as professional legal or financial advice. For more details, review our <button type="button" class="legal-report-terms-link" id="legalReportTermsLink">Terms of Service</button>.'
-      : 'Süni intellekt cavablarında qeyri-dəqiqlik və ya səhvlər ola bilər və onlar peşəkar məsləhət kimi qəbul edilməməlidir. Ətraflı məlumat üçün <button type="button" class="legal-report-terms-link" id="legalReportTermsLink">İstifadə şərtləri</button> ilə tanış olun.'}
+      ? 'AI responses may contain inaccuracies and should not be construed as professional legal or financial advice. For more details, review our <a href="/terms" target="_blank" rel="noopener noreferrer" class="legal-report-terms-link">Terms of Service</a>.'
+      : 'Süni intellekt cavablarında qeyri-dəqiqlik və ya səhvlər ola bilər və onlar peşəkar məsləhət kimi qəbul edilməməlidir. Ətraflı məlumat üçün <a href="/terms" target="_blank" rel="noopener noreferrer" class="legal-report-terms-link">İstifadə şərtləri</a> ilə tanış olun.'}
     </div>
   `;
-  noticeBox.querySelector("#legalReportTermsLink")?.addEventListener("click", (e) => {
-    e.preventDefault();
-    openLegalModal("terms");
-  });
   body.appendChild(noticeBox);
 
   const form = document.createElement("form");
@@ -19004,14 +18941,6 @@ accountButton?.addEventListener("click", (e) => {
   e.stopPropagation();
   openUserProfileMenu(accountButton);
 });
-document.querySelector("#sidebarTermsBtn")?.addEventListener("click", () => {
-  closeSidebar();
-  openLegalModal("terms");
-});
-document.querySelector("#sidebarPrivacyBtn")?.addEventListener("click", () => {
-  closeSidebar();
-  openLegalModal("privacy");
-});
 keyboardShortcutsButton?.addEventListener("click", () => {
   closeSidebar();
   openShortcutModal();
@@ -19399,11 +19328,6 @@ initializeAuthentication(async (user) => {
   if (user) {
     resumeBackgroundJobs();
     checkAndShowPlannerVisitNotification();
-  }
-  if (window.location.hash === "#terms" || window.location.pathname === "/terms") {
-    openLegalModal("terms");
-  } else if (window.location.hash === "#privacy" || window.location.pathname === "/privacy") {
-    openLegalModal("privacy");
   }
   setupRailArchiveHover();
   showV35ReleaseToast();

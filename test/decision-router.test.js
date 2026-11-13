@@ -20,6 +20,7 @@ import {
   DECISION_FALLBACK_MODEL,
   DECISION_TIMEOUTS_MS,
   REDIS_CIRCUIT_KEYS,
+  VERTEX_CIRCUIT_KEYS,
   HelmerDecisionRouter,
   createHelmerDecisionRouter,
   resolveDecisionTimeoutMs,
@@ -661,4 +662,91 @@ test("HTTP integration: createAskHandler and createStrategyRouter respect Helmer
   assert.equal(capturedStrategyArgs.buildDecision.briefDepth, 0);
   assert.equal(capturedStrategyArgs.buildDecision.needsMarketSearch, true);
   assert.equal(capturedLearningRecord.onlyNecessaryData, true);
+});
+
+test("HelmerDecisionRouter bounds Vertex fallback timeout, trips circuit on 404/500/TypeError, and opens Vertex circuit after 3 failures", async () => {
+  const redis = createMockRedis();
+  let primaryCalls = 0;
+  let vertexCalls = 0;
+
+  // 1. Primary Decisions API trips on 404, 500, and TypeError network error (skipping Vertex in this phase)
+  const primaryErrors = [
+    Object.assign(new Error("Not Found"), { status: 404 }),
+    Object.assign(new Error("Internal Error"), { status: 500 }),
+    new TypeError("fetch failed"),
+  ];
+  const primaryRouter = createHelmerDecisionRouter({
+    redis,
+    hasDecisionApiConfigFn: () => true,
+    callDecisionsApiFn: async () => {
+      primaryCalls++;
+      throw primaryErrors.shift();
+    },
+    getVertexClientFn: () => ({
+      models: {
+        generateContent: async () => ({ text: JSON.stringify({ s: false, r: false }) }),
+      },
+    }),
+    env: { GEMINI_API_KEY: "AQ.vertex-fallback", GEMINI_USE_VERTEX: "true" },
+  });
+
+  for (let i = 0; i < 3; i++) {
+    await primaryRouter.routeAsk({ prompt: `Query ${i}` });
+  }
+  assert.equal(primaryCalls, 3);
+  assert.equal(redis.store.get(REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN), "1");
+
+  // 4th call must skip primary Decisions API immediately (0 ms circuit open)
+  await primaryRouter.routeAsk({ prompt: "Query while open" });
+  assert.equal(primaryCalls, 3);
+
+  // 2. Bounded Vertex fallback timeout + Vertex circuit breaker opening on 404/500/TypeError
+  const vertexRedis = createMockRedis();
+  const vertexErrors = [
+    Object.assign(new Error("Model missing"), { status: 404 }),
+    Object.assign(new Error("Vertex 500"), { status: 500 }),
+    null, // 3rd call hangs cleanly until bounded abortSignal fires (~800 ms, << 2500 ms)
+  ];
+  const vertexRouter = createHelmerDecisionRouter({
+    redis: vertexRedis,
+    hasDecisionApiConfigFn: () => false,
+    env: { GEMINI_API_KEY: "AQ.vertex-fallback", GEMINI_USE_VERTEX: "true" },
+    getVertexClientFn: () => ({
+      models: {
+        generateContent: async ({ config }) => {
+          vertexCalls++;
+          const next = vertexErrors.shift();
+          if (next) throw next;
+          return await new Promise((_, reject) => {
+            const keepAlive = setTimeout(() => {
+              reject(new Error("Mock test safety timeout"));
+            }, 5000);
+            config.abortSignal.addEventListener("abort", () => {
+              clearTimeout(keepAlive);
+              reject(config.abortSignal.reason || Object.assign(new Error("Aborted"), { name: "TimeoutError" }));
+            }, { once: true });
+          });
+        },
+      },
+    }),
+  });
+
+  const r1 = await vertexRouter.routeAsk({ prompt: "First ask" });
+  const r2 = await vertexRouter.routeAsk({ prompt: "Second ask" });
+  const startTimeout = Date.now();
+  const r3 = await vertexRouter.routeAsk({ prompt: "Third slow ask" });
+  const timeoutElapsed = Date.now() - startTimeout;
+  assert.equal(r1.routerSource, "local_rules");
+  assert.equal(r2.routerSource, "local_rules");
+  assert.equal(r3.routerSource, "local_rules");
+  assert.ok(timeoutElapsed < 1500, `Expected bounded Vertex timeout < 1500ms, got ${timeoutElapsed}ms`);
+  assert.equal(vertexCalls, 3);
+  assert.equal(vertexRedis.store.get(VERTEX_CIRCUIT_KEYS.CIRCUIT_OPEN), "1");
+
+  // 4th Ask must skip Vertex fallback in 0 calls and route locally
+  const startOpen = Date.now();
+  const r4 = await vertexRouter.routeAsk({ prompt: "Fourth ask with open vertex circuit" });
+  assert.equal(r4.routerSource, "local_rules");
+  assert.equal(vertexCalls, 3);
+  assert.ok(Date.now() - startOpen < 100);
 });

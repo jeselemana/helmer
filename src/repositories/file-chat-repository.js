@@ -314,7 +314,7 @@ export class FileChatRepository {
     // A later authorization must not join a snapshot already received from R2.
     let pending = this.inFlightTenantReads.get(tenantKey);
     if (!pending) {
-      pending = Promise.resolve().then(() => this.readCloud(tenantKey));
+      pending = Promise.resolve().then(() => this.readCloud(tenantKey, { clone: false }));
       this.inFlightTenantReads.set(tenantKey, pending);
       const clear = () => { if (this.inFlightTenantReads.get(tenantKey) === pending) this.inFlightTenantReads.delete(tenantKey); };
       pending.then(clear, clear);

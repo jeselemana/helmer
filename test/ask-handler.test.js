@@ -522,3 +522,151 @@ test('Ask HTTP: routes to gemini-4-hydrogen with low, medium, high, xhigh thinki
   assert.equal((await guestXhigh.json()).reply, GUEST_RESTRICTION_NOTICES.thinking);
   assert.equal(f.calls.length, callsBeforeGuest);
 });
+
+test('Ask HTTP: authenticated SSE flushes headers before decisionRouter.routeAsk and runs strategy provenance reads in parallel', async t => {
+  const f = await fixture(t);
+  const linkedChat = await f.chatRepository.saveChat({
+    ownerId: f.ownerA,
+    strategyId: f.strategyId,
+    messages: [{ role: 'user', content: 'Initial question' }],
+  });
+
+  const routeDeferred = deferred();
+  const readAllDeferred = deferred();
+  const provenanceDeferred = deferred();
+  const started = [];
+
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.ownerId = f.ownerA;
+    req.user = f.users.get(f.ownerA);
+    req.auth = { user: req.user };
+    next();
+  });
+  const localPolicy = new AiPolicy({ env: {} });
+  app.use(new PrivacyPolicy({ findById: async id => f.users.get(id) }).middleware());
+  app.use(localPolicy.middleware());
+
+  const strategyRepository = {
+    getById: async (id, owner) => {
+      started.push('getById');
+      return id === f.strategyId && owner === f.ownerA
+        ? { id, ownerId: owner, title: 'Private strategy', strategy: { secret: 'Active strategy' } }
+        : null;
+    },
+    readAll: async () => {
+      started.push('readAll');
+      await readAllDeferred.promise;
+      return [];
+    },
+    loadOwnerProvenance: async () => {
+      started.push('loadOwnerProvenance');
+      await provenanceDeferred.promise;
+      return [];
+    },
+  };
+  const plannerRepository = { getById: async () => null };
+  const decisionRouter = {
+    routeAsk: async () => {
+      started.push('routeAsk');
+      await routeDeferred.promise;
+      return {
+        enableSearch: false,
+        requireGrounding: false,
+        intent: 'standard',
+        routerSource: 'decisions_api',
+      };
+    },
+  };
+
+  app.use('/api/ask', createCapabilityRouter({
+    allowGuestChat: false,
+    registry: createPluginRegistry(),
+    chats: f.chatRepository,
+    artifacts: { get: async () => null },
+    strategies: strategyRepository,
+    planner: plannerRepository,
+  }));
+  app.post('/api/ask', createAskHandler({
+    configured: () => true,
+    chatRepository: f.chatRepository,
+    strategyRepository,
+    plannerRepository,
+    researchService: {},
+    decisionRouter,
+    learningLoop: { createInteractionId: randomUUID, recordInteraction: async () => {}, recordSignal: async () => {} },
+    telemetryService: { trackAskQuery: async () => {} },
+    sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
+    generateAsk: async () => ({ text: 'Parallel reply.', model: 'gemini-4-hydrogen', provider: 'google', usage: { inputTokens: 5, outputTokens: 5 } }),
+  }));
+
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+
+  const responsePromise = fetch(`http://127.0.0.1:${server.address().port}/api/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({
+      stream: true,
+      chatId: linkedChat.id,
+      chatRevision: linkedChat.revision,
+      messages: [{ role: 'user', content: 'Continue linked strategy' }],
+    }),
+  });
+
+  // Verify strategy/provenance pre-flight reads start concurrently in one round trip
+  for (let i = 0; i < 50 && !(started.includes('readAll') && started.includes('loadOwnerProvenance')); i++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(started.includes('getById') && started.includes('readAll') && started.includes('loadOwnerProvenance'));
+  readAllDeferred.resolve();
+  provenanceDeferred.resolve();
+
+  // SSE headers must flush BEFORE decisionRouter.routeAsk resolves
+  const response = await responsePromise;
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type') || '', /text\/event-stream/);
+  assert.ok(started.includes('routeAsk'));
+
+  routeDeferred.resolve();
+
+  const events = sse(await response.text());
+  assert.equal(events.at(-1).done, true);
+  assert.equal(events.at(-1).reply, 'Parallel reply.');
+});
+
+test('createAskService deduplicates identical groundingMetadata emissions across streamed chunks', async () => {
+  const repeatedGrounding = {
+    groundingChunks: [{ web: { uri: 'https://cbar.az/rates', title: 'CBAR' } }],
+    webSearchQueries: ['cbar usd rate'],
+  };
+  const emittedGrounding = [];
+  const ask = createAskService({
+    getClient: () => ({
+      models: {
+        generateContentStream: async function* () {
+          yield { text: 'Part 1 ', candidates: [{ groundingMetadata: repeatedGrounding }] };
+          yield { text: 'Part 2 ', candidates: [{ groundingMetadata: repeatedGrounding }] };
+          yield { text: 'Part 3', candidates: [{ groundingMetadata: repeatedGrounding }] };
+        },
+      },
+    }),
+  });
+
+  const result = await ask({
+    messages: [{ role: 'user', content: 'CBAR rate?' }],
+    enableSearch: true,
+    requireGrounding: true,
+    onChunk: (_chunk, grounding) => {
+      emittedGrounding.push(grounding || null);
+    },
+  });
+
+  assert.equal(result.text, 'Part 1 Part 2 Part 3');
+  assert.equal(emittedGrounding.length, 3);
+  assert.equal(emittedGrounding[0]?.groundingChunks?.length, 1);
+  assert.equal(emittedGrounding[1], null);
+  assert.equal(emittedGrounding[2], null);
+});

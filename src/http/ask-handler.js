@@ -128,14 +128,21 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         });
       }
 
+      const findPlannerTask = (id) => {
+        if (!id || !plannerRepository) return Promise.resolve(null);
+        if (typeof plannerRepository.getById === "function") {
+          return plannerRepository.getById(id, req.ownerId);
+        }
+        return plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === id) || null);
+      };
+
       req.securityContext.assertResources = async () => {
-        const [authorizedChat, authorizedStrategy, authorizedTasks] = await Promise.all([
+        const [authorizedChat, authorizedStrategy, authorizedTask] = await Promise.all([
           chatId ? chatRepository.getById(chatId, req.ownerId) : null,
           strategyId ? strategyRepository.getById(strategyId, req.ownerId) : null,
-          taskId ? plannerRepository.list(req.ownerId) : null,
+          taskId ? findPlannerTask(taskId) : null,
         ]);
-        if ((chatId && !authorizedChat) || (strategyId && !authorizedStrategy) ||
-            (taskId && !authorizedTasks.some(item => item.id === taskId))) {
+        if ((chatId && !authorizedChat) || (strategyId && !authorizedStrategy) || (taskId && !authorizedTask)) {
           throw Object.assign(new Error('Execution context removed'), { code: 'EXECUTION_REVOKED', status: 403 });
         }
       };
@@ -153,16 +160,18 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       // Parallel Pre-Flight Context Loading & Deduplicated Chat Read
       const contextStartedAt = Date.now();
-      const hasExplicitStrategyOrTask = Boolean(strategyId || taskId);
       const preloadedChat = chatId && req.preloadedAskChat && req.preloadedAskChat.id === chatId && req.preloadedAskChat.ownerId === req.ownerId
         ? req.preloadedAskChat
         : null;
+      const earlyStrategyId = strategyId || preloadedChat?.strategyId || "";
+      const earlyTaskId = taskId || preloadedChat?.taskId || "";
+      const hasEarlyStrategyOrTask = Boolean(earlyStrategyId || earlyTaskId);
       const preloadedRevisionOk = !preloadedChat ||
         req.body.chatRevision === undefined ||
         req.body.chatRevision === null ||
         Number(req.body.chatRevision) === (preloadedChat.revision || 1);
       let prefetchedSearchDecisionPromise = null;
-      if (req.user && !hasExplicitStrategyOrTask && (!chatId || preloadedChat) && preloadedRevisionOk && !preloadedChat?.strategyId && !preloadedChat?.taskId) {
+      if (req.user && !hasEarlyStrategyOrTask && (!chatId || preloadedChat) && preloadedRevisionOk) {
         const prefetchMessages = preloadedChat ? [...preloadedChat.messages, messages.at(-1)] : messages;
         const prefetchExplicitWeb = req.body.pluginIds?.includes("web") === true;
         const prefetchGroundedHistory = hasGroundedAssistantHistory(prefetchMessages) || prefetchMessages.some(
@@ -185,8 +194,8 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         chatId
           ? (preloadedChat ? Promise.resolve(preloadedChat) : chatRepository.getById(chatId, req.ownerId))
           : Promise.resolve(null),
-        strategyId ? strategyRepository.getById(strategyId, req.ownerId) : Promise.resolve(null),
-        taskId ? plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === taskId) || null) : Promise.resolve(null),
+        earlyStrategyId && strategyRepository ? strategyRepository.getById(earlyStrategyId, req.ownerId) : Promise.resolve(null),
+        earlyTaskId ? findPlannerTask(earlyTaskId) : Promise.resolve(null),
         req.user?.settings?.personalIntelligence === true
           ? buildPersonalizationContext({
               user: req.user,
@@ -197,10 +206,10 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
               mode: "ask",
             })
           : Promise.resolve(""),
-        hasExplicitStrategyOrTask && strategyRepository && typeof strategyRepository.readAll === "function"
+        hasEarlyStrategyOrTask && strategyRepository && typeof strategyRepository.readAll === "function"
           ? strategyRepository.readAll(req.ownerId).catch(() => [])
           : Promise.resolve([]),
-        hasExplicitStrategyOrTask && strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function"
+        hasEarlyStrategyOrTask && strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function"
           ? strategyRepository.loadOwnerProvenance(req.ownerId).catch(() => [])
           : Promise.resolve([]),
       ]);
@@ -243,31 +252,26 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       let allOwnerStrategies = initialOwnerStrategies;
       let selectedStrategy = rawSelectedStrategy;
       let selectedTask = rawSelectedTask;
-      if (!hasExplicitStrategyOrTask && (effectiveStrategyId || effectiveTaskId)) {
+      const needsLateContextLoad = (effectiveStrategyId && effectiveStrategyId !== earlyStrategyId) ||
+        (effectiveTaskId && effectiveTaskId !== earlyTaskId);
+      if (needsLateContextLoad) {
         const [chatStrategy, chatTask, ownerStrategies] = await Promise.all([
-          effectiveStrategyId && strategyRepository ? strategyRepository.getById(effectiveStrategyId, req.ownerId) : Promise.resolve(null),
-          effectiveTaskId && plannerRepository ? plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === effectiveTaskId) || null) : Promise.resolve(null),
-          strategyRepository && typeof strategyRepository.readAll === "function"
+          effectiveStrategyId !== earlyStrategyId && effectiveStrategyId && strategyRepository
+            ? strategyRepository.getById(effectiveStrategyId, req.ownerId)
+            : Promise.resolve(selectedStrategy),
+          effectiveTaskId !== earlyTaskId && effectiveTaskId
+            ? findPlannerTask(effectiveTaskId)
+            : Promise.resolve(selectedTask),
+          !hasEarlyStrategyOrTask && strategyRepository && typeof strategyRepository.readAll === "function"
             ? strategyRepository.readAll(req.ownerId).catch(() => [])
-            : Promise.resolve([]),
-          strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function"
+            : Promise.resolve(allOwnerStrategies),
+          !hasEarlyStrategyOrTask && strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function"
             ? strategyRepository.loadOwnerProvenance(req.ownerId).catch(() => [])
             : Promise.resolve([]),
         ]);
         selectedStrategy = chatStrategy;
         selectedTask = chatTask;
         allOwnerStrategies = ownerStrategies;
-      } else if ((!selectedStrategy && effectiveStrategyId && strategyRepository) || (!selectedTask && effectiveTaskId && plannerRepository)) {
-        const [chatStrategy, chatTask] = await Promise.all([
-          !selectedStrategy && effectiveStrategyId && strategyRepository
-            ? strategyRepository.getById(effectiveStrategyId, req.ownerId)
-            : Promise.resolve(selectedStrategy),
-          !selectedTask && effectiveTaskId && plannerRepository
-            ? plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === effectiveTaskId) || null)
-            : Promise.resolve(selectedTask),
-        ]);
-        selectedStrategy = chatStrategy;
-        selectedTask = chatTask;
       }
 
       const strategyProvenance = effectiveStrategyId
@@ -283,7 +287,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         strategyProvenance.grounded
       );
 
-      for (const message of messages) {
+      await Promise.all(messages.map(async (message) => {
         if (message.file) {
           assertCachedFileReference(message.file, existingChat);
           if (message.file.data) message.file = await prepareUploadedContext(message.file);
@@ -298,7 +302,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
             };
           }
         }
-      }
+      }));
 
       if (strategyId && !selectedStrategy) {
         return res.status(404).json({ error: "Seçilmiş strategiya tapılmadı." });
@@ -315,7 +319,8 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       }
       if (selectedTask) {
         const taskStrategy = selectedTask.strategyId && strategyRepository
-          ? await strategyRepository.getById(selectedTask.strategyId, req.ownerId)
+          ? (allOwnerStrategies.find((item) => item.id === selectedTask.strategyId && item.ownerId === req.ownerId) ||
+             await strategyRepository.getById(selectedTask.strategyId, req.ownerId))
           : null;
         const taskStrategyProvenance = selectedTask.strategyId
           ? resolveGroundedStrategyProvenance(req.ownerId, taskStrategy || { id: selectedTask.strategyId }, allOwnerStrategies)
@@ -470,6 +475,9 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         return;
       }
 
+      if (isStreamingRequest) {
+        transport.start();
+      }
       const decisionStartedAt = Date.now();
       const searchDecision = await (prefetchedSearchDecisionPromise || activeDecisionRouter.routeAsk({
         prompt: lastUserMsg,
@@ -504,9 +512,8 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         transport.send({ chunk, model: activeModel, groundingMetadata: streamedGrounding });
         streamedGrounding = undefined;
       }) : null;
-      if (isStreamingRequest) {
-        transport.start();
-        if (enableSearch) transport.send({ status: "searching", statusText: "Vebdə axtarıram", model: activeModel });
+      if (isStreamingRequest && enableSearch) {
+        transport.send({ status: "searching", statusText: "Vebdə axtarıram", model: activeModel });
       }
       if (req.askTimings) req.askTimings.providerStartMs = Date.now() - req.askTimings.startedAt;
       const generated = await generateAsk({

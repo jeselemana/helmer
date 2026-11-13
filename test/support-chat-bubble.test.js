@@ -95,6 +95,7 @@ test("Support Chat Bubble: legal.css defines support chat bubble and popover sty
 test("Support Chat Bubble: terms.html and privacy.html contain the widget with email choice popover and mailto link", async () => {
   const termsHtml = await fs.readFile(path.join(process.cwd(), "public/terms.html"), "utf8");
   const privacyHtml = await fs.readFile(path.join(process.cwd(), "public/privacy.html"), "utf8");
+  const legalPageJs = await fs.readFile(path.join(process.cwd(), "public/legal-page.js"), "utf8");
 
   // terms.html
   assert.ok(termsHtml.includes('href="mailto:support@helmeros.com"'), "terms.html links to support@helmeros.com");
@@ -102,7 +103,7 @@ test("Support Chat Bubble: terms.html and privacy.html contain the widget with e
   assert.ok(termsHtml.includes("support-chat-popover"), "terms.html has support-chat-popover");
   assert.ok(termsHtml.includes("support-email-option"), "terms.html has support-email-option");
   assert.ok(termsHtml.includes("Salam, kömək lazımdır?"), "terms.html contains default greeting");
-  assert.ok(termsHtml.includes("updateSupportChat"), "terms.html updates greeting dynamically");
+  assert.ok(termsHtml.includes("/legal-page.js"), "terms.html loads legal-page.js");
 
   // privacy.html
   assert.ok(privacyHtml.includes('href="mailto:support@helmeros.com"'), "privacy.html links to support@helmeros.com");
@@ -110,5 +111,6 @@ test("Support Chat Bubble: terms.html and privacy.html contain the widget with e
   assert.ok(privacyHtml.includes("support-chat-popover"), "privacy.html has support-chat-popover");
   assert.ok(privacyHtml.includes("support-email-option"), "privacy.html has support-email-option");
   assert.ok(privacyHtml.includes("Salam, kömək lazımdır?"), "privacy.html contains default greeting");
-  assert.ok(privacyHtml.includes("updateSupportChat"), "privacy.html updates greeting dynamically");
+  assert.ok(privacyHtml.includes("/legal-page.js"), "privacy.html loads legal-page.js");
+  assert.ok(legalPageJs.includes("updateSupportChat"), "legal-page.js updates greeting dynamically");
 });
