@@ -206,7 +206,7 @@ export async function writeUpObject(ownerHash, record, etag) {
 }
 
 const MAX_R2_ETAG_CACHE_ENTRIES = 256;
-const R2_REVALIDATE_TTL_MS = Number.parseInt(process.env.R2_REVALIDATE_TTL_MS || "10000", 10) || 10000;
+const R2_REVALIDATE_TTL_MS = Number.parseInt(process.env.R2_REVALIDATE_TTL_MS || "30000", 10) || 30000;
 const _r2EtagCache = new Map();
 const _r2InFlightReads = new Map();
 

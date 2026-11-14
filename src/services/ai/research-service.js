@@ -335,15 +335,25 @@ export function enrichSourcesFromText(extractedSources = [], markdownText = "") 
     try {
       const parsed = new URL(rawUrl.trim());
       if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return;
-      if (isGoogleRelayHostOrUrl(parsed.href)) return;
+      const cleanRawDomain = typeof rawDomain === "string" ? rawDomain.trim() : "";
+      const isOfficialVertexRedirect =
+        parsed.protocol === "https:" &&
+        parsed.hostname.toLowerCase() === "vertexaisearch.cloud.google.com" &&
+        parsed.pathname.startsWith("/grounding-api-redirect/");
+
+      let domain = "";
+      if (isOfficialVertexRedirect) {
+        if (!cleanRawDomain || isLowQualityDomain(cleanRawDomain)) return;
+        domain = extractCleanDomain(cleanRawDomain);
+      } else {
+        if (isGoogleRelayHostOrUrl(parsed.href)) return;
+        domain = extractCleanDomain(parsed.hostname);
+        if (cleanRawDomain && (!extractCleanDomain(cleanRawDomain) || isLowQualityDomain(cleanRawDomain))) return;
+      }
+      if (!domain || isLowQualityDomain(domain)) return;
+
       const cleanUrl = parsed.href;
       if (seenUrls.has(cleanUrl)) return;
-
-      const hostDomain = extractCleanDomain(parsed.hostname);
-      if (!hostDomain) return;
-      if (isLowQualityDomain(hostDomain)) return;
-      if (rawDomain && isLowQualityDomain(rawDomain)) return;
-      const domain = hostDomain;
 
       seenUrls.add(cleanUrl);
       const isHighSignal = isHighSignalDomain(domain);
@@ -1362,7 +1372,13 @@ export class ResearchService {
       }
       const mergedGroundingMetadata = {
         ...(metadata && typeof metadata === "object" ? metadata : {}),
-        groundingChunks: job.sources.slice(0, 30).map((s) => ({ web: { uri: s.url, title: s.title || s.domain || "Source" } })),
+        groundingChunks: job.sources.slice(0, 30).map((s) => ({
+          web: {
+            uri: s.url,
+            title: s.title || s.domain || "Source",
+            ...(s.domain ? { domain: s.domain } : {}),
+          },
+        })),
         webSearchQueries: Array.from(collectedQueries).slice(0, 10),
         ...(renderedEntryPoint ? { searchEntryPoint: { renderedContent: String(renderedEntryPoint).slice(0, 50000) } } : {}),
       };

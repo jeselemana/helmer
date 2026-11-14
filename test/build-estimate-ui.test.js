@@ -22,14 +22,18 @@ function harness(t) {
   `);
   return dom.window;
 }
-test('range uses Flash thinking classification and adds exactly two or three conservative upper minutes', () => {
-  assert.deepEqual(preparationEstimateForRoute({argon_thinking_level:'Low'}), {minMinutes:1,maxMinutes:4,bufferMinutes:2});
-  assert.deepEqual(preparationEstimateForRoute({argon_thinking_level:'Medium'}), {minMinutes:2,maxMinutes:7,bufferMinutes:3});
-  assert.deepEqual(preparationEstimateForRoute({argon_thinking_level:'High',needs_search:true}), {minMinutes:5,maxMinutes:13,bufferMinutes:3});
+test('range uses Decision 1 Hydrogen/Carbon routing and adds calibrated conservative buffer minutes', () => {
+  assert.deepEqual(preparationEstimateForRoute({target_model:'gemini-4-hydrogen',thinking_level:'Low'}), {minMinutes:1,maxMinutes:3,bufferMinutes:1});
+  assert.deepEqual(preparationEstimateForRoute({target_model:'gemini-4-hydrogen',thinking_level:'Medium'}), {minMinutes:2,maxMinutes:5,bufferMinutes:2});
+  assert.deepEqual(preparationEstimateForRoute({target_model:'gemini-4-hydrogen',thinking_level:'High'}), {minMinutes:3,maxMinutes:7,bufferMinutes:2});
+  assert.deepEqual(preparationEstimateForRoute({target_model:'gemini-4-hydrogen',thinking_level:'XHigh'}), {minMinutes:4,maxMinutes:10,bufferMinutes:3});
+  assert.deepEqual(preparationEstimateForRoute({target_model:'gemini-4-carbon',thinking_level:'Low'}), {minMinutes:3,maxMinutes:7,bufferMinutes:2});
+  assert.deepEqual(preparationEstimateForRoute({target_model:'gemini-4-carbon',thinking_level:'Medium'}), {minMinutes:4,maxMinutes:11,bufferMinutes:3});
+  assert.deepEqual(preparationEstimateForRoute({target_model:'gemini-4-carbon',thinking_level:'High',needs_search:true}), {minMinutes:7,maxMinutes:16,bufferMinutes:3});
   assert.equal(BuildEstimateRequestSchema.safeParse({brief:'Valid brief',model:'other'}).success,false);
   assert.equal(BuildEstimateRequestSchema.safeParse({brief:'Valid brief',buildMode:'faster',fasterThinkingLevel:'high'}).success,true);
   assert.deepEqual(preparationEstimateForFaster({fasterThinkingLevel:'medium',needs_search:false}), {minMinutes:1,maxMinutes:3,bufferMinutes:1});
-  assert.deepEqual(preparationEstimateForFaster({fasterThinkingLevel:'high',needs_search:true}), {minMinutes:3,maxMinutes:6,bufferMinutes:2});
+  assert.deepEqual(preparationEstimateForFaster({fasterThinkingLevel:'high',needs_search:true}), {minMinutes:3,maxMinutes:7,bufferMinutes:2});
   assert.equal(buildRoutingInput({brief:' A prompt '}),buildRoutingInput({brief:'A prompt',answers:[],assumptions:[]}));
 });
 test('card renders safe validated numeric data and never renders supplied markup', t => {
@@ -85,4 +89,59 @@ test('createBuildModelSelector enables Faster with Medium default and High think
   const lastBody = JSON.parse(w.requests.at(-1).opts.body);
   assert.equal(lastBody.buildMode, 'faster');
   assert.equal(lastBody.fasterThinkingLevel, 'high');
+});
+
+test('Build UI Carbon escalation banner renders via textContent only in Auto generating mode without leaking model names', () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="stage"></div></body></html>');
+  const { document } = dom.window;
+  const escalationSource = source.slice(
+    source.indexOf('const BUILD_CARBON_ESCALATION_MESSAGE ='),
+    source.indexOf('function renderLoading('),
+  );
+  const state = { status: 'idle', buildModel: 'auto', buildCarbonEscalated: false };
+  const element = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const fn = new Function(
+    'document',
+    'state',
+    'element',
+    `${escalationSource}\nreturn { BUILD_CARBON_ESCALATION_MESSAGE, syncBuildEscalationBanner, createBuildEscalationBanner };`,
+  );
+  const { BUILD_CARBON_ESCALATION_MESSAGE, syncBuildEscalationBanner, createBuildEscalationBanner } = fn(document, state, element);
+
+  assert.equal(
+    BUILD_CARBON_ESCALATION_MESSAGE,
+    'Briefin keyfiyyət gözləntilərinizə uyğun olmasını təmin etmək məqsədilə o, flaqman modelə ötürüldü. Gözləmə vaxtı arta bilər.',
+  );
+  const stage = document.getElementById('stage');
+  const banner = createBuildEscalationBanner();
+  stage.appendChild(banner);
+  assert.equal(banner.hidden, true);
+  assert.equal(banner.querySelector('.intelligence-escalation-text').textContent, '');
+
+  // Auto generating + escalated -> visible with safe textContent
+  state.status = 'generating';
+  state.buildModel = 'auto';
+  state.buildCarbonEscalated = true;
+  syncBuildEscalationBanner();
+  assert.equal(banner.hidden, false);
+  assert.equal(banner.querySelector('.intelligence-escalation-text').textContent, BUILD_CARBON_ESCALATION_MESSAGE);
+  assert.doesNotMatch(banner.textContent, /carbon|hydrogen|decision|gemini/i);
+  assert.equal(banner.querySelectorAll('script, img, a').length, 0);
+
+  // Faster mode never shows Carbon escalation banner
+  state.buildModel = 'faster';
+  syncBuildEscalationBanner();
+  assert.equal(banner.hidden, true);
+  assert.equal(banner.querySelector('.intelligence-escalation-text').textContent, '');
+
+  // Non-generating states hide & clear banner
+  state.buildModel = 'auto';
+  state.status = 'complete';
+  syncBuildEscalationBanner();
+  assert.equal(banner.hidden, true);
 });

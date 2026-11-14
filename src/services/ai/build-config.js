@@ -4,11 +4,15 @@ const fallbackLocations = Object.freeze(["global", "us"].filter((loc) => loc !==
 const parsedScoutTimeoutMs = Number.parseInt(process.env.BUILD_SCOUT_TIMEOUT_MS || "35000", 10);
 
 export const buildConfig = Object.freeze({
-  routerModel: "gemini-3.8-flash",
-  strategistModel: "gemini-4-argon",
-  fasterModel: "gemini-3.8-flash",
+  routerModel: "gemini-4-hydrogen",
+  strategistModel: "gemini-4-hydrogen",
+  hydrogenModel: "gemini-4-hydrogen",
+  carbonModel: "gemini-4-carbon",
+  fasterModel: "gemini-4-hydrogen",
   buildModes: Object.freeze(["auto", "faster"]),
   fasterThinkingLevels: Object.freeze(["medium", "high"]),
+  hydrogenThinkingLevels: Object.freeze(["low", "medium", "high", "xhigh"]),
+  carbonThinkingLevels: Object.freeze(["low", "medium", "high"]),
   location: primaryLocation,
   fallbackLocations,
   maxInputChars: 512000,
@@ -23,8 +27,14 @@ export const buildConfig = Object.freeze({
     LOW: 180000,
     MEDIUM: 240000,
     HIGH: 360000,
+    XHIGH: 420000,
   }),
-  clientTimeoutMs: 360000,
+  carbonTimeoutMs: Object.freeze({
+    LOW: 240000,
+    MEDIUM: 360000,
+    HIGH: 450000,
+  }),
+  clientTimeoutMs: 450000,
   maxScoutAttempts: 2,
   maxAssessmentAttempts: 2,
   maxFinalAttempts: 3,
@@ -42,11 +52,18 @@ export const BUILD_SAFETY_SETTINGS = Object.freeze([
 
 // Realistic admission reservations (including thinking tokens), distinct from model context capacity.
 export const BUILD_OUTPUT_RESERVATIONS = Object.freeze({
-  "gemini-3.8-flash": 16384,
-  "gemini-4-argon": 32768,
+  "gemini-4-hydrogen": 16384,
+  "gemini-4-carbon": 32768,
 });
 
-export const BUILD_ARGON_THINKING_RESERVATIONS = Object.freeze({
+export const BUILD_HYDROGEN_THINKING_RESERVATIONS = Object.freeze({
+  LOW: 16384,
+  MEDIUM: 16384,
+  HIGH: 24576,
+  XHIGH: 32768,
+});
+
+export const BUILD_CARBON_THINKING_RESERVATIONS = Object.freeze({
   LOW: 16384,
   MEDIUM: 24576,
   HIGH: 32768,
@@ -55,23 +72,25 @@ export const BUILD_ARGON_THINKING_RESERVATIONS = Object.freeze({
 export function resolveBuildOutputReservation(params) {
   const model = params?.model;
   if (!model || !Object.hasOwn(BUILD_OUTPUT_RESERVATIONS, model)) return undefined;
-  if (model === "gemini-4-argon") {
-    const level = String(params?.config?.thinkingConfig?.thinkingLevel || "").toUpperCase();
-    if (Object.hasOwn(BUILD_ARGON_THINKING_RESERVATIONS, level)) {
-      return BUILD_ARGON_THINKING_RESERVATIONS[level];
-    }
+  const level = String(params?.config?.thinkingConfig?.thinkingLevel || "").toUpperCase();
+  if (model === "gemini-4-hydrogen" && Object.hasOwn(BUILD_HYDROGEN_THINKING_RESERVATIONS, level)) {
+    return BUILD_HYDROGEN_THINKING_RESERVATIONS[level];
+  }
+  if (model === "gemini-4-carbon" && Object.hasOwn(BUILD_CARBON_THINKING_RESERVATIONS, level)) {
+    return BUILD_CARBON_THINKING_RESERVATIONS[level];
   }
   return BUILD_OUTPUT_RESERVATIONS[model];
 }
 
 export function isValidBuildOutputReservation(modelKey, reservationValue) {
   if (!Number.isSafeInteger(reservationValue) || reservationValue <= 0) return false;
-  if (modelKey === "gemini-3.8-flash") {
-    return reservationValue === BUILD_OUTPUT_RESERVATIONS["gemini-3.8-flash"];
+  if (modelKey === "gemini-4-hydrogen") {
+    return Object.values(BUILD_HYDROGEN_THINKING_RESERVATIONS).includes(reservationValue) ||
+      reservationValue === BUILD_OUTPUT_RESERVATIONS["gemini-4-hydrogen"];
   }
-  if (modelKey === "gemini-4-argon") {
-    return Object.values(BUILD_ARGON_THINKING_RESERVATIONS).includes(reservationValue) ||
-      reservationValue === BUILD_OUTPUT_RESERVATIONS["gemini-4-argon"];
+  if (modelKey === "gemini-4-carbon") {
+    return Object.values(BUILD_CARBON_THINKING_RESERVATIONS).includes(reservationValue) ||
+      reservationValue === BUILD_OUTPUT_RESERVATIONS["gemini-4-carbon"];
   }
   return false;
 }

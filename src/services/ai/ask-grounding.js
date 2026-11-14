@@ -5,7 +5,13 @@ export function sanitizeAskGroundingMetadata(metadata) {
   // Provider metadata is untrusted. Never expose arbitrary SDK fields or raw HTML.
   const sanitized = {
     groundingChunks: Array.isArray(metadata.groundingChunks) ? metadata.groundingChunks.slice(0, 64).map(chunk => ({
-      web: { uri: chunk?.web?.uri, title: typeof chunk?.web?.title === 'string' ? chunk.web.title.slice(0, 300) : '' },
+      web: {
+        uri: chunk?.web?.uri,
+        title: typeof chunk?.web?.title === 'string' ? chunk.web.title.slice(0, 300) : '',
+        ...(typeof chunk?.web?.domain === 'string' && chunk.web.domain.trim()
+          ? { domain: chunk.web.domain.trim().slice(0, 200) }
+          : {}),
+      },
     })) : [],
     webSearchQueries: Array.isArray(metadata.webSearchQueries) ? metadata.webSearchQueries.slice(0, 10) : [],
     searchSuggestions: Array.isArray(metadata.searchSuggestions) ? metadata.searchSuggestions.slice(0, 10) : [],
@@ -19,17 +25,39 @@ export function sanitizeAskGroundingMetadata(metadata) {
       if (typeof uri !== "string" || !uri.trim()) return false;
       try {
         const parsed = new URL(uri.trim());
-        const cleanHost = extractCleanDomain(parsed.href);
         if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password ||
-            parsed.href.length > 2000 || isGoogleRelayHostOrUrl(parsed.href) || !cleanHost ||
-            isLowQualityDomain(cleanHost) || seenSources.has(parsed.href)) return false;
+            parsed.href.length > 2000) return false;
+        const rawDomain = typeof chunk?.web?.domain === "string" ? chunk.web.domain.trim() : "";
+        const isOfficialVertexRedirect =
+          parsed.protocol === "https:" &&
+          parsed.hostname.toLowerCase() === "vertexaisearch.cloud.google.com" &&
+          parsed.pathname.startsWith("/grounding-api-redirect/");
+
+        let verifiedHost = "";
+        if (isOfficialVertexRedirect) {
+          // Require explicit structured Vertex web.domain metadata on Vertex grounding redirects.
+          if (!rawDomain || isLowQualityDomain(rawDomain)) return false;
+          verifiedHost = extractCleanDomain(rawDomain);
+        } else {
+          if (isGoogleRelayHostOrUrl(parsed.href)) return false;
+          verifiedHost = extractCleanDomain(parsed.href);
+          if (rawDomain && (!extractCleanDomain(rawDomain) || isLowQualityDomain(rawDomain))) return false;
+        }
+        if (!verifiedHost || isLowQualityDomain(verifiedHost) || seenSources.has(parsed.href)) return false;
         chunk.web.uri = parsed.href;
+        if (verifiedHost && !chunk.web.domain && isOfficialVertexRedirect) {
+          chunk.web.domain = verifiedHost;
+        }
         seenSources.add(parsed.href);
         return true;
       } catch {
         return false;
       }
-    }).sort((left, right) => Number(isHighSignalDomain(right.web.uri)) - Number(isHighSignalDomain(left.web.uri)));
+    }).sort((left, right) => {
+      const leftTarget = left.web.domain || left.web.uri;
+      const rightTarget = right.web.domain || right.web.uri;
+      return Number(isHighSignalDomain(rightTarget)) - Number(isHighSignalDomain(leftTarget));
+    });
   }
   if (Array.isArray(sanitized.webSearchQueries)) {
     sanitized.webSearchQueries = sanitized.webSearchQueries

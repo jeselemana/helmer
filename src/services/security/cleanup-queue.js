@@ -42,6 +42,7 @@ export class CleanupQueue {
         if (type === 'chat') {
           if (metadata?.messages) {
             await this.artifacts?.deleteChatArtifacts({ id, ownerId, messages: metadata.messages });
+            await this.cache?.deleteChatFiles?.(ownerId, metadata.messages);
           }
           const researchJobIds = (metadata?.messages || [])
             .filter((m) => m.type === 'research' && m.jobId)
@@ -51,6 +52,7 @@ export class CleanupQueue {
           }
         }
         if (type === 'owner') {
+          await this.cache?.deleteOwnerPersistedFiles?.(id || ownerId);
           const all = await this.store.entries().catch(() => []);
           for (const item of all) {
             if (item.key?.startsWith('research:') && item.value?.ownerId === id) {

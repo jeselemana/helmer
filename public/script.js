@@ -1650,14 +1650,14 @@ function createAskThinkingControls(isEn, onToggle = null) {
     }
   };
 
-  ["low", "medium", "high", "xhigh"].forEach((lvl) => {
+  ["low", "medium", "high"].forEach((lvl) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = `ask-thinking-pill-btn${state.askThinkingLevel === lvl ? " is-active" : ""}`;
     btn.dataset.thinkingLevel = lvl;
     btn.setAttribute("role", "radio");
     btn.setAttribute("aria-checked", String(state.askThinkingLevel === lvl));
-    btn.textContent = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra" }[lvl];
+    btn.textContent = { low: "Low", medium: "Medium", high: "High" }[lvl];
 
     btn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -1721,7 +1721,6 @@ function createAskModelSelector(isEn) {
     if (!state.askThinkingEnabled) return "Auto";
     if (state.askThinkingLevel === "low") return "Thinking · Low";
     if (state.askThinkingLevel === "high") return "Thinking · High";
-    if (state.askThinkingLevel === "xhigh") return "Thinking · Extra";
     return "Thinking · Med";
   };
   const nameSpan = element("span", "ask-model-name", getSelectorLabel());
@@ -1801,7 +1800,7 @@ function createAskModelSelector(isEn) {
   return menu;
 }
 
-// Build model selector: Auto (Flash -> Argon) and Faster (Flash Direct with Medium/High Thinking).
+// Build model selector: Auto (Decision 1 -> Hydrogen/Carbon) and Faster (Hydrogen Direct with Medium/High Thinking).
 function createBuildModelSelector(isEn, { onSelect = null } = {}) {
   const isFaster = state.buildModel === "faster";
   const currentFasterThinking = state.buildFasterThinkingLevel === "high" ? "high" : "medium";
@@ -2738,6 +2737,7 @@ const state = {
   buildPreparationEstimate: null,
   buildEstimateBrief: "",
   buildEstimateUnavailable: false,
+  buildCarbonEscalated: false,
   questions: [],
   clarificationIndex: 0,
   clarificationDrafts: {},
@@ -2752,6 +2752,7 @@ const state = {
   savedId: null,
   clientSaveId: crypto.randomUUID(),
   savedStrategies: [],
+  savedStrategiesLoaded: false,
   updatedAt: null,
   error: null,
   retry: null,
@@ -2760,6 +2761,7 @@ const state = {
   currentChatId: null,
   savedChats: [],
   plannerTasks: [],
+  plannerTasksLoaded: false,
   plannerFilter: "active",
   plannerCollapsedGroups: new Set(["Ümumi"]),
   plannerSelectedTaskIds: new Set(),
@@ -2787,7 +2789,7 @@ const state = {
   askThinkingLevel: (() => {
     try {
       const saved = localStorage.getItem("helmer_ask_thinking_level");
-      if (["low", "medium", "high", "xhigh"].includes(saved)) return saved;
+      if (["low", "medium", "high"].includes(saved)) return saved;
     } catch { }
     return "medium";
   })(),
@@ -2850,7 +2852,18 @@ function sanitizeAskMessageForApi(message) {
     role: message.role,
     content: typeof message.content === "string" ? message.content : "",
   };
-  if (message.file) clean.file = message.file;
+  if (message.file) {
+    if (message.file.fileId) {
+      clean.file = {
+        fileId: message.file.fileId,
+        name: message.file.name,
+        size: message.file.size,
+        type: message.file.type || message.file.mimeType,
+      };
+    } else {
+      clean.file = message.file;
+    }
+  }
   if (message.strategyTitle) clean.strategyTitle = message.strategyTitle;
   if (message.taskTitle) clean.taskTitle = message.taskTitle;
   if (message.model) clean.model = message.model;
@@ -2874,7 +2887,7 @@ function isAskThinkingActive(message) {
   const meta = getAskMessageMeta(message);
   const level = meta.thinkingLevel || message?.thinkingLevel;
   if (level) {
-    return level === "medium" || level === "high" || level === "xhigh";
+    return level === "medium" || level === "high";
   }
   return Boolean(state.askThinkingEnabled && state.askThinkingLevel && state.askThinkingLevel !== "low" && state.askThinkingLevel !== "off");
 }
@@ -5811,7 +5824,8 @@ function renderAsk() {
 
   const selectedStrategy = state.savedStrategies.find((strategy) => strategy.id === state.askStrategyId) || null;
   const selectedTask = state.plannerTasks.find((task) => task.id === state.askTaskId) || null;
-  if (state.askTaskId && !selectedTask) state.askTaskId = "";
+  if (state.askStrategyId && !selectedStrategy && state.savedStrategiesLoaded) state.askStrategyId = "";
+  if (state.askTaskId && !selectedTask && state.plannerTasksLoaded) state.askTaskId = "";
   const shell = element("section", `ask-shell${isChatActive ? " has-messages" : " is-empty"}`);
   shell.setAttribute("aria-label", "Ask");
   const thread = element("div", "ask-thread");
@@ -5861,6 +5875,10 @@ function renderAsk() {
 
         if (!isStreamingMsg) appendArtifactCards(content, message);
         if (!isStreamingMsg && message.content) {
+          if (message.groundingMetadata) {
+            const sourceChips = renderAskSourceChips(message.groundingMetadata);
+            if (sourceChips) content.appendChild(sourceChips);
+          }
           content.appendChild(createAskMessageActions(message, messageIndex, isEn));
           if (isFreshResponse) {
             freshAskResponses.delete(message);
@@ -5940,7 +5958,7 @@ function renderAsk() {
   fileInput.type = "file";
   fileInput.id = "askFileInput";
   fileInput.className = "sr-only";
-  fileInput.accept = ".pdf,.png,.jpg,.jpeg,.webp,.heic,.heif,.gif,.txt,.md,.csv,.json,.docx,.doc,.xlsx,.xls,.html,.js,.ts,.py,.css";
+  fileInput.accept = ".pdf,.png,.jpg,.jpeg,.webp,.heic,.heif,.gif,.txt,.md,.csv,.json,.docx,.xlsx,.html,.js,.ts,.py,.css";
 
   const handleFileSelection = async (file) => {
     if (!file) return;
@@ -5959,7 +5977,7 @@ function renderAsk() {
     }
     state.askError = "";
     try {
-      const fileData = await readUploadedFileAsData(file);
+      const fileData = await readUploadedFileAsData(file, { isEn });
       state.askPendingFile = fileData;
       state.askModel = "auto";
       state.askError = "";
@@ -6738,7 +6756,7 @@ function extractGroundingWebChunks(groundingMetadata) {
   if (!groundingMetadata || typeof groundingMetadata !== "object") return [];
   const webChunks = [];
   const seen = new Set();
-  const addSource = (rawUri, rawTitle) => {
+  const addSource = (rawUri, rawTitle, rawDomain) => {
     if (typeof rawUri !== "string") return;
     let uri = rawUri.trim();
     if (!/^https?:\/\//i.test(uri) || uri.length > 2000) return;
@@ -6747,7 +6765,8 @@ function extractGroundingWebChunks(groundingMetadata) {
       const parsed = new URL(uri);
       if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.href.length > 2000) return;
       uri = parsed.href;
-      hostname = parsed.hostname.replace(/^www\./, "");
+      const cleanDomain = typeof rawDomain === "string" ? rawDomain.trim().replace(/^www\./, "") : "";
+      hostname = cleanDomain || parsed.hostname.replace(/^www\./, "");
     } catch { return; }
     if (seen.has(uri)) return;
     seen.add(uri);
@@ -6755,7 +6774,7 @@ function extractGroundingWebChunks(groundingMetadata) {
     webChunks.push({ uri, title, hostname });
   };
   for (const chunk of Array.isArray(groundingMetadata.groundingChunks) ? groundingMetadata.groundingChunks : []) {
-    addSource(chunk?.web?.uri, chunk?.web?.title);
+    addSource(chunk?.web?.uri, chunk?.web?.title, chunk?.web?.domain);
   }
   for (const citation of Array.isArray(groundingMetadata.citations) ? groundingMetadata.citations : []) {
     addSource(citation?.url || citation?.uri, citation?.title || citation?.text);
@@ -7632,6 +7651,10 @@ function finalizeStreamingAskMessageDom(message, messageIndex) {
     if (!content.querySelector(".ask-artifact-card") && Array.isArray(message.artifacts) && message.artifacts.length > 0) {
       appendArtifactCards(content, message);
     }
+    if (message.groundingMetadata && !content.querySelector(".ask-grounding-container")) {
+      const sourceChips = renderAskSourceChips(message.groundingMetadata);
+      if (sourceChips) content.appendChild(sourceChips);
+    }
     if (row.classList.contains("strategy-ask-message")) {
       if (!content.querySelector(".strategy-ask-message-actions")) {
         content.appendChild(createStrategyAskMessageActions(message, messageIndex, isEn));
@@ -7695,6 +7718,16 @@ function rememberSavedAskChat(chat) {
   rememberActiveAskChat(chat.id);
   window.helmerSecurity?.rememberChat(chat);
   const messages = Array.isArray(chat.messages) ? chat.messages : [];
+  if (Array.isArray(state.askMessages) && state.askMessages.length) {
+    const syncLen = Math.min(messages.length, state.askMessages.length);
+    for (let i = 0; i < syncLen; i += 1) {
+      const savedFile = messages[i]?.file;
+      const localFile = state.askMessages[i]?.file;
+      if (savedFile?.fileId && localFile && !localFile.fileId && (!savedFile.name || savedFile.name === localFile.name)) {
+        localFile.fileId = savedFile.fileId;
+      }
+    }
+  }
   const historyItem = {
     ...chat,
     messageCount: messages.length,
@@ -8188,7 +8221,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
   activeAskReader = null;
   activeAskTypewriter = null;
 
-  const apiThinkingLevel = (state.askThinkingEnabled && ["low", "medium", "high", "xhigh", "off"].includes(currentAskThinking))
+  const apiThinkingLevel = (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking))
     ? currentAskThinking
     : undefined;
 
@@ -8623,6 +8656,35 @@ function syncBuildMenuActions(railActions) {
   navigation.before(section);
 }
 
+const BUILD_CARBON_ESCALATION_MESSAGE =
+  "Briefin keyfiyyət gözləntilərinizə uyğun olmasını təmin etmək məqsədilə o, flaqman modelə ötürüldü. Gözləmə vaxtı arta bilər.";
+
+function syncBuildEscalationBanner() {
+  const showBanner = state.status === "generating" && state.buildModel !== "faster" && Boolean(state.buildCarbonEscalated);
+  document.querySelectorAll("[data-build-escalation-banner]").forEach((banner) => {
+    banner.hidden = !showBanner;
+    const textNode = banner.querySelector(".intelligence-escalation-text");
+    if (textNode) {
+      textNode.textContent = showBanner ? BUILD_CARBON_ESCALATION_MESSAGE : "";
+    }
+  });
+}
+
+function createBuildEscalationBanner() {
+  const banner = element("div", "intelligence-escalation-notice");
+  banner.dataset.buildEscalationBanner = "1";
+  banner.setAttribute("role", "status");
+  banner.setAttribute("aria-live", "polite");
+  const dot = element("span", "intelligence-escalation-dot");
+  dot.setAttribute("aria-hidden", "true");
+  const text = element("p", "intelligence-escalation-text");
+  const showBanner = state.status === "generating" && state.buildModel !== "faster" && Boolean(state.buildCarbonEscalated);
+  banner.hidden = !showBanner;
+  text.textContent = showBanner ? BUILD_CARBON_ESCALATION_MESSAGE : "";
+  banner.append(dot, text);
+  return banner;
+}
+
 function renderLoading() {
   const isEn = getLanguage() === "en";
   workspace.classList.add("workspace-centered");
@@ -8716,7 +8778,15 @@ function renderLoading() {
   desktopHistoryBtn.addEventListener("click", () => showAnalysisHistoryModal(isAssessment));
   if (isAssessment) topActions.append(desktopCancelBtn, desktopHistoryBtn);
 
-  view.append(statusLine, heading, core, activity, progress, createBuildEstimateCard());
+  view.append(
+    statusLine,
+    heading,
+    core,
+    activity,
+    progress,
+    ...(!isAssessment ? [createBuildEscalationBanner()] : []),
+    createBuildEstimateCard(),
+  );
   workspace.appendChild(view);
   refreshBuildEstimateCards();
   for (const action of topActions.querySelectorAll("button")) {
@@ -9300,7 +9370,7 @@ function showLoadingAskModal(initialQuery) {
         body: JSON.stringify({
           messages: thread.map(sanitizeAskMessageForApi),
           model: "gemini-4-hydrogen",
-          thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "xhigh", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
+          thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
           strategyId: state.askStrategyId || undefined,
           taskId: state.askTaskId || undefined,
           chatId: state.askChatId || undefined,
@@ -9324,7 +9394,7 @@ function showLoadingAskModal(initialQuery) {
             body: JSON.stringify({
               messages: thread.map(sanitizeAskMessageForApi),
               model: "gemini-4-hydrogen",
-              thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "xhigh", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
+              thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
               strategyId: state.askStrategyId || undefined,
               taskId: state.askTaskId || undefined,
               chatId: state.askChatId || undefined,
@@ -9655,6 +9725,7 @@ async function startGeneration() {
   const generationKey = state.clientSaveId;
   state.buildStreamingText = "";
   state.buildStreamingFinishReason = null;
+  state.buildCarbonEscalated = false;
   setStatus("generating");
   render();
 
@@ -9733,6 +9804,13 @@ async function startGeneration() {
               }
 
               if (evt.preparationEstimate) updateBuildEstimate(evt.preparationEstimate);
+              if (evt.escalatedToFlagship === true && state.buildModel !== "faster") {
+                state.buildCarbonEscalated = true;
+                syncBuildEscalationBanner();
+              } else if (evt.escalatedToFlagship === false) {
+                state.buildCarbonEscalated = false;
+                syncBuildEscalationBanner();
+              }
               if (evt.resetStream) {
                 state.buildStreamingText = "";
                 state.buildStreamingFinishReason = null;
@@ -9771,6 +9849,10 @@ async function startGeneration() {
       } else {
         const data = await response.json();
         if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
+        if (data.escalatedToFlagship === true && state.buildModel !== "faster") {
+          state.buildCarbonEscalated = true;
+          syncBuildEscalationBanner();
+        }
         finalStrategy = data.strategy;
         if (data.savedId) savedId = data.savedId;
         if (data.savedStrategy) savedStrategy = data.savedStrategy;
@@ -9801,6 +9883,10 @@ async function startGeneration() {
         }),
       });
       if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
+      if (data.escalatedToFlagship === true && state.buildModel !== "faster") {
+        state.buildCarbonEscalated = true;
+        syncBuildEscalationBanner();
+      }
       finalStrategy = data.strategy;
       if (data.savedId) savedId = data.savedId;
       if (data.savedStrategy) savedStrategy = data.savedStrategy;
@@ -9842,7 +9928,11 @@ async function startGeneration() {
         createdAt: state.updatedAt,
       },
     ];
-    trackEvent("strategy_generated", { clarificationRounds: state.round, model: "gemini-3.8-flash" });
+    const trackedBuildTier = state.buildModel === "faster"
+      ? `faster_${state.buildFasterThinkingLevel === "high" ? "high" : "medium"}`
+      : ((finalStrategy?.orchestration?.escalatedToFlagship || state.buildCarbonEscalated) ? "auto_flagship" : "auto_standard");
+    state.buildCarbonEscalated = false;
+    trackEvent("strategy_generated", { clarificationRounds: state.round, model: trackedBuildTier });
 
     const isEn = getLanguage() === "en";
     if (autoSaveActive) {
@@ -9919,6 +10009,7 @@ async function startGeneration() {
       if (state.view === "list") renderStrategyList();
       return;
     }
+    state.buildCarbonEscalated = false;
     setError(error, startGeneration, state.questions.length ? "needs_clarification" : "draft");
   } finally {
     if (typeof detachedBuildAbortControllers !== "undefined") {
@@ -11072,7 +11163,10 @@ function buildOrchestrationMetaPanel(strategy, isEn) {
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     const hostname = url.hostname.replace(/^www\./, "");
-    link.append(element("strong", "", source.title || hostname), element("span", "", hostname + " ↗"));
+    const displayDomain = (typeof source?.domain === "string" && source.domain.trim() && !source.domain.includes("vertexaisearch.cloud.google.com"))
+      ? source.domain.trim().replace(/^www\./, "")
+      : hostname;
+    link.append(element("strong", "", source.title || displayDomain), element("span", "", displayDomain + " ↗"));
     return link;
   };
   if (evidence.length) {
@@ -11569,6 +11663,10 @@ function buildStrategyAskMessage(message, messageIndex) {
 
   if (!isStreaming) appendArtifactCards(content, message);
   if (!isStreaming && message.content) {
+    if (message.groundingMetadata) {
+      const sourceChips = renderAskSourceChips(message.groundingMetadata);
+      if (sourceChips) content.appendChild(sourceChips);
+    }
     const actions = element("div", "strategy-ask-message-actions");
     const copy = button("", "strategy-ask-action", async () => {
       const copied = await copyAskResponse(message.content);
@@ -12209,9 +12307,11 @@ async function requestRefinement(action, request, retryIdempotencyKey = null) {
       signal: controller.signal,
       headers: { "Idempotency-Key": refinementKey },
       body: JSON.stringify({
-        brief: state.brief,
-        answers: state.answers,
-        strategy: state.strategy,
+        ...(state.savedId ? {} : {
+          brief: state.brief,
+          answers: state.answers,
+          strategy: state.strategy,
+        }),
         action,
         request,
         idempotencyKey: refinementKey,
@@ -12385,6 +12485,7 @@ function downloadExport(file) {
 async function loadSavedStrategies() {
   if (!state.currentUser) {
     state.savedStrategies = [];
+    state.savedStrategiesLoaded = false;
     if (strategyCount) strategyCount.style.display = "none";
     renderRecentList();
     return;
@@ -12395,6 +12496,7 @@ async function loadSavedStrategies() {
     const data = await api("/api/strategy");
     if (epoch !== state.identityEpoch || (state.currentUser?.id || null) !== expectedUserId) return;
     state.savedStrategies = data.strategies || [];
+    state.savedStrategiesLoaded = true;
     if (strategyCount) {
       if (!state.currentUser) {
         strategyCount.style.display = "none";
@@ -12405,6 +12507,7 @@ async function loadSavedStrategies() {
     }
     renderRecentList();
     if (state.view === "list") renderStrategyList();
+    else if (state.view === "workspace" && state.mode === "ask" && state.askStrategyId && !state.askLoading) render();
     const railPopover = document.querySelector("#railArchivePopover");
     if (railPopover && !railPopover.hidden) renderRailArchivePopover();
   } catch {
@@ -12630,6 +12733,7 @@ function clearUserScopedWorkspaceState() {
   state.buildPreparationEstimate = null;
   state.buildEstimateBrief = "";
   state.buildEstimateUnavailable = false;
+  state.buildCarbonEscalated = false;
   state.questions = [];
   state.clarificationIndex = 0;
   state.clarificationDrafts = {};
@@ -12675,7 +12779,9 @@ function clearUserScopedWorkspaceState() {
   state.askPromptHintStrategyId = "";
 
   // Clear Planner, usage stats, security revisions, and guest quota state
+  state.savedStrategiesLoaded = false;
   state.plannerTasks = [];
+  state.plannerTasksLoaded = false;
   state.plannerFilter = "active";
   state.plannerCollapsedGroups = new Set(["Ümumi"]);
   if (state.plannerSelectedTaskIds?.clear) {
@@ -15345,6 +15451,7 @@ async function openSavedStrategy(id) {
 async function loadPlannerTasks() {
   if (!state.currentUser) {
     state.plannerTasks = [];
+    state.plannerTasksLoaded = false;
     updatePlannerBadge();
     return;
   }
@@ -15354,9 +15461,12 @@ async function loadPlannerTasks() {
     const data = await authRequest("/api/planner");
     if (epoch !== state.identityEpoch || (state.currentUser?.id || null) !== expectedUserId) return;
     state.plannerTasks = Array.isArray(data.tasks) ? data.tasks : [];
+    state.plannerTasksLoaded = true;
     updatePlannerBadge();
     checkAndShowPlannerVisitNotification();
-    if (state.view === "planner") render();
+    if (state.view === "planner" || (state.view === "workspace" && state.mode === "ask" && state.askTaskId && !state.askLoading)) {
+      render();
+    }
   } catch (error) {
     console.error("Failed to load planner tasks:", error);
   }

@@ -34,8 +34,8 @@ test("resolveAskThinkingLevel routes auto thinking levels (low, medium, high) an
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "auto", lastUserMsg: "Qısa sual", hasStrategyContext: false }), "low");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "auto", lastUserMsg: "Bu adi uzun bir mətndir ki, ümumi Ask rejimində istifadəçinin daxil etdiyi sualın ölçüsü 150-350 simvol arasında olduqda lüzumsuz gecikmə olmasın və cavab ildırım sürəti ilə low rejimində qaytarılsın." }), "low");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "auto", thinkingEnabled: false, lastUserMsg: "Adi sual" }), "low");
-  // Explicit levels are strictly preserved
-  assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "xhigh" }), "xhigh");
+  // Explicit levels are strictly preserved up to high (xhigh is not passed through)
+  assert.notEqual(resolveAskThinkingLevel({ requestedThinkingLevel: "xhigh" }), "xhigh");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "high" }), "high");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "medium" }), "medium");
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "low" }), "low");

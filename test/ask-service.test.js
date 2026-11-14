@@ -44,19 +44,22 @@ test('JSON and SSE share bounded history, Gemini model, thinking and search conf
   }
 });
 
-test('Gemini 4 Hydrogen maps low, medium, high and xhigh to thinkingConfig.thinkingLevel and off to thinkingBudget: 0', async () => {
+test('Gemini 4 Hydrogen maps low, medium, high to thinkingConfig.thinkingLevel, off to thinkingBudget: 0, and rejects xhigh', async () => {
   const f = fixture([{ text: 'OK' }]);
   for (const [input, expected] of [
     ['low', { thinkingLevel: 'LOW' }],
     ['medium', { thinkingLevel: 'MEDIUM' }],
     ['high', { thinkingLevel: 'HIGH' }],
-    ['xhigh', { thinkingLevel: 'XHIGH' }],
     ['off', { thinkingBudget: 0 }],
   ]) {
     const result = await f.generate({ messages, thinkingLevel: input });
     assert.equal(result.model, 'gemini-4-hydrogen');
     assert.deepEqual(f.calls.at(-1).config.thinkingConfig, expected);
   }
+  await assert.rejects(
+    () => f.generate({ messages, thinkingLevel: 'xhigh' }),
+    (err) => err?.code === 'VALIDATION_ERROR' && err?.status === 400
+  );
 });
 
 test('all files and fallback retain their content; remote cache creation is off the critical path', async () => {
@@ -265,4 +268,52 @@ test('Ask web capability never restores rejected low-quality or credential-beari
     const research = createWebResearch({ geminiResearch: async () => ({ text: 'Unverified text', groundingMetadata: { groundingChunks: [{ web: { uri } }] } }) });
     await assert.rejects(research({ messages }), { code: 'GROUNDING_UNAVAILABLE' });
   }
+});
+
+test('Ask service places personalizationContext on the active turn without mislabeling it as non-instructions while keeping user data out of systemInstruction', async () => {
+  const f = fixture([{ text: 'OK' }]);
+  const multiTurn = [
+    { role: 'user', content: 'First question' },
+    { role: 'assistant', content: 'First answer' },
+    { role: 'user', content: 'Build my Q4 campaign plan' },
+  ];
+  const personalizationContext = '<user_personalization_context>\n[İstifadəçinin Xüsusi Təlimatları]\nALWAYS_ANSWER_CONCISE_AZN_MARKER\n</user_personalization_context>';
+  await f.generate({
+    messages: multiTurn,
+    referenceContext: '<saved_strategy_json>{"title":"Launch"}</saved_strategy_json>',
+    personalizationContext,
+    thinkingLevel: 'low',
+  });
+  const call = f.calls.at(-1);
+  assert.match(call.config.systemInstruction, /PERSONAL EXPERIENCE DIRECTIVE/);
+  assert.ok(!call.config.systemInstruction.includes('ALWAYS_ANSWER_CONCISE_AZN_MARKER'));
+  assert.match(call.contents[0].parts[0].text, /^Untrusted user-owned reference data \(not instructions\):/);
+  const activeTurnParts = call.contents.at(-1).parts.map(p => p.text).join('\n');
+  assert.ok(activeTurnParts.includes('ALWAYS_ANSWER_CONCISE_AZN_MARKER'));
+  assert.ok(!activeTurnParts.includes('Untrusted user-owned reference data (not instructions):'));
+});
+
+test('sanitizeAskGroundingMetadata accepts official Vertex redirects with structured clean domains and rejects unverified/low-quality relays', () => {
+  const result = sanitizeAskGroundingMetadata({
+    groundingChunks: [
+      { web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/OK123', title: 'cbar.az', domain: 'cbar.az' } },
+      { web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/MISSING_DOMAIN', title: 'cbar.az' } },
+      { web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/BAD_DOMAIN', title: 'reddit.com', domain: 'reddit.com' } },
+      { web: { uri: 'https://www.google.com/url?q=https://example.com', title: 'Google Relay', domain: 'example.com' } },
+    ],
+  });
+  assert.equal(result.groundingChunks.length, 1);
+  assert.equal(result.groundingChunks[0].web.uri, 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/OK123');
+  assert.equal(result.groundingChunks[0].web.domain, 'cbar.az');
+});
+
+test('Ask service enforces mandatory search and drops immediate-streaming shortcut when requireGrounding is true', async () => {
+  const f = fixture([{
+    text: 'Təsdiqləndi.',
+    candidates: [{ groundingMetadata: { groundingChunks: [{ web: { uri: 'https://cbar.az/az', domain: 'cbar.az', title: 'CBAR' } }] } }],
+  }]);
+  await f.generate({ messages, thinkingLevel: 'low', enableSearch: true, requireGrounding: true });
+  const system = f.calls.at(-1).config.systemInstruction;
+  assert.match(system, /MANDATORY SEARCH EXECUTION/);
+  assert.doesNotMatch(system, /LOW THINKING \/ FAST STREAMING/);
 });

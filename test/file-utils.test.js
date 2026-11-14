@@ -6,6 +6,7 @@ import {
   arrayBufferToBase64,
   readUploadedFileAsData,
 } from "../public/file-utils.js";
+import { prepareUploadedContext } from "../src/services/artifacts/upload-context.js";
 
 test("detectMimeType infers MIME type from extension when type is missing or generic", () => {
   assert.equal(detectMimeType("document.pdf", ""), "application/pdf");
@@ -84,4 +85,22 @@ test("readUploadedFileAsData throws when file exceeds 20MB", async () => {
     async () => readUploadedFileAsData(oversizedFile, { isEn: false }),
     { message: "Faylın həcmi 20MB-dan çox ola bilməz." }
   );
+});
+
+test("legacy Office (.doc/.xls) and SVG uploads are cleanly rejected on client and server", async () => {
+  for (const [name, mime] of [
+    ["legacy.doc", "application/msword"],
+    ["legacy.xls", "application/vnd.ms-excel"],
+    ["vector.svg", "image/svg+xml"],
+  ]) {
+    const file = new File(["dummy"], name, { type: mime });
+    await assert.rejects(
+      () => readUploadedFileAsData(file, { isEn: true }),
+      /Unsupported format/
+    );
+    await assert.rejects(
+      () => prepareUploadedContext({ name, mimeType: mime, data: Buffer.from("dummy").toString("base64") }),
+      (err) => err?.status === 400 && err?.code === "VALIDATION_ERROR"
+    );
+  }
 });

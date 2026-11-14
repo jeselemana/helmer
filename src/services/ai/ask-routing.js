@@ -19,10 +19,10 @@ export function resolveAskModelRoute() {
   return "gemini-4-hydrogen";
 }
 
-// Auto-routing for Gemini 4 Hydrogen thinking levels (low, medium, high, xhigh)
+// Auto-routing for Gemini 4 Hydrogen thinking levels (low, medium, high)
 export function resolveAskThinkingLevel({ requestedThinkingLevel = "auto", lastUserMsg = "", hasStrategyContext = false } = {}) {
   const normalized = String(requestedThinkingLevel || "auto").toLowerCase().trim();
-  if (["low", "medium", "high", "xhigh", "off"].includes(normalized)) {
+  if (["low", "medium", "high", "off"].includes(normalized)) {
     return normalized;
   }
   const cleanMsg = String(lastUserMsg || "").trim();

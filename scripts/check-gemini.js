@@ -22,7 +22,7 @@ export async function checkGeminiConnection({ client, signal = AbortSignal.timeo
   try {
     signal.throwIfAborted();
     const response = await (client || getGeminiClient()).models.generateContent({
-      model: 'gemini-3.8-flash', contents: 'Reply with exactly OK.',
+      model: 'gemini-4-hydrogen', contents: 'Reply with exactly OK.',
       config: { maxOutputTokens: 64, thinkingConfig: { thinkingLevel: 'LOW' }, abortSignal: signal },
     });
     signal.throwIfAborted();
@@ -30,7 +30,7 @@ export async function checkGeminiConnection({ client, signal = AbortSignal.timeo
     if (finishReason !== 'STOP' || typeof response.text !== 'string' || !response.text.trim()) {
       return { ok: false, code: 'GEMINI_INVALID_RESPONSE', elapsedMs: Date.now() - startedAt };
     }
-    return { ok: true, model: 'gemini-3.8-flash', operation: 'generateContent', elapsedMs: Date.now() - startedAt };
+    return { ok: true, model: 'gemini-4-hydrogen', operation: 'generateContent', elapsedMs: Date.now() - startedAt };
   } catch (error) {
     return { ...safeFailure(error), elapsedMs: Date.now() - startedAt };
   }

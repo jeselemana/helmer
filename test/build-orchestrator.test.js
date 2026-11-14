@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBuildOrchestrator, enforceBuildRoute, analyzeBuildTaskSignals } from '../src/services/ai/build-orchestrator.js';
-import { buildConfig, BUILD_SAFETY_SETTINGS, BUILD_OUTPUT_RESERVATIONS, BUILD_ARGON_THINKING_RESERVATIONS } from '../src/services/ai/build-config.js';
+import { buildConfig, BUILD_SAFETY_SETTINGS, BUILD_OUTPUT_RESERVATIONS, BUILD_HYDROGEN_THINKING_RESERVATIONS, BUILD_CARBON_THINKING_RESERVATIONS } from '../src/services/ai/build-config.js';
 import { StrategySchema, StrategyAssessmentSchema, evaluateBriefSufficiency, stripInlineGroundingRedirectUrls } from '../src/domain/strategy.js';
 import { buildStrategyPersonalizationContext } from '../src/services/ai/personal-context.js';
 import { resolveBuildVertexClientOptions, resolveGeminiClientOptions } from '../src/services/ai/client.js';
@@ -9,7 +9,7 @@ import { executionContext } from '../src/services/security/privacy-policy.js';
 import { wrapProvider, configureProviderPolicy } from '../src/services/security/provider-policy.js';
 import { strategyFixture } from './helpers/build-fixtures.js';
 
-const route = (overrides = {}) => ({ needs_search: false, argon_thinking_level: 'Medium', facts: [], focus_area: 'Launch', ...overrides });
+const route = (overrides = {}) => ({ needs_search: false, target_model: 'gemini-4-hydrogen', thinking_level: 'medium', facts: [], focus_area: 'Launch', ...overrides });
 function support(text, ...groundingChunkIndices) {
   return { segment: { text }, groundingChunkIndices };
 }
@@ -40,11 +40,11 @@ function fixture(options = {}) {
   return f;
 }
 
-test('every generation and refinement uses exactly Flash HIGH → Argon with selected thinking, safety and bounded timeouts', async () => {
-  for (const level of ['Low', 'Medium', 'High']) for (const refinement of [true, false]) {
-    const f = fixture({ route: route({ argon_thinking_level: level }) });
+test('every generation and refinement uses Scout/Decision 1 → Hydrogen (low/medium/high/xhigh) or Carbon (low/medium/high) with safety and bounded timeouts', async () => {
+  for (const level of ['low', 'medium', 'high', 'xhigh']) for (const refinement of [true, false]) {
+    const f = fixture({ route: route({ target_model: 'gemini-4-hydrogen', thinking_level: level }) });
     const result = await f.execute({ refinement });
-    assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash', 'gemini-4-argon']);
+    assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-4-hydrogen', 'gemini-4-hydrogen']);
     assert.deepEqual(f.calls.map(call => call.params.config.thinkingConfig.thinkingLevel), ['HIGH', level.toUpperCase()]);
     for (const { params } of f.calls) {
       assert.equal(params.config.maxOutputTokens, undefined);
@@ -56,18 +56,28 @@ test('every generation and refinement uses exactly Flash HIGH → Argon with sel
     assert.equal(f.calls[1].params.config.httpOptions.timeout, buildConfig.finalTimeoutMs[level.toUpperCase()]);
     assert.equal(f.calls[1].params.config.tools, undefined);
     assert.equal(f.calls[1].params.config.responseSchema.properties.orchestration, undefined);
+    assert.equal(result.orchestration.escalatedToFlagship, false);
     assert.equal(result.title, 'Launch brief'); assert.equal(f.usages.length, 2);
+  }
+  for (const level of ['low', 'medium', 'high']) {
+    const f = fixture({ route: route({ target_model: 'gemini-4-carbon', thinking_level: level }) });
+    const result = await f.execute();
+    assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-4-hydrogen', 'gemini-4-carbon']);
+    assert.deepEqual(f.calls.map(call => call.params.config.thinkingConfig.thinkingLevel), ['HIGH', level.toUpperCase()]);
+    assert.equal(f.calls[1].params.config.httpOptions.timeout, buildConfig.carbonTimeoutMs[level.toUpperCase()]);
+    assert.equal(result.orchestration.escalatedToFlagship, true);
+    assert.equal(result.orchestration.routingTier, 'flagship');
   }
 });
 
-test('assessment is a single Flash call, estimates are single Flash calls with private tenant-scoped decision caching', async () => {
+test('assessment is a single Hydrogen call, estimates are single Hydrogen calls with private tenant-scoped decision caching', async () => {
   const f = fixture(); f.response = google({ status: 'ready', understanding: 'Clear', questions: [], assumptions: [] });
   await f.execute({ assessment: true, schema: StrategyAssessmentSchema });
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash']);
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-4-hydrogen']);
   assert.equal(f.calls[0].params.config.tools, undefined);
   assert.equal(f.calls[0].params.config.httpOptions.timeout, buildConfig.assessmentTimeoutMs);
-  const est = fixture({ route: route({ argon_thinking_level: 'High' }) });
-  assert.deepEqual(await est.execute({ estimateOnly: true }), { minMinutes: 4, maxMinutes: 11, bufferMinutes: 3 });
+  const est = fixture({ route: route({ target_model: 'gemini-4-hydrogen', thinking_level: 'high' }) });
+  assert.deepEqual(await est.execute({ estimateOnly: true }), { minMinutes: 3, maxMinutes: 7, bufferMinutes: 2 });
   await est.execute({ estimateOnly: true }); assert.equal(est.calls.length, 1);
   await est.execute({ estimateOnly: true, ownerId: 'tenant-b' }); assert.equal(est.calls.length, 2);
   assert.equal(est.calls[0].params.config.tools, undefined);
@@ -115,14 +125,15 @@ test('Google Search is Flash-only, disabled for estimates, controlled by server 
   }
 });
 
-test('scout prompt restricts High to maximum complexity and simple refinement to no search/Low, and detects mandatory search signals', async () => {
+test('scout prompt encodes Hydrogen/Carbon routing groups and detects mandatory search signals', async () => {
   const f = fixture(); await f.execute({ refinement: true });
   const prompt = f.calls[0].params.config.systemInstruction;
-  assert.match(prompt, /High: ONLY maximally complex/);
-  assert.match(prompt, /Simple refinements MUST use Low and needs_search false/);
+  assert.match(prompt, /gemini-4-hydrogen/);
+  assert.match(prompt, /gemini-4-carbon/);
+  assert.match(prompt, /simple edits: needs_search false/);
   assert.equal(JSON.parse(f.calls[0].params.contents).refinement, true);
 
-  const aiSignals = analyzeBuildTaskSignals('Compare Gemini 3.8 Flash and GPT-5.6 API release benchmarks for our AI architecture');
+  const aiSignals = analyzeBuildTaskSignals('Compare Gemini 4 Hydrogen and GPT-5.6 API release benchmarks for our AI architecture');
   assert.equal(aiSignals.mandatorySearch, true);
   assert.ok(aiSignals.mandatorySearchReasons.includes('ai_models_tech'));
 
@@ -144,8 +155,8 @@ test('scout prompt restricts High to maximum complexity and simple refinement to
   assert.equal(simpleRefine.recommendedThinking, 'Low');
 });
 
-test('invalid/injected route and final fields fail closed without retries or fallback', async () => {
-  for (const decision of [route({ argon_thinking_level: 'MAX' }), route({ tools: ['shell'] }), route({ profileFields: ['brand'] }), route({ facts: ['x'.repeat(2001)] })]) {
+test('invalid/injected route fails closed; invalid final triggers schema repair and never persists invalid payloads', async () => {
+  for (const decision of [route({ thinking_level: 'MAX' }), route({ target_model: 'gemini-4-carbon', thinking_level: 'xhigh' }), route({ tools: ['shell'] }), route({ profileFields: ['brand'] }), route({ facts: ['x'.repeat(2001)] })]) {
     const f = fixture({ route: decision });
     await assert.rejects(f.execute(), e => e.code === 'AI_INVALID_OUTPUT'); assert.equal(f.calls.length, 1);
   }
@@ -153,7 +164,7 @@ test('invalid/injected route and final fields fail closed without retries or fal
   for (const invalid of [{ ...strategyFixture(), title: 'x'.repeat(301) }, { ...strategyFixture(), sections: [] }, { ...strategyFixture(), protectedField: 'injected' }]) {
     const f = fixture(); f.response = google(invalid);
     await assert.rejects(f.execute(), e => e.code === 'AI_INVALID_OUTPUT');
-    assert.equal(f.calls.length, 2); assert.ok(f.failures[0].validationIssues.length);
+    assert.ok(f.calls.length >= 2); assert.ok(f.failures[0].validationIssues.length);
   }
 });
 
@@ -163,11 +174,11 @@ for (const status of [401, 403]) test(`non-retryable provider ${status} terminat
   assert.equal(f.calls.length, 1); assert.doesNotMatch(JSON.stringify(f.failures), /secret|stack/);
 });
 
-for (const status of [429, 503, 408]) test(`retryable provider ${status} retries across Vertex locations (us → global) and terminates safely without another provider or leaked SDK details`, async () => {
+for (const status of [429, 503, 408]) test(`retryable provider ${status} retries across Vertex locations (us → global) and degradation tiers safely without leaking SDK details`, async () => {
   const f = fixture({ call: async () => { throw Object.assign(new Error('secret token and raw stack'), { status }); } });
   await assert.rejects(f.execute(), e => e.status >= 400 && !/secret|stack/.test(e.message) && Boolean(e.requestId));
-  assert.equal(f.calls.length, 2);
-  assert.deepEqual(f.calls.map(c => c.location), ['us', 'global']);
+  assert.ok(f.calls.length >= 2);
+  assert.deepEqual(f.calls.slice(0, 2).map(c => c.location), ['us', 'global']);
   assert.doesNotMatch(JSON.stringify(f.failures), /secret|stack/);
 });
 
@@ -177,21 +188,29 @@ for (const finishReason of ['SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII',
   assert.equal(f.calls.length, 2);
 });
 
-test('Argon MAX_TOKENS steps down thinking level on retry and fails closed if still truncated', async () => {
-  const f = fixture({ route: route({ argon_thinking_level: 'High' }) });
+test('Carbon MAX_TOKENS degrades cleanly across Carbon MEDIUM → Hydrogen tiers and recovers on step-down', async () => {
+  const f = fixture({ route: route({ target_model: 'gemini-4-carbon', thinking_level: 'high' }) });
   f.response = { text: '{}', candidates: [{ finishReason: 'MAX_TOKENS' }] };
   await assert.rejects(f.execute(), e => e.code === 'AI_MAX_TOKENS');
-  assert.equal(f.calls.length, 4);
-  assert.deepEqual(f.calls.map(c => c.params.config.thinkingConfig.thinkingLevel), ['HIGH', 'HIGH', 'MEDIUM', 'LOW']);
+  assert.ok(f.calls.length >= 5);
+  assert.deepEqual(
+    f.calls.slice(0, 4).map(c => [c.params.model, c.params.config.thinkingConfig.thinkingLevel]),
+    [
+      ['gemini-4-hydrogen', 'HIGH'],
+      ['gemini-4-carbon', 'HIGH'],
+      ['gemini-4-carbon', 'MEDIUM'],
+      ['gemini-4-hydrogen', 'XHIGH'],
+    ],
+  );
 
-  // Recovery when step-down succeeds on second Argon attempt
-  let argonAttempts = 0;
+  // Recovery when step-down succeeds on Carbon MEDIUM attempt
+  let carbonAttempts = 0;
   const g = fixture({
-    route: route({ argon_thinking_level: 'High' }),
+    route: route({ target_model: 'gemini-4-carbon', thinking_level: 'high' }),
     call: async params => {
       if (params.config.responseSchema.properties.needs_search) return google(g.route);
-      argonAttempts++;
-      if (argonAttempts === 1) return { text: '{}', candidates: [{ finishReason: 'MAX_TOKENS' }] };
+      carbonAttempts++;
+      if (carbonAttempts === 1) return { text: '{}', candidates: [{ finishReason: 'MAX_TOKENS' }] };
       return google(strategyFixture());
     },
   });
@@ -200,9 +219,10 @@ test('Argon MAX_TOKENS steps down thinking level on retry and fails closed if st
   assert.deepEqual(g.calls.map(c => c.params.config.thinkingConfig.thinkingLevel), ['HIGH', 'HIGH', 'MEDIUM']);
 });
 
-test('transient streaming failure resets stream, falls back to unary Vertex call on fallback location, and preserves scout checkpoint across failed Argon calls', async () => {
+test('transient streaming failure resets stream, falls back to unary Vertex call, and degrades to Hydrogen when Carbon fails', async () => {
   let streamTries = 0;
   const f = fixture({
+    route: route({ target_model: 'gemini-4-carbon', thinking_level: 'medium' }),
     stream: async () => (async function* () {
       streamTries++;
       yield { text: '{"title":"partial' };
@@ -215,27 +235,34 @@ test('transient streaming failure resets stream, falls back to unary Vertex call
   assert.ok(f.chunks.some(c => c.resetStream === true));
   assert.deepEqual(f.chunks.at(-1), { finishReason: 'STOP' });
   assert.deepEqual(f.calls.map(c => [c.params.model, c.location]), [
-    ['gemini-3.8-flash', 'us'],
-    ['gemini-4-argon', 'us'],
-    ['gemini-4-argon', 'global'],
+    ['gemini-4-hydrogen', 'us'],
+    ['gemini-4-carbon', 'us'],
+    ['gemini-4-carbon', 'global'],
   ]);
 
-  // Verify scout checkpoint reuse when Argon fails completely on call 1 and succeeds on call 2
-  let failArgon = true;
+  // Verify Carbon 503 degradation rescues the user via Hydrogen and clears flagship escalation
+  const cpHandler = async params => {
+    if (params.config.responseSchema?.properties?.needs_search) return google(cp.route);
+    if (params.model === 'gemini-4-carbon') throw Object.assign(new Error('carbon overloaded'), { status: 503 });
+    return google(strategyFixture());
+  };
   const cp = fixture({
-    call: async params => {
-      if (params.config.responseSchema.properties.needs_search) return google(cp.route);
-      if (failArgon) throw Object.assign(new Error('argon overloaded'), { status: 503 });
-      return google(strategyFixture());
-    },
+    route: route({ target_model: 'gemini-4-carbon', thinking_level: 'medium' }),
+    call: cpHandler,
+    stream: async params => (async function* () {
+      const data = await cpHandler(params);
+      yield { text: data.text.slice(0, 30), candidates: [{}] };
+      yield { ...data, text: data.text.slice(30) };
+    })(),
   });
-  await assert.rejects(cp.execute(), e => e.code === 'AI_PROVIDER_UNAVAILABLE');
-  assert.equal(cp.calls.filter(c => c.params.model === 'gemini-3.8-flash').length, 1);
-  failArgon = false;
-  const resumed = await cp.execute();
-  assert.equal(resumed.title, 'Launch brief');
-  // Flash was NOT called again because the verified scout checkpoint was preserved!
-  assert.equal(cp.calls.filter(c => c.params.model === 'gemini-3.8-flash').length, 1);
+  const rescued = await cp.execute({ onChunk: chunk => cp.chunks.push(chunk) });
+  assert.equal(rescued.title, 'Launch brief');
+  assert.equal(rescued.orchestration.generatorModel, 'gemini-4-hydrogen');
+  assert.equal(rescued.orchestration.thinkingLevel, 'XHIGH');
+  assert.equal(rescued.orchestration.escalatedToFlagship, false);
+  assert.equal(rescued.orchestration.routingTier, 'standard');
+  assert.ok(cp.chunks.some(c => c.escalatedToFlagship === true));
+  assert.ok(cp.chunks.some(c => c.escalatedToFlagship === false && c.resetStream === true));
 });
 
 test('stream emits first chunk before completion, never emits scout JSON and validates terminal JSON', async () => {
@@ -249,7 +276,7 @@ test('stream emits first chunk before completion, never emits scout JSON and val
   await f.execute({ onChunk: chunk => { if (chunk.chunk) observed = true; f.chunks.push(chunk); } });
   assert.equal(f.chunks.filter(c => c.chunk).map(c => c.chunk).join(''), JSON.stringify(strategyFixture()));
   assert.deepEqual(f.chunks.at(-1), { finishReason: 'STOP' });
-  assert.doesNotMatch(JSON.stringify(f.chunks), /focus_area|argon_thinking_level/);
+  assert.doesNotMatch(JSON.stringify(f.chunks), /focus_area|thinking_level|target_model/);
 });
 
 test('mid-stream invalid JSON is an error with no terminal success; cancellation stops iteration and logs aborted stage', async () => {
@@ -269,16 +296,25 @@ test('all model calls pass fresh admission and thinking-aware output reservation
     reservations.push({ model: params.model, thinking: params.config?.thinkingConfig?.thinkingLevel, reservation }); return async () => {};
   } }); t.after(() => configureProviderPolicy(undefined));
   const controller = new AbortController(), context = { ownerId: 'tenant-a', controller, signal: controller.signal, assertAuthorized: async () => {} };
-  for (const level of ['Low', 'Medium', 'High']) {
+  for (const level of ['low', 'medium', 'high', 'xhigh']) {
     reservations.length = 0;
-    const f = fixture({ wrap: true, route: route({ argon_thinking_level: level }) });
+    const f = fixture({ wrap: true, route: route({ target_model: 'gemini-4-hydrogen', thinking_level: level }) });
     await executionContext.run(context, () => f.execute());
     assert.deepEqual(reservations.map(r => r.reservation.outputTokenReservation), [
-      BUILD_OUTPUT_RESERVATIONS['gemini-3.8-flash'],
-      BUILD_ARGON_THINKING_RESERVATIONS[level.toUpperCase()],
+      BUILD_HYDROGEN_THINKING_RESERVATIONS.HIGH,
+      BUILD_HYDROGEN_THINKING_RESERVATIONS[level.toUpperCase()],
     ]);
     assert.equal(f.calls[0].params.config.maxOutputTokens, undefined);
     assert.equal(f.calls[1].params.config.maxOutputTokens, undefined);
+  }
+  for (const level of ['low', 'medium', 'high']) {
+    reservations.length = 0;
+    const f = fixture({ wrap: true, route: route({ target_model: 'gemini-4-carbon', thinking_level: level }) });
+    await executionContext.run(context, () => f.execute());
+    assert.deepEqual(reservations.map(r => r.reservation.outputTokenReservation), [
+      BUILD_HYDROGEN_THINKING_RESERVATIONS.HIGH,
+      BUILD_CARBON_THINKING_RESERVATIONS[level.toUpperCase()],
+    ]);
   }
   configureProviderPolicy({ assertEnabled: async () => {}, reserveProvider: async () => { throw Object.assign(new Error('budget'), { code: 'DAILY_BUDGET_EXCEEDED' }); } });
   const blockedStages = [];
@@ -288,19 +324,36 @@ test('all model calls pass fresh admission and thinking-aware output reservation
   assert.ok(blockedStages.some(s => s.phase === 'scout' && s.status === 'failed' && s.code === 'DAILY_BUDGET_EXCEEDED'));
 });
 
-test('normal Gemini retains its existing cap; Build refuses unknown models and Argon tools', async t => {
+test('normal Gemini retains its existing cap; Build allows Carbon googleSearch tools and refuses unknown models or non-search tools', async t => {
   let payload;
   configureProviderPolicy({ assertEnabled: async () => {}, reserveProvider: async () => async () => {} }); t.after(() => configureProviderPolicy(undefined));
   const context = { ownerId: 'tenant-a' };
   const regular = wrapProvider({ models: { generateContent: async params => { payload = params; return google({}); } } }, 'gemini');
-  await executionContext.run(context, () => regular.models.generateContent({ model: 'gemini-3.8-flash', config: {} }));
+  await executionContext.run(context, () => regular.models.generateContent({ model: 'gemini-4-hydrogen', config: {} }));
   assert.equal(payload.config.maxOutputTokens, 16384);
-  const build = wrapProvider({ models: { generateContent: async () => { throw new Error('must not run'); } } }, 'gemini', { buildVertex: true });
-  for (const params of [{ model: 'unknown' }, { model: 'gemini-4-argon', config: { tools: [{ googleSearch: {} }] } }, { model: 'gemini-3.8-flash', config: { maxOutputTokens: 50 } }]) {
+  let ranCarbonSearch = false;
+  const build = wrapProvider({
+    models: {
+      generateContent: async params => {
+        if (params.model === 'gemini-4-carbon' && params.config?.tools?.[0]?.googleSearch) {
+          ranCarbonSearch = true;
+          return google({});
+        }
+        throw new Error('must not run');
+      },
+    },
+  }, 'gemini', { buildVertex: true });
+  await executionContext.run(context, () => build.models.generateContent({ model: 'gemini-4-carbon', config: { tools: [{ googleSearch: {} }] } }));
+  assert.equal(ranCarbonSearch, true);
+  for (const params of [
+    { model: 'unknown' },
+    { model: 'gemini-4-carbon', config: { tools: [{ functionDeclarations: [{ name: 'bad' }] }] } },
+    { model: 'gemini-4-hydrogen', config: { maxOutputTokens: 50 } },
+  ]) {
     await assert.rejects(executionContext.run(context, () => build.models.generateContent(params)), e => e.code === 'EXECUTION_UNAVAILABLE');
   }
-  assert.equal(BUILD_OUTPUT_RESERVATIONS['gemini-3.8-flash'], 16384);
-  assert.equal(BUILD_OUTPUT_RESERVATIONS['gemini-4-argon'], 32768);
+  assert.equal(BUILD_OUTPUT_RESERVATIONS['gemini-4-hydrogen'], 16384);
+  assert.equal(BUILD_OUTPUT_RESERVATIONS['gemini-4-carbon'], 32768);
 });
 
 test('Build client uses ADC, configurable Vertex locations (us/global), and finite client timeouts', () => {
@@ -364,15 +417,15 @@ test('Redis admission reserves realistic thinking-aware budgets, admits default 
       return 1;
     },
   };
-  // Default $5 user limit works out of the box with Argon!
+  // Default $5 user limit works out of the box with Carbon & Hydrogen!
   const policy = new AiPolicy({ redis, env: { NODE_ENV: 'test', AI_USER_DAILY_USD: '5', AI_PLATFORM_DAILY_USD: '100' } });
   const context = { ownerId: 'tenant-a', assertAuthorized: async () => {} };
-  const params = { model: 'gemini-4-argon', contents: 'synthetic', config: {} };
+  const params = { model: 'gemini-4-carbon', contents: 'synthetic', config: {} };
   const release = await policy.reserveProvider(context, params, { outputTokenReservation: 32768 });
-  const price = DEFAULT_MODEL_PRICING['gemini-4-argon'];
+  const price = DEFAULT_MODEL_PRICING['gemini-4-carbon'];
   const expected = Math.ceil(Buffer.byteLength(JSON.stringify(params)) * price.input + 32768 * price.output);
   assert.equal(Number(reservations[0].arguments[0]), expected);
-  assert.ok(expected < 500_000, 'Argon reservation must be < $0.50 so $5 daily budget users are admitted');
+  assert.ok(expected < 1_000_000, 'Carbon reservation must stay well within $5 daily user budget');
   await release.refund();
   await release();
   const day = new Date().toISOString().slice(0, 10);
@@ -380,7 +433,7 @@ test('Redis admission reserves realistic thinking-aware budgets, admits default 
 
   await assert.rejects(policy.reserveProvider(context, params, { outputTokenReservation: 99999 }), e => e.code === 'BUDGET_CONFIGURATION_INVALID');
 
-  // Verify provider-policy settles 0 search calls when Flash does not invoke Google Search
+  // Verify provider-policy settles 0 search calls when Hydrogen does not invoke Google Search
   configureProviderPolicy(policy);
   t.after(() => configureProviderPolicy(undefined));
   const wrapped = wrapProvider({
@@ -393,15 +446,15 @@ test('Redis admission reserves realistic thinking-aware budgets, admits default 
     },
   }, 'gemini', { buildVertex: true });
   await executionContext.run(context, () => wrapped.models.generateContent({
-    model: 'gemini-3.8-flash',
+    model: 'gemini-4-hydrogen',
     contents: 'test',
     config: { tools: [{ googleSearch: {} }] },
   }));
-  const settledFlashMicros = Number(budgetState.get(`security:budget:${day}:tenant-a`));
-  assert.equal(settledFlashMicros, Math.ceil(100 * 0.75 + 50 * 3.75), 'No $0.035 search fee charged when grounding was not invoked');
+  const settledHydrogenMicros = Number(budgetState.get(`security:budget:${day}:tenant-a`));
+  assert.equal(settledHydrogenMicros, Math.ceil(100 * 1.50 + 50 * 7.50), 'No search fee charged when grounding was not invoked');
 });
 
-test('required web research fails before synthesis with missing, unrelated or filtered attribution', async () => {
+test('required web research isolates missing, unrelated or filtered attribution to ungrounded brief without failing user', async () => {
   const fact = 'Unsupported market claim';
   for (const metadata of [
     undefined,
@@ -415,9 +468,12 @@ test('required web research fails before synthesis with missing, unrelated or fi
       const f = fixture({ route: route({ needs_search: false, facts: [fact], focus_area: fact }) });
       f.scout = google(f.route);
       f.scout.candidates[0].groundingMetadata = metadata;
-      await assert.rejects(f.execute({ buildMode, input: 'Search the web for current prices' }), { code: 'GROUNDING_UNAVAILABLE' });
-      assert.equal(f.calls.length, 1);
-      assert.equal(f.usages.at(-1).searchAttempted, true);
+      const result = await f.execute({ buildMode, input: 'Search the web for current prices' });
+      assert.equal(result.orchestration.searchGrounded, false);
+      assert.equal(result.orchestration.groundingUnavailable, true);
+      assert.deepEqual(result.orchestration.sources, []);
+      assert.equal(result.orchestration.evidence, undefined);
+      assert.doesNotMatch(f.calls.at(-1).params.contents, /Unsupported market claim/);
     }
   }
 });
@@ -457,9 +513,9 @@ test('real Google SDK sends both Build models to the canonical US multi-region h
     ...resolveBuildVertexClientOptions({ GOOGLE_CLOUD_PROJECT: 'test-helmer-project' }),
     googleAuthOptions: { authClient: { getRequestHeaders: async () => new Headers({ authorization: 'Bearer synthetic-local-test' }) } },
   });
-  for (const model of ['gemini-3.8-flash', 'gemini-4-argon']) await client.models.generateContent({ model, contents: 'Synthetic transport test' });
+  for (const model of ['gemini-4-hydrogen', 'gemini-4-carbon']) await client.models.generateContent({ model, contents: 'Synthetic transport test' });
   assert.equal(requests.length, 2);
-  for (const [index, model] of ['gemini-3.8-flash', 'gemini-4-argon'].entries()) {
+  for (const [index, model] of ['gemini-4-hydrogen', 'gemini-4-carbon'].entries()) {
     assert.equal(requests[index].url.origin, 'https://aiplatform.us.rep.googleapis.com');
     assert.equal(requests[index].url.pathname, `/v1beta1/projects/test-helmer-project/locations/us/publishers/google/models/${model}:generateContent`);
     assert.equal(requests[index].headers.get('authorization'), 'Bearer synthetic-local-test');
@@ -476,7 +532,7 @@ test('Build stage timing events contain no task, profile, output or tenant ident
   assert.ok(events.every(event => Number.isFinite(event.elapsedMs)));
 });
 
-test('Faster mode runs direct Gemini 3.8 Flash with user-selected Medium or High thinking and zero Argon or router calls when search is not required', async () => {
+test('Faster mode runs direct Gemini 4 Hydrogen with user-selected Medium or High thinking and zero Carbon or router calls when search is not required', async () => {
   for (const [fasterThinkingLevel, expectedThinking] of [['medium', 'MEDIUM'], ['high', 'HIGH']]) {
     const f = fixture();
     const result = await f.execute({
@@ -484,21 +540,21 @@ test('Faster mode runs direct Gemini 3.8 Flash with user-selected Medium or High
       fasterThinkingLevel,
       input: 'Prepare a 90-day B2B SaaS launch plan for Baku with 9,000 AZN budget',
     });
-    assert.deepEqual(f.calls.map(c => c.params.model), ['gemini-3.8-flash']);
+    assert.deepEqual(f.calls.map(c => c.params.model), ['gemini-4-hydrogen']);
     assert.deepEqual(f.calls.map(c => c.params.config.thinkingConfig.thinkingLevel), [expectedThinking]);
     assert.equal(f.calls[0].params.config.tools, undefined);
     assert.equal(result.orchestration.buildMode, 'faster');
-    assert.equal(result.orchestration.generatorModel, 'gemini-3.8-flash');
+    assert.equal(result.orchestration.generatorModel, 'gemini-4-hydrogen');
     assert.equal(result.orchestration.thinkingLevel, expectedThinking);
     assert.equal(result.orchestration.fasterThinkingLevel, fasterThinkingLevel);
     assert.equal(result.orchestration.stageMetrics.length, 1);
     assert.equal(result.orchestration.stageMetrics[0].phase, 'final');
-    assert.equal(result.orchestration.stageMetrics[0].model, 'gemini-3.8-flash');
+    assert.equal(result.orchestration.stageMetrics[0].model, 'gemini-4-hydrogen');
     assert.equal(result.orchestration.stageMetrics[0].thinkingLevel, expectedThinking);
   }
 });
 
-test('Faster mode preserves user-selected thinking level on retry and supports auxiliary Flash grounding when mandatory search is triggered', async () => {
+test('Faster mode preserves user-selected thinking level on retry and supports auxiliary Hydrogen grounding when mandatory search is triggered', async () => {
   // 1. Retry in Faster High preserves HIGH thinking (never steps down to MEDIUM)
   let tries = 0;
   const retryFix = fixture({
@@ -510,10 +566,10 @@ test('Faster mode preserves user-selected thinking level on retry and supports a
   });
   const recovered = await retryFix.execute({ buildMode: 'faster', fasterThinkingLevel: 'high' });
   assert.equal(recovered.title, 'Launch brief');
-  assert.deepEqual(retryFix.calls.map(c => c.params.model), ['gemini-3.8-flash', 'gemini-3.8-flash']);
+  assert.deepEqual(retryFix.calls.map(c => c.params.model), ['gemini-4-hydrogen', 'gemini-4-hydrogen']);
   assert.deepEqual(retryFix.calls.map(c => c.params.config.thinkingConfig.thinkingLevel), ['HIGH', 'HIGH']);
 
-  // 2. When mandatory search is triggered in Faster mode, auxiliary Flash LOW grounding runs before Flash final synthesis
+  // 2. When mandatory search is triggered in Faster mode, auxiliary Hydrogen LOW grounding runs before Hydrogen final synthesis
   const searchFix = fixture({ route: route({ needs_search: true, facts: ['Verified 2026 benchmark'] }) });
   searchFix.scout = google(searchFix.route);
   searchFix.scout.candidates[0].groundingMetadata = {
@@ -526,7 +582,7 @@ test('Faster mode preserves user-selected thinking level on retry and supports a
     fasterThinkingLevel: 'high',
     input: 'Compare 2026 AI models and API release benchmarks for our platform',
   });
-  assert.deepEqual(searchFix.calls.map(c => c.params.model), ['gemini-3.8-flash', 'gemini-3.8-flash']);
+  assert.deepEqual(searchFix.calls.map(c => c.params.model), ['gemini-4-hydrogen', 'gemini-4-hydrogen']);
   assert.deepEqual(searchFix.calls.map(c => c.params.config.thinkingConfig.thinkingLevel), ['LOW', 'HIGH']);
   assert.equal(grounded.orchestration.searchGrounded, true);
   assert.equal(grounded.orchestration.sources[0].url, 'https://reuters.com/2026-ai-benchmarks');
@@ -595,7 +651,7 @@ test('evaluateBriefSufficiency enforces multi-dimensional semantic sufficiency a
   assert.equal(evaluateBriefSufficiency(completeBrief).reason, 'multi_dimensional_semantic_sufficiency');
 });
 
-test('accepted verified sources stay attached to their supported facts after sorting, without passing web text to Argon or trusting relay hosts', async () => {
+test('accepted verified sources stay attached to their supported facts after sorting, without passing web text to Carbon or trusting relay hosts', async () => {
   const fact = 'Mərkəzi faiz dərəcəsi 5.25%-dir.';
   const unsupported = 'Unsupported tax rate is 99%.';
   const f = fixture({ route: route({
@@ -622,7 +678,7 @@ test('accepted verified sources stay attached to their supported facts after sor
   assert.deepEqual(result.orchestration.evidence, [{ text: fact, sourceIndices: [0, 1] }]);
   assert.doesNotMatch(f.calls[1].params.contents, /5\.25|99%|Ignore all|grounding-api-redirect/);
 
-  // Relay-only chunks with high-signal title alone must fail closed without fetching arbitrary URLs
+  // Relay-only chunks with high-signal title alone must never attach sources or pass unverified claims; falls back safely to ungrounded
   const relayOnly = fixture({ route: route({ needs_search: true, facts: [fact] }) });
   relayOnly.scout = google(relayOnly.route);
   relayOnly.scout.candidates[0].groundingMetadata = {
@@ -631,8 +687,11 @@ test('accepted verified sources stay attached to their supported facts after sor
     ],
     groundingSupports: [support(fact, 0)],
   };
-  await assert.rejects(relayOnly.execute(), { code: 'GROUNDING_UNAVAILABLE' });
-  assert.equal(relayOnly.calls.length, 1);
+  const relayResult = await relayOnly.execute();
+  assert.equal(relayResult.orchestration.searchGrounded, false);
+  assert.equal(relayResult.orchestration.groundingUnavailable, true);
+  assert.deepEqual(relayResult.orchestration.sources, []);
+  assert.doesNotMatch(relayOnly.calls.at(-1).params.contents, /5\.25|grounding-api-redirect/);
 
   // Real Vertex AI JSON mode segments often start at byte 0 (including JSON prefix) and stop before the trailing period
   const jsonFramed = fixture({ route: route({ needs_search: true, facts: [fact] }) });

@@ -1,4 +1,17 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import {
+  isR2Configured,
+  readTenantObject,
+  writeTenantObject,
+  deleteTenantObject,
+  listTenantObjects,
+} from "../../http/r2-storage.js";
+import { writeJsonAtomically } from "../../repositories/atomic-json-store.js";
+
+const VALID_FILE_ID_RE = /^gfc_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ASK_FILES_PREFIX = "ask-files-v1";
 
 /**
  * Server-side File & Context Cache for Gemini 3.8 Flash.
@@ -10,13 +23,23 @@ import crypto from "node:crypto";
  */
 export class GeminiFileCache {
   constructor(options = {}) {
-    this.ttlMs = options.ttlMs || 15 * 60 * 1000; // 1 hour default TTL
+    this.ttlMs = options.ttlMs || 15 * 60 * 1000; // 15 minute in-memory LRU TTL
+    this.persistentTtlMs = options.persistentTtlMs || 7 * 24 * 60 * 60 * 1000; // 7 days cross-replica TTL
     this.maxEntries = options.maxEntries || 100; // Max 100 entries to prevent memory exhaustion
     this.maxBytes = options.maxBytes || 64 * 1024 * 1024;
     this.maxOwnerBytes = options.maxOwnerBytes || 20 * 1024 * 1024;
+    this.storageDir = options.storageDir || path.join(process.cwd(), "data", "ask-files");
+    this.persist = options.persist ?? true;
+    this.cloud = options.cloud;
+    this.readCloud = options.readCloud || readTenantObject;
+    this.writeCloud = options.writeCloud || writeTenantObject;
+    this.deleteCloud = options.deleteCloud || deleteTenantObject;
+    this.listCloud = options.listCloud || (() => listTenantObjects(`${ASK_FILES_PREFIX}/`));
     this.onDelete = options.onDelete || null;
     this.cache = new Map();
     this.hashToId = new Map();
+    this.inFlightPersists = new Map();
+    this.inFlightHydrations = new Map();
     this.minTokenThresholdForGeminiCache = 32768; // Gemini API requirement for cachedContent
 
     // Periodic cleanup every 10 minutes
@@ -74,8 +97,10 @@ export class GeminiFileCache {
     const fileId = "gfc_" + crypto.randomUUID();
     const name = String(file.name || "fayl").trim();
     const mimeType = String(file.mimeType || file.type || "application/octet-stream").trim();
-    const data = file.data ? String(file.data).replace(/^data:[^;]+;base64,/, "").trim() : "";
     const textContent = typeof file.textContent === "string" ? file.textContent : "";
+    const rawData = file.data ? String(file.data).replace(/^data:[^;]+;base64,/, "").trim() : "";
+    // Text-extracted uploads (txt, csv, docx, xlsx, etc.) only consume textContent at the model boundary.
+    const data = textContent ? "" : rawData;
     const size = Number(file.size) || 0;
 
     const entry = {
@@ -94,18 +119,36 @@ export class GeminiFileCache {
       expiresAt: Date.now() + this.ttlMs,
     };
 
-    const bytes = Buffer.byteLength(data) + Buffer.byteLength(textContent);
-    if (bytes > this.maxOwnerBytes || bytes > this.maxBytes) throw Object.assign(new Error('File exceeds cache capacity'), { status: 413, code: 'FILE_TOO_LARGE' });
-    const used = owner => [...this.cache.values()].filter(item => owner === undefined || item.ownerId === owner).reduce((sum, item) => sum + (item.bytes || 0), 0);
-    for (const [id, item] of this.cache) {
-      if (used(ownerId) + bytes <= this.maxOwnerBytes) break;
-      if (item.ownerId === ownerId) this.deleteFile(id);
-    }
-    while (used() + bytes > this.maxBytes) this.deleteFile(this.cache.keys().next().value);
-    entry.bytes = bytes;
-    this.cache.set(fileId, entry);
-    this.hashToId.set(hash, fileId);
+    this._putMemoryEntry(entry);
     return fileId;
+  }
+
+  _putMemoryEntry(entry) {
+    if (this.cache.size >= this.maxEntries && !this.cache.has(entry.fileId)) {
+      const oldestId = this.cache.keys().next().value;
+      if (oldestId) this.deleteFile(oldestId);
+    }
+    const bytes = Buffer.byteLength(entry.data || "") + Buffer.byteLength(entry.textContent || "");
+    if (bytes > this.maxOwnerBytes || bytes > this.maxBytes) {
+      throw Object.assign(new Error("File exceeds cache capacity"), { status: 413, code: "FILE_TOO_LARGE" });
+    }
+    const used = (owner) =>
+      [...this.cache.values()]
+        .filter((item) => owner === undefined || item.ownerId === owner)
+        .reduce((sum, item) => sum + (item.bytes || 0), 0);
+    for (const [id, item] of this.cache) {
+      if (used(entry.ownerId) + bytes <= this.maxOwnerBytes) break;
+      if (item.ownerId === entry.ownerId && id !== entry.fileId) this.deleteFile(id);
+    }
+    while (used() + bytes > this.maxBytes) {
+      const oldestId = this.cache.keys().next().value;
+      if (!oldestId) break;
+      this.deleteFile(oldestId);
+    }
+    entry.bytes = bytes;
+    this.cache.delete(entry.fileId);
+    this.cache.set(entry.fileId, entry);
+    if (entry.hash) this.hashToId.set(entry.hash, entry.fileId);
   }
 
   /**
@@ -142,6 +185,146 @@ export class GeminiFileCache {
     if (file.fileId) {
       const cached = this.getFile(file.fileId, ownerId);
       if (cached) return cached;
+    }
+    return file;
+  }
+
+  _isCloud() {
+    return this.cloud ?? isR2Configured();
+  }
+
+  _ownerHash(ownerId) {
+    if (!ownerId || typeof ownerId !== "string") return null;
+    return crypto.createHash("sha256").update(ownerId.trim()).digest("hex");
+  }
+
+  _storageLocation(ownerId, fileId) {
+    const ownerHash = this._ownerHash(ownerId);
+    if (!ownerHash || !fileId || !VALID_FILE_ID_RE.test(fileId)) return null;
+    const normalizedId = fileId.toLowerCase();
+    return {
+      ownerHash,
+      cloudKey: `${ownerHash}-${normalizedId}`,
+      localPath: path.join(this.storageDir, ownerHash, `${normalizedId}.json`),
+    };
+  }
+
+  async persistEntry(entry) {
+    if (!this.persist || !entry || entry.persisted) return false;
+    const loc = this._storageLocation(entry.ownerId, entry.fileId);
+    if (!loc) return false;
+    if (this.inFlightPersists.has(loc.cloudKey)) {
+      return this.inFlightPersists.get(loc.cloudKey);
+    }
+    const promise = (async () => {
+      const record = {
+        ownerId: entry.ownerId,
+        fileId: entry.fileId,
+        hash: entry.hash,
+        name: entry.name,
+        mimeType: entry.mimeType,
+        type: entry.type,
+        data: entry.data || "",
+        textContent: entry.textContent || "",
+        size: entry.size || 0,
+        createdAt: entry.createdAt || Date.now(),
+        expiresAt: Date.now() + this.persistentTtlMs,
+      };
+      try {
+        if (this._isCloud()) {
+          await this.writeCloud(ASK_FILES_PREFIX, loc.cloudKey, record, null);
+        } else {
+          await writeJsonAtomically(loc.localPath, record);
+        }
+        entry.persisted = true;
+        return true;
+      } catch (err) {
+        console.warn("Ask file persistence skipped:", err?.message || err);
+        return false;
+      } finally {
+        if (this.inFlightPersists.get(loc.cloudKey) === promise) {
+          this.inFlightPersists.delete(loc.cloudKey);
+        }
+      }
+    })();
+    this.inFlightPersists.set(loc.cloudKey, promise);
+    return promise;
+  }
+
+  async _loadPersistedEntry(fileId, ownerId) {
+    if (!this.persist) return null;
+    const loc = this._storageLocation(ownerId, fileId);
+    if (!loc) return null;
+    if (this.inFlightHydrations.has(loc.cloudKey)) {
+      return this.inFlightHydrations.get(loc.cloudKey);
+    }
+    const promise = (async () => {
+      try {
+        let record = null;
+        if (this._isCloud()) {
+          const res = await this.readCloud(ASK_FILES_PREFIX, loc.cloudKey, { force: false });
+          record = res?.record || null;
+        } else {
+          try {
+            record = JSON.parse(await fs.readFile(loc.localPath, "utf8"));
+          } catch (error) {
+            if (error?.code !== "ENOENT") throw error;
+          }
+        }
+        if (!record || typeof record !== "object") return null;
+        if (record.ownerId !== ownerId || String(record.fileId || "").toLowerCase() !== fileId.toLowerCase()) return null;
+        if (record.expiresAt && record.expiresAt <= Date.now()) return null;
+        if (!record.data && !record.textContent) return null;
+        const entry = {
+          ownerId: record.ownerId,
+          fileId: record.fileId,
+          hash: record.hash || `${ownerId}:${this._computeHash(record)}`,
+          name: String(record.name || "fayl").trim(),
+          mimeType: String(record.mimeType || record.type || "application/octet-stream").trim(),
+          type: String(record.mimeType || record.type || "application/octet-stream").trim(),
+          data: record.textContent ? "" : String(record.data || ""),
+          textContent: typeof record.textContent === "string" ? record.textContent : "",
+          size: Number(record.size) || 0,
+          cachedContentName: null,
+          cachedContentExpiresAt: 0,
+          createdAt: Number(record.createdAt) || Date.now(),
+          expiresAt: Date.now() + this.ttlMs,
+          persisted: true,
+        };
+        this._putMemoryEntry(entry);
+        return entry;
+      } catch (err) {
+        console.warn("Ask file hydration failed:", err?.message || err);
+        return null;
+      } finally {
+        if (this.inFlightHydrations.get(loc.cloudKey) === promise) {
+          this.inFlightHydrations.delete(loc.cloudKey);
+        }
+      }
+    })();
+    this.inFlightHydrations.set(loc.cloudKey, promise);
+    return promise;
+  }
+
+  /**
+   * Async hydration across in-memory LRU, local atomic storage, and R2.
+   * Ensures multi-replica Cloud Run requests and reloaded chats keep file context.
+   */
+  async resolveFileAsync(file, ownerId = file?.ownerId || null) {
+    if (!file) return null;
+    if (!ownerId) return this.resolveFile(file, ownerId);
+    if (file.data || file.textContent) {
+      const entry = this.resolveFile(file, ownerId);
+      if (entry && entry.fileId) {
+        await this.persistEntry(entry);
+      }
+      return entry;
+    }
+    if (file.fileId) {
+      const cached = this.getFile(file.fileId, ownerId);
+      if (cached) return cached;
+      const hydrated = await this._loadPersistedEntry(file.fileId, ownerId);
+      if (hydrated) return hydrated;
     }
     return file;
   }
@@ -228,6 +411,52 @@ export class GeminiFileCache {
     }
 
     return null;
+  }
+
+  async deleteChatFiles(ownerId, messages = []) {
+    if (!ownerId || !Array.isArray(messages) || messages.length === 0) return;
+    const fileIds = [...new Set(
+      messages
+        .map((m) => m?.file?.fileId)
+        .filter((id) => typeof id === "string" && VALID_FILE_ID_RE.test(id))
+    )];
+    for (const fileId of fileIds) {
+      const entry = this.cache.get(fileId);
+      if (entry && entry.ownerId === ownerId) {
+        this.deleteFile(fileId);
+      }
+      if (!this.persist) continue;
+      const loc = this._storageLocation(ownerId, fileId);
+      if (!loc) continue;
+      if (this._isCloud()) {
+        await this.deleteCloud(ASK_FILES_PREFIX, loc.cloudKey).catch(() => {});
+      } else {
+        await fs.rm(loc.localPath, { force: true }).catch(() => {});
+      }
+    }
+  }
+
+  async deleteOwnerPersistedFiles(ownerId) {
+    this.clearOwner(ownerId);
+    if (!this.persist || !ownerId) return;
+    const ownerHash = this._ownerHash(ownerId);
+    if (!ownerHash) return;
+    if (this._isCloud()) {
+      const keys = await this.listCloud(`${ASK_FILES_PREFIX}/`).catch(() => []);
+      const prefixSegment = `${ASK_FILES_PREFIX}/${ownerHash}-`;
+      for (const key of keys) {
+        if (typeof key !== "string") continue;
+        if (key.includes(prefixSegment)) {
+          await this.deleteCloud(key).catch(() => {});
+        } else if (key.startsWith(`${ownerHash}-`)) {
+          const cleanKey = key.replace(/\.json$/i, "");
+          await this.deleteCloud(ASK_FILES_PREFIX, cleanKey).catch(() => {});
+        }
+      }
+      return;
+    }
+    const ownerDir = path.join(this.storageDir, ownerHash);
+    await fs.rm(ownerDir, { recursive: true, force: true }).catch(() => {});
   }
 
   deleteFile(fileId) {

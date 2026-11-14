@@ -76,6 +76,10 @@ test("2. Frontend script.js: implements renderAskSourceChips and wires it to Ask
   assert.match(scriptContent, /target = "_blank"/, "Must open links in new tab");
   assert.match(scriptContent, /rel = "noopener noreferrer"/, "Must have rel=noopener noreferrer for security");
 
+  // Must wire renderAskSourceChips(message.groundingMetadata) into Ask responses & streaming finalization
+  const chipCalls = scriptContent.match(/renderAskSourceChips\(message\.groundingMetadata\)/g) || [];
+  assert.ok(chipCalls.length >= 3, `Expected renderAskSourceChips(message.groundingMetadata) to be called in renderAsk, finalizeStreamingAskMessageDom, and buildStrategyAskMessage (found ${chipCalls.length})`);
+
   // Must wire openGroundingSourcesModal in message details/actions
   assert.match(scriptContent, /openGroundingSourcesModal\(message\.groundingMetadata\)/, "Must open grounding sources modal from message details");
 

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { GeminiFileCache } from "../src/services/ai/gemini-file-cache.js";
 
 test("GeminiFileCache stores files and generates deterministic fileId for identical content", () => {
@@ -88,5 +91,93 @@ test("GeminiFileCache ignores caller-supplied fileId and enforces LRU maxEntries
   assert.ok(cache.getFile(id1));
   assert.equal(cache.getFile(id2), null); // Evicted!
   assert.ok(cache.getFile(id3));
+});
+
+test("GeminiFileCache persists across instances locally, isolates tenants, and deletes chat/owner files", async () => {
+  const storageDir = await fs.mkdtemp(path.join(os.tmpdir(), "helmer-gfc-local-"));
+  try {
+    const cacheA = new GeminiFileCache({ persist: true, cloud: false, storageDir });
+    const stored = await cacheA.resolveFileAsync({
+      name: "q4-plan.csv",
+      size: 42,
+      mimeType: "text/csv",
+      textContent: "channel,spend\nsearch,1200",
+    }, "user-a");
+
+    assert.ok(stored.fileId.startsWith("gfc_"));
+    assert.equal(stored.data, ""); // duplicate base64 omitted when textContent exists
+
+    // Separate replica/instance with empty RAM hydrates from disk for owner-a only
+    const cacheB = new GeminiFileCache({ persist: true, cloud: false, storageDir });
+    const crossTenant = await cacheB.resolveFileAsync({ fileId: stored.fileId, name: "q4-plan.csv" }, "user-b");
+    assert.equal(crossTenant.textContent, undefined);
+
+    const hydrated = await cacheB.resolveFileAsync({ fileId: stored.fileId, name: "q4-plan.csv" }, "user-a");
+    assert.equal(hydrated.textContent, "channel,spend\nsearch,1200");
+
+    // Store a second file for another chat of the same owner
+    const second = await cacheA.resolveFileAsync({
+      name: "other-chat.txt",
+      size: 10,
+      mimeType: "text/plain",
+      textContent: "keep-me",
+    }, "user-a");
+
+    // Deleting chat-1 files removes stored.fileId without touching second.fileId
+    await cacheB.deleteChatFiles("user-a", [{ file: { fileId: stored.fileId } }]);
+    const cacheC = new GeminiFileCache({ persist: true, cloud: false, storageDir });
+    const afterChatDelete = await cacheC.resolveFileAsync({ fileId: stored.fileId, name: "q4-plan.csv" }, "user-a");
+    assert.equal(afterChatDelete.textContent, undefined);
+
+    const stillPresent = await cacheC.resolveFileAsync({ fileId: second.fileId, name: "other-chat.txt" }, "user-a");
+    assert.equal(stillPresent.textContent, "keep-me");
+
+    // Deleting owner persisted files wipes remaining owner files
+    await cacheC.deleteOwnerPersistedFiles("user-a");
+    const cacheD = new GeminiFileCache({ persist: true, cloud: false, storageDir });
+    const afterOwnerDelete = await cacheD.resolveFileAsync({ fileId: second.fileId, name: "other-chat.txt" }, "user-a");
+    assert.equal(afterOwnerDelete.textContent, undefined);
+  } finally {
+    await fs.rm(storageDir, { recursive: true, force: true });
+  }
+});
+
+test("GeminiFileCache persists to R2 cloud backend and cleans up owner keys", async () => {
+  const objects = new Map();
+  const cloudOpts = {
+    persist: true,
+    cloud: true,
+    writeCloud: async (prefix, key, record) => {
+      objects.set(`data/${prefix}/${key}.json`, structuredClone(record));
+      return true;
+    },
+    readCloud: async (prefix, key) => ({
+      record: objects.get(`data/${prefix}/${key}.json`) || null,
+      etag: "etag-1",
+    }),
+    deleteCloud: async (prefixOrKey, maybeKey = null) => {
+      const fullKey = maybeKey ? `data/${prefixOrKey}/${maybeKey}.json` : prefixOrKey;
+      objects.delete(fullKey);
+      return true;
+    },
+    listCloud: async (prefix) => [...objects.keys()].filter((k) => k.startsWith(`data/${prefix}`)),
+  };
+
+  const replica1 = new GeminiFileCache(cloudOpts);
+  const replica2 = new GeminiFileCache(cloudOpts);
+
+  const saved = await replica1.resolveFileAsync({
+    name: "deck.pdf",
+    size: 16,
+    mimeType: "application/pdf",
+    data: "JVBERi0xLjQ=",
+  }, "user-cloud");
+
+  assert.equal(objects.size, 1);
+  const hydrated = await replica2.resolveFileAsync({ fileId: saved.fileId, name: "deck.pdf" }, "user-cloud");
+  assert.equal(hydrated.data, "JVBERi0xLjQ=");
+
+  await replica2.deleteOwnerPersistedFiles("user-cloud");
+  assert.equal(objects.size, 0);
 });
 

@@ -169,7 +169,7 @@ test('5. Build Telemetry & Cross-Session Isolation: Grounded Build strategies ar
   await service.trackBuildStrategy({
     ownerId: 'usr-telem-build',
     brief: 'Confidential grounded fintech brief in Baku',
-    model: 'gemini-4-argon',
+    model: 'gemini-4-carbon',
     groundingActive: true,
     strategy: {
       title: 'Grounded Strategy Secret',

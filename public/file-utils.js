@@ -60,8 +60,18 @@ export function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+const UNSUPPORTED_UPLOAD_EXTENSIONS = new Set(["doc", "xls", "svg"]);
+
 export async function readUploadedFileAsData(file, { isEn = false } = {}) {
   if (!file) return null;
+  const ext = String(file.name || "").split(".").pop()?.toLowerCase() || "";
+  if (UNSUPPORTED_UPLOAD_EXTENSIONS.has(ext)) {
+    throw new Error(
+      isEn
+        ? `Unsupported format (.${ext}). Please upload PDF, PNG/JPG/WEBP/GIF/HEIC, DOCX, XLSX, or text files.`
+        : `Bu fayl formatı (.${ext}) dəstəklənmir. Zəhmət olmasa PDF, şəkil (PNG/JPG/WEBP), DOCX, XLSX və ya mətn faylı yükləyin.`
+    );
+  }
   const maxBytes = 20 * 1024 * 1024; // 20MB
   if (file.size > maxBytes) {
     throw new Error(isEn ? "File size must not exceed 20MB." : "Faylın həcmi 20MB-dan çox ola bilməz.");

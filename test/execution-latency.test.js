@@ -201,6 +201,34 @@ test('grounded prelude validates every private event concurrently before yieldin
   assert.equal(releases, 1);
 });
 
+test('grounded prelude passes streamChunk staleness budget to policy checks without skipping per-event authorization', async t => {
+  let streaming = false, enabledStales = [], authStales = [], releases = 0;
+  configureProviderPolicy({
+    assertEnabled: async (opts = {}) => { if (streaming) enabledStales.push(opts.maxStaleMs ?? 0); },
+    reserveProvider: async () => async () => { releases++; },
+  });
+  t.after(() => configureProviderPolicy(undefined));
+  const context = {
+    ownerId: 'owner',
+    assertAuthorized: async (opts = {}) => { if (streaming) authStales.push(opts.maxStaleMs ?? 0); },
+  };
+  const events = [
+    { text: 'Chunk 1. ' },
+    { text: 'Chunk 2. ' },
+    { text: '', candidates: [{ groundingMetadata: { groundingChunks: [{ web: { uri: 'https://example.com/source' } }] } }] },
+  ];
+  const client = wrapProvider({ models: { generateContentStream: async () => (async function* () {
+    streaming = true; for (const event of events) yield event;
+  })() } }, 'gemini');
+  await executionContext.run(context, async () => {
+    const iterator = await client.models.generateContentStream({ model: 'gemini-4-hydrogen', config: { tools: [{ googleSearch: {} }] } }, { bufferGroundingPrelude: true });
+    for await (const _event of iterator) {}
+  });
+  assert.deepEqual(enabledStales, [2500, 2500, 2500]);
+  assert.deepEqual(authStales, [2500, 2500, 2500]);
+  assert.equal(releases, 1);
+});
+
 test('a failed grounded prelude check publishes no buffered events and releases the provider lease', async t => {
   let streaming = false, validations = 0, releases = 0;
   const controller = new AbortController();

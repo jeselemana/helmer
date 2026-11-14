@@ -162,12 +162,12 @@ export function alignNextStepsLogic(nextSteps = [], language = "az") {
   });
 }
 
-export async function estimateBuildPreparation({ brief, buildMode = "auto", fasterThinkingLevel = "medium", ownerId, signal }) {
+export async function estimateBuildPreparation({ brief, buildMode = "auto", fasterThinkingLevel = "medium", buildDecision = null, ownerId, signal }) {
   const routingInput = buildRoutingInput({ brief, buildMode, fasterThinkingLevel });
   return runBuildOrchestration({
     schema: StrategyAssessmentSchema, assessment: true, estimateOnly: true,
     name: "build_estimate", instructions: "", input: routingInput, routingInput, ownerId, signal,
-    buildMode, fasterThinkingLevel,
+    buildMode, fasterThinkingLevel, buildDecision,
   });
 }
 
@@ -252,6 +252,32 @@ export function extractGroundingSources(metadata) {
       const url = new URL(String(web.uri).trim());
       if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.href.length > 2000 || seenUrls.has(url.href)) continue;
       const host = url.hostname.toLowerCase().replace(/^(?:www\.)+/i, "").replace(/\.+$/, "");
+      const rawDomain = typeof web.domain === "string" ? web.domain.trim() : "";
+      const isOfficialVertexRedirect =
+        url.protocol === "https:" &&
+        host === "vertexaisearch.cloud.google.com" &&
+        url.pathname.startsWith("/grounding-api-redirect/");
+
+      if (isOfficialVertexRedirect) {
+        const cleanDomain = rawDomain
+          .toLowerCase()
+          .replace(/^https?:\/\//i, "")
+          .replace(/\/.*$/, "")
+          .replace(/^(?:www\.)+/i, "")
+          .replace(/\.+$/, "");
+        if (
+          !cleanDomain ||
+          /\.(?:local|internal|localhost|localdomain|arpa|home|corp|lan)$/i.test(cleanDomain) ||
+          /^(?:localhost|127\.|0\.|10\.|192\.168\.|169\.254\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|172\.(?:1[6-9]|2\d|3[01])\.|\[?(?:::1|fe80:|fc00:|fd00:))/.test(cleanDomain) ||
+          !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(cleanDomain)
+        ) {
+          continue;
+        }
+        seenUrls.add(url.href);
+        sources.push({ title: String(web.title || cleanDomain).slice(0, 200), url: url.href, domain: cleanDomain });
+        continue;
+      }
+
       if (
         !host ||
         host === "vertexaisearch.cloud.google.com" ||
@@ -354,6 +380,7 @@ export async function refineStrategy(payload, ownerId, signal, personalizationCo
         : undefined,
     }),
     personalizationContext, ownerId, signal, onChunk, onUsage,
+    onEstimate: preparationEstimate => onChunk?.({ preparationEstimate }),
     buildMode: effectiveBuildMode,
     fasterThinkingLevel: effectiveFasterThinking,
     buildDecision: payload.buildDecision || null,

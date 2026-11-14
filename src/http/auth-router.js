@@ -1179,7 +1179,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     if (payload.role) {
       updatedSettings.industry = payload.role;
     }
-    if (payload.goal && !updatedSettings.customInstructions) {
+    if (payload.goal && !currentSettings.customInstructions) {
       updatedSettings.customInstructions = `Əsas məqsəd: ${payload.goal}`;
     }
     if (payload.role || payload.goal) {

@@ -13,9 +13,9 @@ For local development, use `npm run dev` so changes to imported server modules r
 
 ## Configuration
 
-- `GEMINI_API_KEY` — required for Build mode (`gemini-3.8-flash` via Vertex AI), Gemini Ask mode, and Live Search Grounding.
+- `GEMINI_API_KEY` — required for Build mode (`gemini-4-hydrogen`, `gemini-4-carbon`, `gemini-decision-1` via Vertex AI), Gemini Ask mode, and Live Search Grounding.
 - `OPENAI_API_KEY` — used for Build mode fallback (`gpt-6-sol`) and OpenAI Ask mode (`gpt-5.6-luna`, `gpt-5.6-terra`).
-- Build mode uses `gemini-3.8-flash` with High thinking and falls back to `gpt-6-sol`.
+- Build mode uses Auto (Gemini Decision 1 routing across `gemini-4-hydrogen` low/medium/high/xhigh and escalated `gemini-4-carbon` low/medium/high) or Faster (`gemini-4-hydrogen` Medium/High) and falls back to `gpt-6-sol`.
 - `OPENAI_ASK_MODEL` — model for Ask mode; defaults to `gpt-5.6-luna`.
 - Ask Flash uses `gemini-3.8-flash` with selectable Low, Medium, and High thinking levels.
 - `MAX_CLARIFICATION_ROUNDS` — defaults to `2`.

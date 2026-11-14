@@ -20,7 +20,7 @@ async function fixture(t) {
   const ownerA = randomUUID(), ownerB = randomUUID();
   const users = new Map([ownerA, ownerB].map(id => [id, { id, status: 'active', emailVerifiedAt: 'now', authVersion: 1, privacyEpoch: 0,
     settings: { modelImprovement: false, personalIntelligence: true, strategyPersonalization: true, industry: 'Software', brandName: 'UnneededSecretBrand' } }]));
-  const f = { ownerA, ownerB, users, calls: [], learning: [], route: { needs_search: true, argon_thinking_level: 'High', facts: ['Reported evidence'], focus_area: 'Launch' }, hold: null, background: null, failure: null };
+  const f = { ownerA, ownerB, users, calls: [], learning: [], route: { needs_search: true, target_model: 'gemini-4-carbon', thinking_level: 'high', facts: ['Reported evidence'], focus_area: 'Launch' }, hold: null, background: null, failure: null };
   const policy = new AiPolicy({ redis: null, env: { NODE_ENV: 'test' } });
   f.policy = policy;
   configureProviderPolicy(policy); t.after(() => configureProviderPolicy(undefined));
@@ -34,7 +34,7 @@ async function fixture(t) {
       usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 20 } };
   };
   const gemini = wrapProvider({ models: {
-    generateContent: async params => { f.calls.push({ params }); if (params.model === 'gemini-4-argon' && f.hold) await f.hold; return googleResponse(params); },
+    generateContent: async params => { f.calls.push({ params }); if (params.model === 'gemini-4-carbon' && f.hold) await f.hold; return googleResponse(params); },
     generateContentStream: async params => {
       f.calls.push({ params });
       if (f.hold) await f.hold;
@@ -67,18 +67,21 @@ async function fixture(t) {
   return f;
 }
 
-test('Build HTTP: SSE ends at Argon, saves one tenant record, preserves sources and redacts private logs', async t => {
+test('Build HTTP: SSE ends at Carbon, emits escalation meta, saves one tenant record, preserves sources and redacts private logs', async t => {
   const f = await fixture(t), payload = f.payload();
   const response = await f.post('/generate-stream', payload);
   assert.equal(response.status, 200);
   const body = await response.text();
   const events = body.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
   const done = events.find(event => event.done);
+  assert.equal(done.escalatedToFlagship, true);
+  assert.equal(done.routingTier, 'flagship');
+  assert.equal(events.some(event => event.escalatedToFlagship === true && event.routingTier === 'flagship' && !JSON.stringify({ escalatedToFlagship: event.escalatedToFlagship, routingTier: event.routingTier }).includes('carbon')), true);
   assert.equal(done.strategy.title, 'Launch brief'); assert.ok(done.savedId);
   assert.equal(done.strategy.orchestration.sources[0].url, 'https://reuters.com/report');
   assert.deepEqual(done.strategy.orchestration.evidence, [{ text: 'Reported evidence', sourceIndices: [0] }]);
   assert.doesNotMatch(f.calls[1].params.contents, /Reported evidence/);
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash', 'gemini-4-argon']);
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-4-hydrogen', 'gemini-4-carbon']);
   assert.equal(f.calls[1].params.config.thinkingConfig.thinkingLevel, 'HIGH');
   assert.match(JSON.parse(f.calls[1].params.contents).untrustedBusinessProfile, /Industry: Software/);
   assert.match(JSON.parse(f.calls[1].params.contents).untrustedBusinessProfile, /UnneededSecretBrand/);
@@ -146,19 +149,21 @@ test('Build HTTP: consent revocation during generation prevents saving or publis
   assert.equal((await f.repository.list(f.ownerA)).length, 0);
 });
 
-test('Build HTTP: scout failure returns sanitized SSE error without fallback or persistence', async t => {
+test('Build HTTP: scout failure bypasses safely to direct Carbon execution without persistence when unconfigured', async t => {
   const f = await fixture(t);
   f.googleFailure = Object.assign(new Error('private account capacity'), { status: 429 });
   const response = await f.post('/generate-stream', f.payload());
+  assert.equal(response.status, 200);
   const body = await response.text();
   const events = body.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
-  assert.equal(events.find(event => event.error).code, 'AI_RATE_LIMITED');
-  assert.equal(events.some(event => event.done), false);
-  assert.ok(f.calls.length >= 1 && f.calls.every(call => call.params.model === 'gemini-3.8-flash'));
-  assert.equal((await f.repository.list(f.ownerA)).length, 0);
+  const done = events.find(event => event.done);
+  assert.ok(done);
+  assert.equal(done.strategy.title, 'Launch brief');
+  assert.doesNotMatch(body, /private account capacity/);
+  assert.ok(f.calls.some(call => call.params.model === 'gemini-4-carbon'));
 });
 
-test('Build HTTP: Argon failure cannot trigger fallback or save an invalid strategy', async t => {
+test('Build HTTP: Carbon failure degrades through Hydrogen and never saves an invalid strategy when all models fail', async t => {
   const f = await fixture(t);
   f.failure = Object.assign(new Error('private provider failure'), { status: 503 });
   const response = await f.post('/generate-stream', f.payload());
@@ -166,8 +171,9 @@ test('Build HTTP: Argon failure cannot trigger fallback or save an invalid strat
   const events = text.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
   assert.equal(events.find(event => event.error).code, 'AI_PROVIDER_UNAVAILABLE');
   assert.equal(events.some(event => event.done), false);
-  assert.equal(f.calls[0].params.model, 'gemini-3.8-flash');
-  assert.ok(f.calls.slice(1).length >= 1 && f.calls.slice(1).every(call => call.params.model === 'gemini-4-argon'));
+  assert.equal(f.calls[0].params.model, 'gemini-4-hydrogen');
+  assert.ok(f.calls.some(call => call.params.model === 'gemini-4-carbon'));
+  assert.ok(f.calls.slice(1).some(call => call.params.model === 'gemini-4-hydrogen'));
   assert.equal((await f.repository.list(f.ownerA)).length, 0);
 });
 
@@ -186,13 +192,13 @@ test('Build HTTP: provider failure returns a safe, correlated SSE error without 
   assert.equal((await f.repository.list(f.ownerA)).length, 0);
 });
 
-test('Build estimate endpoint is strict, private, Flash-only and caches only tenant-scoped no-search estimates', async t => {
+test('Build estimate endpoint is strict, private, Hydrogen-scouted and caches only tenant-scoped no-search estimates', async t => {
   const f = await fixture(t), brief = 'Prepare a secure technical launch strategy';
   const response = await f.post('/estimate', { brief });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.deepEqual(await response.json(), { preparationEstimate: { minMinutes: 4, maxMinutes: 11, bufferMinutes: 3 } });
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash']);
+  assert.deepEqual(await response.json(), { preparationEstimate: { minMinutes: 6, maxMinutes: 14, bufferMinutes: 3 } });
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-4-hydrogen']);
   assert.doesNotMatch(JSON.stringify(f.calls), /Software|UnneededSecretBrand/);
   const again = await f.post('/estimate', { brief });
   assert.equal(again.status, 200); assert.equal(f.calls.length, 1);
@@ -222,18 +228,18 @@ test('Build estimate rejects idempotency mismatches and does not spend guest mes
   assert.equal(f.policy.inMemoryGuestUsage?.size || 0, 0);
 });
 
-test('Build HTTP: assessment is Flash-only and a simple refinement still uses Flash → Argon', async t => {
+test('Build HTTP: assessment is Hydrogen-only and a simple refinement still uses Decision 1 / Scout → Hydrogen', async t => {
   const f = await fixture(t);
   const assessment = await f.post('/assess', { brief: 'Prepare a safe business launch strategy', language: 'en' });
   assert.equal(assessment.status, 200);
   assert.equal((await assessment.json()).assessment.status, 'ready');
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash']);
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-4-hydrogen']);
   assert.equal(f.calls[0].params.config.tools, undefined);
   f.calls.length = 0;
-  f.route = { needs_search: false, argon_thinking_level: 'Low', facts: [], focus_area: 'Shorten' };
+  f.route = { needs_search: false, target_model: 'gemini-4-hydrogen', thinking_level: 'low', facts: [], focus_area: 'Shorten' };
   const refinement = await f.post('/refine', { brief: 'Prepare a safe business launch strategy', strategy: strategyFixture(), action: 'shorten', language: 'en', idempotencyKey: randomUUID() });
   assert.equal(refinement.status, 200);
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-3.8-flash', 'gemini-4-argon']);
+  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-4-hydrogen', 'gemini-4-hydrogen']);
   assert.equal(f.calls[1].params.config.thinkingConfig.thinkingLevel, 'LOW');
 });
 
@@ -247,7 +253,7 @@ test('Build HTTP: invalid streamed final JSON never receives done or creates a s
   assert.equal(events.find(event => event.error).code, 'AI_INVALID_OUTPUT');
   assert.equal(events.some(event => event.done), false);
   assert.equal((await f.repository.list(f.ownerA)).length, 0);
-  assert.equal(f.calls.length, 2);
+  assert.ok(f.calls.length >= 2);
 });
 
 for (const [upstream, expected] of [
@@ -298,7 +304,7 @@ test('Build HTTP: malformed JSON body is sanitized and never leaks V8 parser int
   assert.doesNotMatch(JSON.stringify(errBody), /secret_token_123|Unexpected|position/);
 });
 
-test('Build HTTP: Faster mode (Medium & High) executes direct Flash, preserves mode across refine, and enforces idempotency conflicts on mode mismatch', async t => {
+test('Build HTTP: Faster mode (Medium & High) executes direct Hydrogen, preserves mode across refine, and enforces idempotency conflicts on mode mismatch', async t => {
   const f = await fixture(t);
   const key = randomUUID();
   const basePayload = {
@@ -312,11 +318,12 @@ test('Build HTTP: Faster mode (Medium & High) executes direct Flash, preserves m
   const events = (await genRes.text()).split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
   const done = events.find(e => e.done);
   assert.ok(done);
+  assert.equal(done.escalatedToFlagship, undefined);
   assert.equal(done.strategy.orchestration.buildMode, 'faster');
-  assert.equal(done.strategy.orchestration.generatorModel, 'gemini-3.8-flash');
+  assert.equal(done.strategy.orchestration.generatorModel, 'gemini-4-hydrogen');
   assert.equal(done.strategy.orchestration.thinkingLevel, 'HIGH');
   assert.equal(done.strategy.orchestration.fasterThinkingLevel, 'high');
-  assert.deepEqual(f.calls.map(c => c.params.model), ['gemini-3.8-flash']);
+  assert.deepEqual(f.calls.map(c => c.params.model), ['gemini-4-hydrogen']);
   assert.equal(f.calls[0].params.config.thinkingConfig.thinkingLevel, 'HIGH');
 
   // Replaying with different fasterThinkingLevel or buildMode must return 409 IDEMPOTENCY_CONFLICT
@@ -325,12 +332,9 @@ test('Build HTTP: Faster mode (Medium & High) executes direct Flash, preserves m
   const conflictThinking = await f.post('/generate', { ...basePayload, fasterThinkingLevel: 'medium' });
   assert.equal(conflictThinking.status, 409);
 
-  // Refine on a Faster High strategy preserves Faster High on Flash without calling Argon
+  // Refine on a Faster High strategy preserves Faster High on Hydrogen without escalating to Carbon
   f.calls.length = 0;
   const refineRes = await f.post(`/${done.savedId}/refine`, {
-    brief: basePayload.brief,
-    answers: [],
-    strategy: done.strategy,
     action: 'shorten',
     request: '',
     language: 'en',
@@ -338,7 +342,7 @@ test('Build HTTP: Faster mode (Medium & High) executes direct Flash, preserves m
   });
   assert.equal(refineRes.status, 200);
   const refinedBody = await refineRes.json();
-  assert.deepEqual(f.calls.map(c => c.params.model), ['gemini-3.8-flash']);
+  assert.deepEqual(f.calls.map(c => c.params.model), ['gemini-4-hydrogen']);
   assert.equal(f.calls[0].params.config.thinkingConfig.thinkingLevel, 'HIGH');
   assert.equal(refinedBody.strategy.strategy.orchestration.buildMode, 'faster');
   assert.equal(refinedBody.strategy.strategy.orchestration.thinkingLevel, 'HIGH');
@@ -375,15 +379,166 @@ test('Build HTTP blocks grounded refinements before provider calls and learning'
   assert.equal(f.learning.filter(item => item.taskType?.startsWith('build_refine')).length, 0);
 });
 
-test('Build HTTP redacts failed grounding with model improvement enabled', async t => {
+test('Build HTTP delivers ungrounded brief with groundingUnavailable and redacts learning when facts cannot be verified', async t => {
   const f = await fixture(t);
   f.users.get(f.ownerA).settings.modelImprovement = true;
   f.route.facts = [];
   const response = await f.post('/generate', f.payload());
-  assert.equal(response.status, 422);
-  assert.equal((await response.json()).code, 'GROUNDING_UNAVAILABLE');
-  assert.equal(f.calls.length, 1);
-  assert.equal((await f.repository.list(f.ownerA)).length, 0);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.strategy.orchestration.groundingUnavailable, true);
+  assert.deepEqual(body.strategy.orchestration.sources, []);
+  await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(f.learning[0].onlyNecessaryData, true);
   assert.doesNotMatch(JSON.stringify(f.learning), /Prepare a secure/);
+});
+
+test('Build HTTP Zero-Trust: duplicate strict empty schema, /:id/refine excludes server fields, and prototype pollution keys fail closed', async t => {
+  const f = await fixture(t);
+  const gen = await f.post('/generate', { ...f.payload(), idempotencyKey: randomUUID() });
+  assert.equal(gen.status, 200);
+  const { savedId } = await gen.json();
+  assert.ok(savedId);
+
+  // 1. POST /:id/duplicate must reject non-empty payloads with 400 VALIDATION_ERROR and accept {}
+  const badDup = await f.post(`/${savedId}/duplicate`, { extraField: 'inject', ownerId: f.ownerB });
+  assert.equal(badDup.status, 400);
+  assert.equal((await badDup.json()).code, 'VALIDATION_ERROR');
+  const goodDup = await f.post(`/${savedId}/duplicate`, {});
+  assert.equal(goodDup.status, 201);
+  const dupBody = await goodDup.json();
+  assert.ok(dupBody.strategy?.id && dupBody.strategy.id !== savedId);
+
+  // 2. POST /:id/refine must strictly reject brief, answers, strategy, and unknown keys (no ...req.body spread)
+  for (const forbidden of [
+    { action: 'shorten', request: '', language: 'en', brief: 'forged brief', idempotencyKey: randomUUID() },
+    { action: 'shorten', request: '', language: 'en', answers: [], idempotencyKey: randomUUID() },
+    { action: 'shorten', request: '', language: 'en', strategy: strategyFixture(), idempotencyKey: randomUUID() },
+    { action: 'shorten', request: '', language: 'en', unknownFlag: true, idempotencyKey: randomUUID() },
+  ]) {
+    const res = await f.post(`/${savedId}/refine`, forbidden);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).code, 'VALIDATION_ERROR');
+  }
+
+  // 3. Raw JSON prototype-pollution keys (__proto__, constructor, prototype) must fail closed with 400 VALIDATION_ERROR
+  for (const rawJson of [
+    `{"brief":"Prepare a safe business launch strategy","__proto__":{"polluted":true}}`,
+    `{"brief":"Prepare a safe business launch strategy","constructor":{"prototype":{"polluted":true}}}`,
+    `{"brief":"Prepare a safe business launch strategy","prototype":{"polluted":true}}`,
+  ]) {
+    const res = await fetch(`${f.baseUrl}/estimate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+      body: rawJson,
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).code, 'VALIDATION_ERROR');
+    assert.equal(({}).polluted, undefined);
+  }
+});
+
+test('Build HTTP Redis hardening: distributed rate-limit and route idempotency span multiple replicas on /estimate and /assess', async t => {
+  const f = await fixture(t);
+  const store = new Map();
+  const sharedRedis = {
+    isReady: true,
+    async get(key) { return store.has(key) ? store.get(key) : null; },
+    async set(key, value, opts = {}) {
+      if (opts.NX && store.has(key)) return null;
+      store.set(key, String(value));
+      return 'OK';
+    },
+    async incr(key) {
+      const next = Number(store.get(key) || 0) + 1;
+      store.set(key, String(next));
+      return next;
+    },
+    async pExpire() { return 1; },
+    async expire() { return 1; },
+    async del(key) { return store.delete(key) ? 1 : 0; },
+    async eval(script, { keys = [], arguments: args = [] } = {}) {
+      if (script.includes("redis.call('incr'")) {
+        const next = Number(store.get(keys[0]) || 0) + 1;
+        store.set(keys[0], String(next));
+        return next;
+      }
+      if (script.includes("redis.call('set'")) {
+        if (store.get(keys[0]) === args[0]) {
+          store.set(keys[0], String(args[1]));
+          return 1;
+        }
+        return 0;
+      }
+      if (script.includes("redis.call('del'")) {
+        if (store.get(keys[0]) === args[0]) {
+          store.delete(keys[0]);
+          return 1;
+        }
+        return 0;
+      }
+      return 0;
+    },
+  };
+
+  const makeReplicaUrl = async () => {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.ownerId = req.get('X-Test-Owner') || f.ownerA; req.user = f.users.get(req.ownerId); req.auth = { user: req.user }; next(); });
+    app.use(new PrivacyPolicy({ findById: async id => f.users.get(id) }).middleware());
+    app.use(f.policy.middleware());
+    app.use('/api/strategy', createStrategyRouter(f.repository, null, { redis: sharedRedis }));
+    app.use(strategyErrorHandler);
+    const srv = app.listen(0, '127.0.0.1');
+    await new Promise(resolve => srv.once('listening', resolve));
+    t.after(async () => { srv.closeAllConnections(); await new Promise(resolve => srv.close(resolve)); });
+    return `http://127.0.0.1:${srv.address().port}/api/strategy`;
+  };
+
+  const [replicaA, replicaB] = await Promise.all([makeReplicaUrl(), makeReplicaUrl()]);
+  const postReplica = (baseUrl, endpoint, body, idKey) => fetch(`${baseUrl}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idKey },
+    body: JSON.stringify(body),
+  });
+
+  // 1. Distributed Redis idempotency across Replica A -> Replica B (replay & conflict)
+  const sharedKey = randomUUID();
+  const estBodyA = await postReplica(replicaA, '/estimate', { brief: 'Distributed Redis estimate validation plan' }, sharedKey);
+  assert.equal(estBodyA.status, 200);
+  const callsAfterA = f.calls.length;
+  const estReplayB = await postReplica(replicaB, '/estimate', { brief: 'Distributed Redis estimate validation plan' }, sharedKey);
+  assert.equal(estReplayB.status, 200);
+  assert.equal(f.calls.length, callsAfterA);
+  const estConflictB = await postReplica(replicaB, '/estimate', { brief: 'Mutated brief must trigger 409 conflict on replica B' }, sharedKey);
+  assert.equal(estConflictB.status, 409);
+  assert.equal((await estConflictB.json()).code, 'IDEMPOTENCY_CONFLICT');
+
+  // 2. Distributed /estimate rate limit (20 per 10 min window shared across Replica A & Replica B -> 21st gets 429 RATE_LIMITED)
+  for (let i = 0; i < 10; i++) {
+    const res = await postReplica(replicaA, '/estimate', { brief: 'Distributed Redis estimate validation plan' }, randomUUID());
+    assert.equal(res.status, 200);
+  }
+  for (let i = 0; i < 7; i++) {
+    const res = await postReplica(replicaB, '/estimate', { brief: 'Distributed Redis estimate validation plan' }, randomUUID());
+    assert.equal(res.status, 200);
+  }
+  const estBlocked = await postReplica(replicaB, '/estimate', { brief: 'Distributed Redis estimate validation plan' }, randomUUID());
+  assert.equal(estBlocked.status, 429);
+  assert.equal((await estBlocked.json()).code, 'RATE_LIMITED');
+  assert.ok(Number(estBlocked.headers.get('retry-after')) >= 1);
+
+  // 3. Distributed /assess rate limit (30 per 10 min window across Replica A & Replica B -> 31st gets 429 RATE_LIMITED)
+  for (let i = 0; i < 15; i++) {
+    const res = await postReplica(replicaA, '/assess', { brief: `Prepare assessment strategy item ${i}`, language: 'en' }, randomUUID());
+    assert.equal(res.status, 200);
+  }
+  for (let i = 0; i < 15; i++) {
+    const res = await postReplica(replicaB, '/assess', { brief: `Prepare assessment strategy item ${i + 15}`, language: 'en' }, randomUUID());
+    assert.equal(res.status, 200);
+  }
+  const assessBlocked = await postReplica(replicaB, '/assess', { brief: 'Prepare assessment strategy item 31', language: 'en' }, randomUUID());
+  assert.equal(assessBlocked.status, 429);
+  assert.equal((await assessBlocked.json()).code, 'RATE_LIMITED');
+  assert.ok(Number(assessBlocked.headers.get('retry-after')) >= 1);
 });

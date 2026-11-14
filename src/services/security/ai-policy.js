@@ -39,12 +39,12 @@ function reserveAskRate(redis, actor, ip, token) {
 }
 
 export const DEFAULT_MODEL_PRICING = Object.freeze({
-  get 'gemini-4-argon'() {
-    return Date.now() < Date.UTC(2026, 11, 1) ? { input: 2.20, output: 11.00 } : { input: 4.40, output: 22.00 };
+  get 'gemini-4-carbon'() {
+    return Date.now() < Date.UTC(2026, 11, 1)
+      ? { input: 2.00, output: 10.00, search: 0.014 }
+      : { input: 4.00, output: 20.00, search: 0.014 };
   },
   'gemini-4-hydrogen': { input: 1.50, output: 7.50, search: 0.035 },
-  'gemini-3.8-flash': { input: 0.75, output: 3.75, search: 0.035 },
-  'gemini-3.8-flash-high': { input: 0.75, output: 3.75, search: 0.035 },
   'gemini-3.5-flash-lite': { input: 0.30, output: 2.50, search: 0.035 },
   'gemini-decision-1': { input: 0.10, output: 0.00, search: 0 },
   'gpt-5.6-luna': { input: 0.25, output: 1.00, search: 0.030 },
@@ -201,7 +201,7 @@ export class AiPolicy {
         if (/^\/api\/strategy(?:\/|$)/i.test(req.path) && !(req.method === 'POST' && /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path))) notice = GUEST_RESTRICTION_NOTICES.strategy;
         if (req.method === 'POST' && /^\/api\/ask\/?$/i.test(req.path)) {
           const body = req.body || {};
-          if (body.thinkingLevel !== undefined && (typeof body.thinkingLevel !== 'string' || !['low', 'medium', 'high', 'xhigh', 'off', 'auto'].includes(body.thinkingLevel))) {
+          if (body.thinkingLevel !== undefined && (typeof body.thinkingLevel !== 'string' || !['low', 'medium', 'high', 'off', 'auto'].includes(body.thinkingLevel))) {
             return res.status(400).json({ code: 'VALIDATION_ERROR', error: 'Düşünmə səviyyəsi düzgün deyil.' });
           }
           const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -516,7 +516,7 @@ export class AiPolicy {
           requestRecord = candidate;
         }
         controller = new AbortController();
-        let lastLeaseOkAt = 0;
+        let lastLeaseOkAt = Date.now();
         let inFlightLeaseCheck = null;
         req.securityContext.assertLease = async ({ maxStaleMs = 0 } = {}) => {
           const now = Date.now();

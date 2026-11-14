@@ -257,7 +257,8 @@ test('HTTP Regression 2: Grounded PDF export & unsaved grounded feedback never s
     const fact = 'Market grew 18% in 2026';
     const scoutJson = JSON.stringify({
       needs_search: true,
-      argon_thinking_level: 'High',
+      target_model: 'gemini-4-carbon',
+      thinking_level: 'high',
       facts: [fact],
       focus_area: 'Baku market',
     });
@@ -430,7 +431,8 @@ test('Server provenance defeats client stripping of orchestration on /save, /ref
     const fact = 'Competitor price is 99 AZN';
     const scoutJson = JSON.stringify({
       needs_search: true,
-      argon_thinking_level: 'High',
+      target_model: 'gemini-4-carbon',
+      thinking_level: 'high',
       facts: [fact],
       focus_area: 'Pricing',
     });
@@ -902,7 +904,7 @@ test('Ask legacy sources-only assistant/model messages retain synthesized text i
     mode: 'build',
     taskType: 'strategy_generation',
     modelProvider: 'google',
-    modelName: 'gemini-4-argon',
+    modelName: 'gemini-4-hydrogen',
     userPrompt: 'Safe prompt',
     modelResponse: 'Safe strategy',
     modelImprovement: true,

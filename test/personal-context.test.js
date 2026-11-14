@@ -4,6 +4,7 @@ import {
   buildPersonalizationContext,
   buildStrategyPersonalizationContext,
   getRelevantUserContext,
+  invalidateUserContextCache,
   tokens,
   relevance,
   TONE_DIRECTIVES,
@@ -360,5 +361,75 @@ test("ImportedMemoryItemSchema rejects sensitive personal info during import", (
     }),
     (err) => err.issues[0].message.includes("bank kartı"),
   );
+});
+
+test("cached getRelevantUserContext revalidates only matched top candidates instead of all cached records", async (t) => {
+  const ownerId = "owner-cache-readall-1";
+  t.after(() => invalidateUserContextCache(ownerId));
+  let readAllChats = 0;
+  let getByIdChats = 0;
+  let records = Array.from({ length: 12 }, (_, idx) => ({
+    id: `c-${idx}`,
+    ownerId,
+    title: `Kafe ${idx}`,
+    updatedAt: `2026-10-${String(10 + idx).padStart(2, "0")}`,
+    messages: [{ role: "user", content: `Kafe açılış büdcəsi planı ${idx}` }],
+  }));
+  const chatRepo = {
+    readAll: async () => {
+      readAllChats++;
+      return structuredClone(records);
+    },
+    getById: async (id) => {
+      getByIdChats++;
+      return structuredClone(records.find((r) => r.id === id) || null);
+    },
+  };
+  const strategyRepo = {
+    readAll: async () => [],
+    getById: async () => null,
+  };
+
+  const first = await getRelevantUserContext({
+    ownerId,
+    userMessage: "Kafe açılış büdcəsi",
+    chatRepository: chatRepo,
+    strategyRepository: strategyRepo,
+    maxItems: 2,
+  });
+  assert.match(first, /Kafe açılış büdcəsi/);
+
+  const second = await getRelevantUserContext({
+    ownerId,
+    userMessage: "Kafe açılış büdcəsi",
+    chatRepository: chatRepo,
+    strategyRepository: strategyRepo,
+    maxItems: 2,
+  });
+  assert.match(second, /Kafe açılış büdcəsi/);
+  assert.equal(readAllChats, 1);
+  assert.equal(getByIdChats, 2);
+
+  // Unrelated message matches 0 records -> 0 getById calls even on warm cache
+  const unrelated = await getRelevantUserContext({
+    ownerId,
+    userMessage: "tamamilə fərqli mövzu",
+    chatRepository: chatRepo,
+    strategyRepository: strategyRepo,
+    maxItems: 2,
+  });
+  assert.equal(unrelated, "");
+  assert.equal(getByIdChats, 2);
+
+  records = [];
+  const third = await getRelevantUserContext({
+    ownerId,
+    userMessage: "Kafe açılış büdcəsi",
+    chatRepository: chatRepo,
+    strategyRepository: strategyRepo,
+    maxItems: 2,
+  });
+  assert.equal(third, "");
+  assert.equal(readAllChats, 1);
 });
 

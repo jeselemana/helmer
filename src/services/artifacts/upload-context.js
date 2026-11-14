@@ -7,22 +7,29 @@ export function assertCachedFileReference(file, chat) {
 import { executionContext } from '../security/privacy-policy.js';
 import { MIME_TYPE_MAP, TEXT_LIKE_EXTENSIONS } from "../../../public/file-utils.js";
 
+const UNSUPPORTED_UPLOAD_EXTENSIONS = new Set(["doc", "xls", "svg"]);
+
+function validationError(message, code = "VALIDATION_ERROR") {
+  return Object.assign(new Error(message), { status: 400, code });
+}
+
 export function validUploadMetadata(file) {
-  const extension = file.name.split(".").at(-1).toLowerCase();
+  const extension = String(file?.name || "").split(".").at(-1).toLowerCase();
+  if (!extension || UNSUPPORTED_UPLOAD_EXTENSIONS.has(extension)) return false;
   const expected = MIME_TYPE_MAP[extension];
   const mime = file.mimeType || file.type;
   return Boolean(expected && (mime === expected || (TEXT_LIKE_EXTENSIONS.has(extension) && /^(?:text\/|application\/(?:json|xml|x-yaml))/.test(mime))));
 }
 
 export async function prepareUploadedContext(file) {
-  if (!validUploadMetadata(file)) throw new Error("Unsupported upload type");
+  if (!validUploadMetadata(file)) throw validationError("Unsupported upload type");
   if (!file.data) return file;
   const data = file.data.replace(/^data:[^;]+;base64,/, "");
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) throw new Error("Invalid file encoding");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) throw validationError("Invalid file encoding");
   const buffer = Buffer.from(data, "base64");
-  if (buffer.length > 20 * 1024 * 1024) throw new Error("Upload size limit exceeded");
+  if (buffer.length > 20 * 1024 * 1024) throw validationError("Upload size limit exceeded", "FILE_TOO_LARGE");
   const extension = file.name.split(".").at(-1).toLowerCase();
-  if (extension === "pdf" && buffer.subarray(0, 5).toString() !== "%PDF-") throw new Error("Invalid PDF upload");
+  if (extension === "pdf" && buffer.subarray(0, 5).toString() !== "%PDF-") throw validationError("Invalid PDF upload");
   if (!["docx", "xlsx"].includes(extension)) return { ...file, data };
   const textContent = await extractOffice(buffer, extension, executionContext.getStore()?.signal);
   return { ...file, data, textContent };

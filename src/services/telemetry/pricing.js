@@ -1,11 +1,10 @@
 export const USD_TO_AZN_RATE = 1.70;
 
 const DEFAULT_PRICING = Object.freeze({
-  get "gemini-4-argon"() {
-    return Date.now() < Date.UTC(2026, 11, 1) ? { inputPerMillion: 2.20, outputPerMillion: 11.00 } : { inputPerMillion: 4.40, outputPerMillion: 22.00 };
+  get "gemini-4-carbon"() {
+    return Date.now() < Date.UTC(2026, 11, 1) ? { inputPerMillion: 2.00, outputPerMillion: 10.00 } : { inputPerMillion: 4.00, outputPerMillion: 20.00 };
   },
   "gemini-4-hydrogen": { inputPerMillion: 1.50, outputPerMillion: 7.50 },
-  "gemini-3.8-flash": { inputPerMillion: 0.75, outputPerMillion: 3.75 },
   "gemini-3.5-flash-lite": { inputPerMillion: 0.30, outputPerMillion: 2.50 },
   "gemini-decision-1": { inputPerMillion: 0.10, outputPerMillion: 0.00 },
   "gpt-5.6-luna": { inputPerMillion: 0.25, outputPerMillion: 1.00 },
@@ -59,10 +58,11 @@ export function getPricingForModel(modelName = "") {
       outputPerMillion: getEnvNumber("GEMINI_HYDROGEN_OUTPUT_USD_PER_1M", fallback.outputPerMillion),
     };
   }
-  if (model === "gemini-4-argon") {
-    return { model,
-      inputPerMillion: getEnvNumber("GEMINI_ARGON_INPUT_USD_PER_1M", fallback.inputPerMillion),
-      outputPerMillion: getEnvNumber("GEMINI_ARGON_OUTPUT_USD_PER_1M", fallback.outputPerMillion),
+  if (model === "gemini-4-carbon") {
+    return {
+      model,
+      inputPerMillion: getEnvNumber("GEMINI_CARBON_INPUT_USD_PER_1M", fallback.inputPerMillion),
+      outputPerMillion: getEnvNumber("GEMINI_CARBON_OUTPUT_USD_PER_1M", fallback.outputPerMillion),
     };
   }
   if (model.includes("gemini") || model.includes("flash")) {

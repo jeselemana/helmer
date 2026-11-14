@@ -424,7 +424,7 @@ test("StrategySchema validates orchestration metadata and defaults correctly", a
     assumptions: ["Assumption 1"],
     nextSteps: ["Step 1"],
     orchestration: {
-      models: ["gemini-3.8-flash"],
+      models: ["gemini-4-hydrogen"],
       searchGrounded: true,
       sources: [{ title: "Market report", url: "https://example.com/market" }],
     },
@@ -432,7 +432,7 @@ test("StrategySchema validates orchestration metadata and defaults correctly", a
 
   const parsed = StrategySchema.parse(validStrategy);
   assert.equal(parsed.orchestration.models.length, 1);
-  assert.equal(parsed.orchestration.models[0], "gemini-3.8-flash");
+  assert.equal(parsed.orchestration.models[0], "gemini-4-hydrogen");
   assert.equal(parsed.orchestration.sources[0].url, "https://example.com/market");
   assert.equal(parsed.orchestration.searchGrounded, true);
 

@@ -154,6 +154,8 @@ export function getBuildVertexClient(location = null) {
 const decisionVertexClients = new Map();
 
 export function hasDecisionApiConfiguration(env = process.env) {
+  const decisionKey = env?.GEMINI_DECISION_API_KEY?.trim() || "";
+  if (decisionKey) return true;
   const apiKey = env?.GEMINI_API_KEY?.trim() || "";
   return Boolean(apiKey && !apiKey.startsWith("AQ."));
 }
@@ -228,8 +230,10 @@ export async function callDecisionsApi({
   fetcher = fetch,
   env = process.env,
 } = {}) {
-  const apiKey = env?.GEMINI_API_KEY?.trim() || "";
-  if (!apiKey || apiKey.startsWith("AQ.")) {
+  const decisionKey = env?.GEMINI_DECISION_API_KEY?.trim() || "";
+  const rawApiKey = env?.GEMINI_API_KEY?.trim() || "";
+  const apiKey = decisionKey || (!rawApiKey.startsWith("AQ.") ? rawApiKey : "");
+  if (!apiKey) {
     throw Object.assign(new Error("Decisions API developer key is not configured."), {
       code: "AI_NOT_CONFIGURED",
       status: 503,

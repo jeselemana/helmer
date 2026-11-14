@@ -15,11 +15,12 @@ export const DECISION_THRESHOLDS = Object.freeze({
   ASK_REQUIRE_GROUNDING: 0.75,
   BUILD_NEEDS_MARKET_SEARCH: 0.68,
   BUILD_MIN_ENOUGH_CONTEXT: 0.45,
+  BUILD_MIN_CONFIDENCE: 0.35,
 });
 
 export const DECISION_TIMEOUTS_MS = Object.freeze({
-  SHORT_TEXT: 400,
-  MEDIA_OR_PDF: 900,
+  SHORT_TEXT: 850,
+  MEDIA_OR_PDF: 1200,
   LARGE_TEXT: 1500,
 });
 
@@ -51,10 +52,182 @@ const ASK_FALLBACK_SCHEMA = z
   })
   .strict();
 
+const BUILD_AUTO_TIER_KEYS = [
+  "hydrogen_low",
+  "hydrogen_medium",
+  "hydrogen_high",
+  "hydrogen_xhigh",
+  "carbon_low",
+  "carbon_medium",
+  "carbon_high",
+];
+
+export const BUILD_AUTO_ROUTE_TIERS = Object.freeze({
+  hydrogen_low: Object.freeze({
+    routeTier: "hydrogen_low",
+    targetModel: "gemini-4-hydrogen",
+    thinkingLevel: "LOW",
+    carbonEscalated: false,
+  }),
+  hydrogen_medium: Object.freeze({
+    routeTier: "hydrogen_medium",
+    targetModel: "gemini-4-hydrogen",
+    thinkingLevel: "MEDIUM",
+    carbonEscalated: false,
+  }),
+  hydrogen_high: Object.freeze({
+    routeTier: "hydrogen_high",
+    targetModel: "gemini-4-hydrogen",
+    thinkingLevel: "HIGH",
+    carbonEscalated: false,
+  }),
+  hydrogen_xhigh: Object.freeze({
+    routeTier: "hydrogen_xhigh",
+    targetModel: "gemini-4-hydrogen",
+    thinkingLevel: "XHIGH",
+    carbonEscalated: false,
+  }),
+  carbon_low: Object.freeze({
+    routeTier: "carbon_low",
+    targetModel: "gemini-4-carbon",
+    thinkingLevel: "LOW",
+    carbonEscalated: true,
+  }),
+  carbon_medium: Object.freeze({
+    routeTier: "carbon_medium",
+    targetModel: "gemini-4-carbon",
+    thinkingLevel: "MEDIUM",
+    carbonEscalated: true,
+  }),
+  carbon_high: Object.freeze({
+    routeTier: "carbon_high",
+    targetModel: "gemini-4-carbon",
+    thinkingLevel: "HIGH",
+    carbonEscalated: true,
+  }),
+});
+
+export function resolveBuildAutoRouteDecision({
+  routeTier = null,
+  briefDepth = 1,
+  prompt = "",
+  existingBriefSummary = "",
+} = {}) {
+  const normalizedTier = typeof routeTier === "string" ? routeTier.trim().toLowerCase() : "";
+  if (normalizedTier && Object.hasOwn(BUILD_AUTO_ROUTE_TIERS, normalizedTier)) {
+    return BUILD_AUTO_ROUTE_TIERS[normalizedTier];
+  }
+  const combined = `${String(prompt || "")}\n${String(existingBriefSummary || "")}`;
+  const isCriticalArchitecture =
+    /\b(?:critical\s+system\s+architecture|mission-critical|multi-jurisdiction\s+regulatory|zero-?trust\s+(?:security\s+)?architecture|distributed\s+consensus|sovereign\s+infrastructure|ekstremal\s+mürəkkəb|kritik\s+sistem\s+arxitekturası)\b/i.test(combined);
+  const isDeepDifficulty =
+    /\b(?:high-volume\s+deep|multi-year\s+unit\s+economics|cross-border\s+tax|international\s+corporate\s+structur|çoxmərhələli\s+risk|beynəlxalq\s+korporativ\s+struktur)\b/i.test(combined);
+  if (briefDepth === 0) {
+    return BUILD_AUTO_ROUTE_TIERS.hydrogen_low;
+  }
+  if (briefDepth >= 2) {
+    if (isCriticalArchitecture) return BUILD_AUTO_ROUTE_TIERS.carbon_high;
+    if (isDeepDifficulty) return BUILD_AUTO_ROUTE_TIERS.carbon_medium;
+    return BUILD_AUTO_ROUTE_TIERS.hydrogen_high;
+  }
+  if (isCriticalArchitecture) return BUILD_AUTO_ROUTE_TIERS.carbon_low;
+  return BUILD_AUTO_ROUTE_TIERS.hydrogen_medium;
+}
+
+const BUILD_COMPLEXITY_KEYWORD_RE = /\b(?:architecture|multi-?year|unit\s+economics|compliance|regulatory|marketplace|enterprise|fintech|go-?to-?market|roadmap|pricing|competitor|scale|migration|arxitektura|maliyy[əe]|t[əe]nziml[əe]m[əe]|r[əe]qab[əe]t|miqyas|korporativ|strategiya)\b/gi;
+
+export function deterministicBuildFallbackRoute({
+  prompt = "",
+  messages = [],
+  hasExistingBrief = false,
+  existingBriefSummary = "",
+  fallbackReason = "decision_unavailable",
+  latencyMs = 0,
+} = {}) {
+  const promptText = typeof prompt === "string" ? prompt.trim() : "";
+  const lastUserMsg = !promptText && Array.isArray(messages)
+    ? String(messages.filter((m) => m && m.role === "user").at(-1)?.content || "").trim()
+    : "";
+  const primaryText = promptText || lastUserMsg;
+  const combined = `${primaryText}\n${String(existingBriefSummary || "").trim()}`.trim();
+  const clauseCount = primaryText ? primaryText.split(/[\n.;!?]+/).filter((part) => part.trim().length > 8).length : 0;
+  const keywordHits = (combined.match(BUILD_COMPLEXITY_KEYWORD_RE) || []).length;
+  const isHighComplexity =
+    primaryText.length >= 420 ||
+    clauseCount >= 4 ||
+    (primaryText.length >= 160 && keywordHits >= 2) ||
+    combined.length >= 800;
+  const routeTierInfo = isHighComplexity ? BUILD_AUTO_ROUTE_TIERS.hydrogen_high : BUILD_AUTO_ROUTE_TIERS.hydrogen_medium;
+  return {
+    briefAction: hasExistingBrief ? "refine_brief" : "draft_brief",
+    briefDepth: isHighComplexity ? 2 : 1,
+    needsMarketSearch: false,
+    hasEnoughContext: true,
+    routeTier: routeTierInfo.routeTier,
+    targetModel: routeTierInfo.targetModel,
+    thinkingLevel: routeTierInfo.thinkingLevel,
+    carbonEscalated: false,
+    routerSource: "local_rules",
+    fallbackReason,
+    confidence: 0.5,
+    latencyMs,
+  };
+}
+
+function validateBuildPrimaryPayload(rawData) {
+  if (!rawData || typeof rawData !== "object" || Array.isArray(rawData)) {
+    return { valid: false, reason: "decision_invalid_format" };
+  }
+  const map = resolveDecisionMap(rawData);
+  if (!map || typeof map !== "object" || Array.isArray(map)) {
+    return { valid: false, reason: "decision_invalid_format" };
+  }
+  const recognizedKeys = ["brief_action", "brief_depth", "needs_market_search", "has_enough_context", "route_tier"];
+  const hasAnyRecognizedKey = recognizedKeys.some((key) => map[key] !== undefined && map[key] !== null);
+  if (!hasAnyRecognizedKey) {
+    return { valid: false, reason: "decision_empty_format" };
+  }
+  const validActions = ["draft_brief", "refine_brief", "ask_questions", "brief_qa", "other"];
+  if (map.brief_action !== undefined && extractChoiceResult(map.brief_action, validActions, null) === null) {
+    return { valid: false, reason: "decision_invalid_format" };
+  }
+  if (map.route_tier !== undefined && extractChoiceResult(map.route_tier, BUILD_AUTO_TIER_KEYS, null) === null) {
+    return { valid: false, reason: "decision_invalid_format" };
+  }
+  const explicitConfidences = [
+    rawData.confidence,
+    map.confidence,
+    map.route_tier?.confidence,
+    map.brief_action?.confidence,
+  ].filter((v) => v !== undefined && v !== null);
+  for (const val of explicitConfidences) {
+    const num = Number(val);
+    if (!Number.isFinite(num) || num < DECISION_THRESHOLDS.BUILD_MIN_CONFIDENCE) {
+      return { valid: false, reason: "decision_low_confidence" };
+    }
+  }
+  if (map.route_tier?.scores && typeof map.route_tier.scores === "object") {
+    const vals = Object.values(map.route_tier.scores).map(Number).filter(Number.isFinite);
+    if (vals.length && Math.max(...vals) < DECISION_THRESHOLDS.BUILD_MIN_CONFIDENCE) {
+      return { valid: false, reason: "decision_low_confidence" };
+    }
+  }
+  return { valid: true, map };
+}
+
 const BUILD_FALLBACK_SCHEMA = z
   .object({
     a: z.enum(["draft_brief", "refine_brief", "ask_questions", "brief_qa", "other"]),
     d: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+    t: z.enum([
+      "hydrogen_low",
+      "hydrogen_medium",
+      "hydrogen_high",
+      "hydrogen_xhigh",
+      "carbon_low",
+      "carbon_medium",
+      "carbon_high",
+    ]).optional(),
     m: z.boolean(),
     c: z.boolean(),
   })
@@ -91,9 +264,12 @@ export const BUILD_DECISION_QUESTIONS = Object.freeze({
   brief_depth: {
     type: "score",
     instructions:
-      "Score the required complexity and depth of the Build Brief on a 0 to 2 integer scale: 0 = lightweight / quick MVP brief, 1 = standard multi-feature SaaS / product brief, 2 = comprehensive enterprise / multi-system Build Brief.",
-    min_score: 0,
-    max_score: 2,
+      "Score the required complexity and depth of the Build Brief on a 0 to 2 scale.",
+    criteria: [
+      "Lightweight or quick MVP brief with minimal sections.",
+      "Standard multi-feature SaaS, product, or GTM Build Brief.",
+      "Comprehensive enterprise or multi-system Build Brief.",
+    ],
   },
   needs_market_search: {
     type: "noul",
@@ -104,6 +280,20 @@ export const BUILD_DECISION_QUESTIONS = Object.freeze({
     type: "noul",
     instructions:
       "Does the user prompt plus conversation history contain enough core product context (target problem, user type, or core functionality) to immediately generate a structured Build Brief without asking preliminary discovery questions?",
+  },
+  route_tier: {
+    type: "choice",
+    instructions:
+      "Select the Build Auto execution group and thinking level. Group A (Gemini 4 Hydrogen, standard through max topic depth): hydrogen_low (small/light tasks), hydrogen_medium (standard workhorse brief), hydrogen_high (deep analysis/complex brief), hydrogen_xhigh (maximum topic depth on Hydrogen). Group B (Gemini 4 Carbon, ONLY for special deep-difficulty cases): carbon_low (lower-tier special deep difficulty), carbon_medium (high-volume deep difficulty), carbon_high (ONLY extreme complexity & critical system architecture).",
+    criteria: {
+      hydrogen_low: "Small or lightweight tasks, quick MVP briefs, formatting, summaries, or simple edits.",
+      hydrogen_medium: "Standard brief and execution: typical SaaS, product, B2B/B2C GTM, or marketing strategy (default workhorse).",
+      hydrogen_high: "Deep analytical or complex brief involving competitive positioning, multi-channel trade-offs, or layered financial/product planning.",
+      hydrogen_xhigh: "Maximum depth single/multi-angle topics requiring exhaustive reasoning on Hydrogen without critical distributed-system/regulatory architecture.",
+      carbon_low: "Special deep-difficulty task with focused scope that benefits from Carbon architectural discipline at low thinking depth.",
+      carbon_medium: "Special deep-difficulty, high-volume multi-domain strategy or heavy multi-system operational/financial planning.",
+      carbon_high: "ONLY extreme complexity and critical system architecture (mission-critical infrastructure, multi-jurisdiction compliance, zero-trust/distributed architecture).",
+    },
   },
 });
 
@@ -126,12 +316,15 @@ function extractNoulScore(entry, fallback = 0) {
   if (typeof entry === "number") return clampScore(entry, fallback);
   if (typeof entry === "boolean") return entry ? 1 : 0;
   if (!entry || typeof entry !== "object") return fallback;
+  // Decisions API `noul` responses carry YES probability in `entry.noul`, while
+  // `entry.confidence` is max(noul, 1 - noul) (so a confident "NO" has high confidence and low noul).
   const candidate =
+    entry.noul ??
     entry.score ??
     entry.probability ??
     entry.value ??
     entry.yesScore ??
-    entry.confidence ??
+    (entry.type === "noul" ? undefined : entry.confidence) ??
     entry.answer;
   if (typeof candidate === "boolean") return candidate ? 1 : 0;
   if (typeof candidate === "string") {
@@ -367,15 +560,22 @@ export class HelmerDecisionRouter {
 
   async _isCircuitOpen(target = "primary") {
     const { keys, openedUntilField } = this._circuitDescriptor(target);
+    if (Date.now() < this[openedUntilField]) {
+      return true;
+    }
     if (this.redis && typeof this.redis.get === "function") {
       try {
         const val = await this.redis.get(keys.CIRCUIT_OPEN);
-        return val === "1" || val === 1 || val === true;
+        const open = val === "1" || val === 1 || val === true;
+        if (open) {
+          this[openedUntilField] = Date.now() + Math.min(keys.OPEN_TTL_SECONDS, 5) * 1000;
+        }
+        return open;
       } catch {
         return false;
       }
     }
-    return Date.now() < this[openedUntilField];
+    return false;
   }
 
   async _recordFailure(target = "primary") {
@@ -383,32 +583,39 @@ export class HelmerDecisionRouter {
     if (this.redis && typeof this.redis.incr === "function") {
       try {
         const count = Number(await this.redis.incr(keys.FAILURES));
-        if (typeof this.redis.expire === "function") {
-          await this.redis.expire(keys.FAILURES, keys.FAILURES_TTL_SECONDS);
+        const ops = [];
+        if (count === 1 && typeof this.redis.expire === "function") {
+          ops.push(this.redis.expire(keys.FAILURES, keys.FAILURES_TTL_SECONDS));
         }
-        if (count >= keys.THRESHOLD && typeof this.redis.set === "function") {
-          try {
-            await this.redis.set(keys.CIRCUIT_OPEN, "1", {
-              EX: keys.OPEN_TTL_SECONDS,
-            });
-          } catch {
-            if (typeof this.redis.setEx === "function") {
-              await this.redis.setEx(
-                keys.CIRCUIT_OPEN,
-                keys.OPEN_TTL_SECONDS,
-                "1"
-              );
-            } else {
-              await this.redis.set(keys.CIRCUIT_OPEN, "1");
-              if (typeof this.redis.expire === "function") {
-                await this.redis.expire(
-                  keys.CIRCUIT_OPEN,
-                  keys.OPEN_TTL_SECONDS
-                );
+        if (count >= keys.THRESHOLD) {
+          this[openedUntilField] = Date.now() + keys.OPEN_TTL_SECONDS * 1000;
+          if (typeof this.redis.set === "function") {
+            ops.push((async () => {
+              try {
+                await this.redis.set(keys.CIRCUIT_OPEN, "1", {
+                  EX: keys.OPEN_TTL_SECONDS,
+                });
+              } catch {
+                if (typeof this.redis.setEx === "function") {
+                  await this.redis.setEx(
+                    keys.CIRCUIT_OPEN,
+                    keys.OPEN_TTL_SECONDS,
+                    "1"
+                  );
+                } else {
+                  await this.redis.set(keys.CIRCUIT_OPEN, "1");
+                  if (typeof this.redis.expire === "function") {
+                    await this.redis.expire(
+                      keys.CIRCUIT_OPEN,
+                      keys.OPEN_TTL_SECONDS
+                    );
+                  }
+                }
               }
-            }
+            })());
           }
         }
+        if (ops.length) await Promise.all(ops);
         return;
       } catch {
         // Fall through gracefully on Redis errors
@@ -496,7 +703,7 @@ export class HelmerDecisionRouter {
         isCircuitOpen: true,
       });
     }
-    const vertexTimeoutMs = Math.min(1200, Math.max(Number(timeoutMs) * 2 || 800, 800));
+    const vertexTimeoutMs = Math.min(1200, Math.max(Number(timeoutMs) || 850, 850));
     const { signal: composedSignal, timeoutSignal } = buildComposedSignal(vertexTimeoutMs, signal);
     try {
       const client = this.getVertexClientFn(null, this.env);
@@ -756,6 +963,10 @@ export class HelmerDecisionRouter {
         briefDepth: 1,
         needsMarketSearch: false,
         hasEnoughContext: true,
+        routeTier: "hydrogen_medium",
+        targetModel: "gemini-4-hydrogen",
+        thinkingLevel: "MEDIUM",
+        carbonEscalated: false,
         routerSource: "fast_path",
         confidence: 1,
         latencyMs: 0,
@@ -770,13 +981,16 @@ export class HelmerDecisionRouter {
       existingBriefSummary,
     });
 
-    const timeoutMs = resolveDecisionTimeoutMs({
-      serializedContext,
-      messages,
-      attachments,
-      hasMedia: Boolean(hasMedia || hasAttachments),
-      estimatedTokens,
-    });
+    const timeoutMs = Math.max(
+      resolveDecisionTimeoutMs({
+        serializedContext,
+        messages,
+        attachments,
+        hasMedia: Boolean(hasMedia || hasAttachments),
+        estimatedTokens,
+      }),
+      DECISION_TIMEOUTS_MS.LARGE_TEXT,
+    );
 
     // 2. Primary: Decisions API (gemini-decision-1)
     const primary = await this._callDecisionsWithResilience({
@@ -787,7 +1001,18 @@ export class HelmerDecisionRouter {
     });
 
     if (!primary.skipped && primary.data && !primary.error) {
-      const map = resolveDecisionMap(primary.data);
+      const validated = validateBuildPrimaryPayload(primary.data);
+      if (!validated.valid) {
+        return deterministicBuildFallbackRoute({
+          prompt: trimmedPrompt,
+          messages,
+          hasExistingBrief,
+          existingBriefSummary,
+          fallbackReason: validated.reason,
+          latencyMs: Date.now() - startedAt,
+        });
+      }
+      const map = validated.map;
       const validActions = ["draft_brief", "refine_brief", "ask_questions", "brief_qa", "other"];
       const rawAction = extractChoiceResult(
         map.brief_action,
@@ -797,17 +1022,41 @@ export class HelmerDecisionRouter {
       const briefDepth = extractIntegerScore(map.brief_depth, 0, 2, 1);
       const marketScore = extractNoulScore(map.needs_market_search, 0);
       const contextScore = extractNoulScore(map.has_enough_context, 1);
+      const computedConfidence = Number(Math.max(contextScore, 1 - contextScore).toFixed(4));
+      if (computedConfidence < DECISION_THRESHOLDS.BUILD_MIN_CONFIDENCE) {
+        return deterministicBuildFallbackRoute({
+          prompt: trimmedPrompt,
+          messages,
+          hasExistingBrief,
+          existingBriefSummary,
+          fallbackReason: "decision_low_confidence",
+          latencyMs: Date.now() - startedAt,
+        });
+      }
       const hasEnoughContext = contextScore >= DECISION_THRESHOLDS.BUILD_MIN_ENOUGH_CONTEXT;
       const briefAction = !hasEnoughContext ? "ask_questions" : rawAction;
       const needsMarketSearch = marketScore >= DECISION_THRESHOLDS.BUILD_NEEDS_MARKET_SEARCH;
+      const rawTier = map.route_tier
+        ? extractChoiceResult(map.route_tier, BUILD_AUTO_TIER_KEYS, null)
+        : null;
+      const autoRoute = resolveBuildAutoRouteDecision({
+        routeTier: rawTier,
+        briefDepth,
+        prompt: trimmedPrompt,
+        existingBriefSummary,
+      });
 
       return {
         briefAction,
         briefDepth,
         needsMarketSearch,
         hasEnoughContext,
+        routeTier: autoRoute.routeTier,
+        targetModel: autoRoute.targetModel,
+        thinkingLevel: autoRoute.thinkingLevel,
+        carbonEscalated: autoRoute.carbonEscalated,
         routerSource: "decisions_api",
-        confidence: Number(Math.max(contextScore, 1 - contextScore).toFixed(4)),
+        confidence: computedConfidence,
         latencyMs: Date.now() - startedAt,
       };
     }
@@ -815,8 +1064,9 @@ export class HelmerDecisionRouter {
     // 3. Fallback 1: gemini-3.5-flash-lite (MINIMAL thinking) on Vertex AI
     try {
       const fallbackSystemInstruction =
-        'Return compact JSON ONLY matching {"a":"draft_brief"|"refine_brief"|"ask_questions"|"brief_qa"|"other","d":0|1|2,"m":boolean,"c":boolean}. ' +
+        'Return compact JSON ONLY matching {"a":"draft_brief"|"refine_brief"|"ask_questions"|"brief_qa"|"other","d":0|1|2,"t":"hydrogen_low"|"hydrogen_medium"|"hydrogen_high"|"hydrogen_xhigh"|"carbon_low"|"carbon_medium"|"carbon_high","m":boolean,"c":boolean}. ' +
         '"a"=primary Build Brief intent, "d"=depth (0=quick MVP,1=standard SaaS,2=comprehensive enterprise), ' +
+        '"t"=calibrated route tier (Group A hydrogen_low/hydrogen_medium/hydrogen_high/hydrogen_xhigh; Group B Carbon ONLY for special deep difficulty: carbon_low/carbon_medium/carbon_high extreme critical architecture), ' +
         '"m"=true if live web search benefits competitors/APIs/regulatory/benchmarks, "c"=true if context is enough to draft immediately without discovery questions.';
       const parsed = await this._callVertexFallback({
         systemInstruction: fallbackSystemInstruction,
@@ -825,11 +1075,21 @@ export class HelmerDecisionRouter {
         timeoutMs,
         signal,
       });
+      const autoRoute = resolveBuildAutoRouteDecision({
+        routeTier: parsed.t || null,
+        briefDepth: parsed.d,
+        prompt: trimmedPrompt,
+        existingBriefSummary,
+      });
       return {
         briefAction: !parsed.c ? "ask_questions" : parsed.a,
         briefDepth: parsed.d,
         needsMarketSearch: Boolean(parsed.m),
         hasEnoughContext: Boolean(parsed.c),
+        routeTier: autoRoute.routeTier,
+        targetModel: autoRoute.targetModel,
+        thinkingLevel: autoRoute.thinkingLevel,
+        carbonEscalated: autoRoute.carbonEscalated,
         routerSource: "vertex_flash_lite",
         confidence: 0.8,
         latencyMs: Date.now() - startedAt,
@@ -838,16 +1098,17 @@ export class HelmerDecisionRouter {
       if (signal?.aborted) throw error;
     }
 
-    // 4. Fallback 2: Emergency Deterministic Local Rules
-    return {
-      briefAction: hasExistingBrief ? "refine_brief" : "draft_brief",
-      briefDepth: 1,
-      needsMarketSearch: false,
-      hasEnoughContext: true,
-      routerSource: "local_rules",
-      confidence: 0.5,
+    // 4. Fallback 2: Deterministic Input Analysis -> Gemini 4 Hydrogen (medium or high)
+    return deterministicBuildFallbackRoute({
+      prompt: trimmedPrompt,
+      messages,
+      hasExistingBrief,
+      existingBriefSummary,
+      fallbackReason: primary.skipped
+        ? "decisions_disabled"
+        : (primary.error ? "decision_api_error" : "decision_unavailable"),
       latencyMs: Date.now() - startedAt,
-    };
+    });
   }
 }
 

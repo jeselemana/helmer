@@ -107,7 +107,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       }
 
       const rawThinkingLevel = String(req.body.thinkingLevel || "auto").toLowerCase();
-      if (!["low", "medium", "high", "xhigh", "off", "auto"].includes(rawThinkingLevel)) {
+      if (!["low", "medium", "high", "off", "auto"].includes(rawThinkingLevel)) {
         return res.status(400).json({ code: "VALIDATION_ERROR", error: "Düşünmə səviyyəsi düzgün deyil." });
       }
 
@@ -291,7 +291,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         if (message.file) {
           assertCachedFileReference(message.file, existingChat);
           if (message.file.data) message.file = await prepareUploadedContext(message.file);
-          const resolved = geminiFileCache.resolveFile(message.file, req.ownerId);
+          const resolved = await geminiFileCache.resolveFileAsync(message.file, req.ownerId);
           if (resolved) {
             message.file = {
               ...message.file,
@@ -500,10 +500,14 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       const fullInstructions = buildAskPrompt({ isGuest, remainingMessages });
       // Owned context is data, never a privileged system message. Authorization
       // above and at every provider boundary still covers every selected resource.
-      const referenceContext = strategyContext || taskContext || personalizationContext || req.askArtifactContext ? JSON.stringify({
-        strategy: strategyContext, task: taskContext, personalization: personalizationContext,
-        artifact: req.askArtifactContext || '',
-      }) : '';
+      const artifactContext = req.askArtifactContext
+        ? (typeof req.askArtifactContext === "string" ? req.askArtifactContext : JSON.stringify(req.askArtifactContext))
+        : "";
+      const referenceContext = [strategyContext, taskContext, artifactContext]
+        .map((part) => (typeof part === "string" ? part.trim() : ""))
+        .filter(Boolean)
+        .join("\n\n");
+      const trimmedPersonalizationContext = typeof personalizationContext === "string" ? personalizationContext.trim() : "";
       let reply = "";
       let activeModel = ASK_GEMINI_MODEL;
 
@@ -517,7 +521,9 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       }
       if (req.askTimings) req.askTimings.providerStartMs = Date.now() - req.askTimings.startedAt;
       const generated = await generateAsk({
-        model: selectedAskModel, instructions: fullInstructions, referenceContext, messages: messagesForPrompt,
+        model: selectedAskModel, instructions: fullInstructions, referenceContext,
+        ...(trimmedPersonalizationContext ? { personalizationContext: trimmedPersonalizationContext } : {}),
+        messages: messagesForPrompt,
         thinkingLevel: requestedThinkingLevel, enableSearch, requireGrounding,
         ownerId: req.ownerId, signal: transport.signal,
         ...(isStreamingRequest ? { onChunk: async (chunk, groundingMetadata) => {

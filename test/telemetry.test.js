@@ -90,7 +90,7 @@ test("4. Privacy-First: redactSensitiveText and redactPayload scrub PII from aud
 });
 
 test("5. Pricing: calculateEstimatedCost computes USD and AZN equivalents with 1.70 rate", () => {
-  const cost = calculateEstimatedCost("gemini-3.8-flash", 10_000, 5_000);
+  const cost = calculateEstimatedCost("gemini-4-hydrogen", 10_000, 5_000);
   assert.ok(cost.costUsd > 0);
   assert.ok(cost.costAzn > 0);
   assert.equal(Number((cost.costUsd * USD_TO_AZN_RATE).toFixed(6)), cost.costAzn);
@@ -98,7 +98,7 @@ test("5. Pricing: calculateEstimatedCost computes USD and AZN equivalents with 1
   assert.equal(cost.outputTokens, 5_000);
   assert.equal(cost.totalTokens, 15_000);
 
-  const zeroCost = calculateEstimatedCost("gemini-3.8-flash", 0, 0);
+  const zeroCost = calculateEstimatedCost("gemini-4-hydrogen", 0, 0);
   assert.equal(zeroCost.costUsd, 0);
   assert.equal(zeroCost.costAzn, 0);
 });
@@ -110,7 +110,7 @@ test("6. TelemetryService: tracks Build, Ask, Summary, Export, Auth, and System 
   await service.trackBuildStrategy({
     ownerId: "usr-az-1",
     brief: "Bakıda yeni milli restoran brendi üçün marketinq planı",
-    model: "gemini-3.8-flash",
+    model: "gemini-4-hydrogen",
     latencyMs: 1450,
     usage: { prompt_tokens: 1500, completion_tokens: 3000 },
     status: "success",
@@ -180,7 +180,7 @@ test("6. TelemetryService: tracks Build, Ask, Summary, Export, Auth, and System 
 
   const buildAz = list.items.find((e) => e.mode === "build" && e.marketMode === "LOCAL_AZ_MODE");
   assert.ok(buildAz, "LOCAL_AZ_MODE build event must be present");
-  assert.equal(buildAz.model, "gemini-3.8-flash");
+  assert.equal(buildAz.model, "gemini-4-hydrogen");
   assert.equal(buildAz.qualityScore, 0.92);
   assert.match(buildAz.maskedUserId, /^usr_/);
 
@@ -211,7 +211,7 @@ test("6. TelemetryService: tracks Build, Ask, Summary, Export, Auth, and System 
 test("7. TelemetryRepository: listEvents supports filters, search, and pagination", async (t) => {
   const { service, repository } = await createFixture(t);
 
-  await service.trackBuildStrategy({ ownerId: "u1", brief: "Bakı brend", model: "gemini-3.8-flash", status: "success" });
+  await service.trackBuildStrategy({ ownerId: "u1", brief: "Bakı brend", model: "gemini-4-hydrogen", status: "success" });
   await service.trackBuildStrategy({ ownerId: "u2", brief: "Global export", model: "gpt-5.6-terra", status: "success" });
   await service.trackAskQuery({ ownerId: "u1", model: "gemini-3.8-flash", status: "success", querySnippet: "Local pricing" });
   await service.trackExport({ ownerId: "u3", format: "excel", status: "success" });
@@ -241,7 +241,7 @@ test("8. TelemetryRepository: getOverview aggregates DAU, strategies, latency, a
   await service.trackBuildStrategy({
     ownerId: "user-alpha",
     brief: "Bakı filialı",
-    model: "gemini-3.8-flash",
+    model: "gemini-4-hydrogen",
     latencyMs: 1200,
     usage: { prompt_tokens: 1000, completion_tokens: 2000 },
     status: "success",
@@ -266,7 +266,7 @@ test("8. TelemetryRepository: getOverview aggregates DAU, strategies, latency, a
   assert.equal(overview.marketDistribution.localPercent, 50);
   assert.equal(overview.marketDistribution.globalPercent, 50);
   assert.ok(Array.isArray(overview.modelDistribution));
-  assert.ok(overview.modelDistribution.some((m) => m.model === "gemini-3.8-flash"));
+  assert.ok(overview.modelDistribution.some((m) => m.model === "gemini-4-hydrogen"));
 });
 
 test("9. HTTP & Security: Admin routes require admin authorization, client route validates strictly", async (t) => {

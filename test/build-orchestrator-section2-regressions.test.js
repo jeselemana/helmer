@@ -65,7 +65,8 @@ test('byte-span grounding binds strictly to concrete facts[i], handles UTF-8/esc
   const azFact1 = 'Korporativ seqmentdə illik artım 18% səviyyəsindədir';
   const scoutPayload = {
     needs_search: true,
-    argon_thinking_level: 'Medium',
+    target_model: 'gemini-4-hydrogen',
+    thinking_level: 'medium',
     focus_area: 'Qiymət və artım',
     facts: [azFact0, azFact1],
   };
@@ -142,7 +143,8 @@ test('byte-span grounding binds strictly to concrete facts[i], handles UTF-8/esc
     focus_area: focusCloneFact,
     facts: [focusCloneFact, secondFact],
     needs_search: true,
-    argon_thinking_level: 'Medium',
+    target_model: 'gemini-4-hydrogen',
+    thinking_level: 'medium',
   });
   const bleedBytes = Buffer.from(bleedPayload, 'utf8');
   const focusStart = bleedBytes.indexOf(`"${focusCloneFact}"`) + 1;
@@ -183,16 +185,17 @@ test('byte-span grounding binds strictly to concrete facts[i], handles UTF-8/esc
     },
   });
 
-  await assert.rejects(
-    () => runRejectedSpans({
-      ownerId: 'sec2-bleed',
-      schema: StrategySchema,
-      name: 'helmer_strategy',
-      instructions: 'Follow rules',
-      input: 'Check current prices and churn benchmarks',
-    }),
-    err => err.code === 'GROUNDING_UNAVAILABLE' && err.status === 422,
-  );
+  const rejectedSpanResult = await runRejectedSpans({
+    ownerId: 'sec2-bleed',
+    schema: StrategySchema,
+    name: 'helmer_strategy',
+    instructions: 'Follow rules',
+    input: 'Check current prices and churn benchmarks',
+  });
+  assert.equal(rejectedSpanResult.orchestration.searchGrounded, false);
+  assert.equal(rejectedSpanResult.orchestration.groundingUnavailable, true);
+  assert.deepEqual(rejectedSpanResult.orchestration.sources, []);
+  assert.equal(rejectedSpanResult.orchestration.evidence, undefined);
 
   // 1c. Trailing-dot low-quality domain & Google relay hosts fail closed even with high-signal titles
   assert.equal(isLowQualityDomain('reddit.com.'), true);
@@ -211,7 +214,8 @@ test('byte-span grounding binds strictly to concrete facts[i], handles UTF-8/esc
   const simpleFact = 'SaaS CAC payback is 14 months';
   const relayScoutJson = JSON.stringify({
     needs_search: true,
-    argon_thinking_level: 'Low',
+    target_model: 'gemini-4-hydrogen',
+    thinking_level: 'low',
     facts: [simpleFact],
     focus_area: 'CAC',
   });
@@ -240,17 +244,105 @@ test('byte-span grounding binds strictly to concrete facts[i], handles UTF-8/esc
     },
   });
 
-  await assert.rejects(
-    () => runRelayRejected({
-      ownerId: 'sec2-relay',
-      schema: StrategySchema,
-      name: 'helmer_strategy',
-      instructions: 'Follow rules',
-      input: 'Check current prices and SaaS CAC benchmarks',
-    }),
-    err => err.code === 'GROUNDING_UNAVAILABLE' && err.status === 422,
-  );
+  const relayRejectedResult = await runRelayRejected({
+    ownerId: 'sec2-relay',
+    schema: StrategySchema,
+    name: 'helmer_strategy',
+    instructions: 'Follow rules',
+    input: 'Check current prices and SaaS CAC benchmarks',
+  });
+  assert.equal(relayRejectedResult.orchestration.searchGrounded, false);
+  assert.equal(relayRejectedResult.orchestration.groundingUnavailable, true);
+  assert.deepEqual(relayRejectedResult.orchestration.sources, []);
+  assert.equal(relayRejectedResult.orchestration.evidence, undefined);
   assert.equal(networkFetchCalls, 0, 'Must never fetch or follow redirects for relay URL verification');
+
+  // 1d. Official HTTPS Vertex AI grounding redirects with structured web.domain succeed without network fetches,
+  //     while malformed, low-quality, or private domains in web.domain still fail closed.
+  const relaySpan0 = locateFactByteSpans(relayScoutJson)[0];
+  const relayFactSegment = {
+    startIndex: relaySpan0.effectiveStartByte,
+    endIndex: relaySpan0.effectiveEndByte,
+    text: Buffer.from(relayScoutJson, 'utf8').subarray(relaySpan0.effectiveStartByte, relaySpan0.effectiveEndByte).toString('utf8'),
+  };
+  const vertexTrustedChunks = makeOrchestrator({
+    onCall: async ({ params }) => {
+      if (params.config.responseSchema?.properties?.needs_search) {
+        return {
+          text: relayScoutJson,
+          candidates: [{ finishReason: 'STOP' }],
+          groundingMetadata: {
+            webSearchQueries: ['saas cac'],
+            groundingChunks: [
+              { web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/LOW', title: 'reddit.com', domain: 'reddit.com.' } },
+              { web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/LOCAL', title: 'localhost', domain: 'localhost' } },
+              { web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/OK', title: 'reuters.com', domain: 'reuters.com' } },
+            ],
+            groundingSupports: [{
+              segment: relayFactSegment,
+              groundingChunkIndices: [0, 1, 2],
+            }],
+          },
+        };
+      }
+      return { text: JSON.stringify(strategyFixture()), candidates: [{ finishReason: 'STOP' }] };
+    },
+  });
+  const vertexResult = await vertexTrustedChunks({
+    ownerId: 'sec2-vertex-domain',
+    schema: StrategySchema,
+    name: 'helmer_strategy',
+    instructions: 'Follow rules',
+    input: 'Check current prices and SaaS CAC benchmarks',
+  });
+  assert.deepEqual(
+    vertexResult.orchestration.sources.map(s => ({ title: s.title, url: s.url })),
+    [{ title: 'reuters.com', url: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/OK' }],
+  );
+  assert.equal(networkFetchCalls, 0, 'Must never fetch or follow redirects for Vertex grounding redirect URLs');
+
+  // 1e. Cumulative Vertex prefix segments (startIndex: 0 .. facts[1].effectiveEndByte) still bind facts[1]
+  //     even when facts[0]'s chunk is filtered out.
+  const twoFactPayload = JSON.stringify({
+    needs_search: true,
+    target_model: 'gemini-4-hydrogen',
+    thinking_level: 'high',
+    facts: [azFact0, azFact1],
+    focus_area: 'Qiymət və artım',
+  });
+  const twoFactSpans = locateFactByteSpans(twoFactPayload);
+  const twoFactBytes = Buffer.from(twoFactPayload, 'utf8');
+  const cumulativeSecond = makeOrchestrator({
+    onCall: async ({ params }) => {
+      if (params.config.responseSchema?.properties?.needs_search) {
+        return {
+          text: twoFactPayload,
+          candidates: [{ finishReason: 'STOP' }],
+          groundingMetadata: {
+            webSearchQueries: ['azerbaijan saas'],
+            groundingChunks: [
+              { web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/BAD', title: 'reddit.com', domain: 'reddit.com.' } },
+              { web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/GOOD', title: 'trend.az', domain: 'trend.az' } },
+            ],
+            groundingSupports: [
+              { segment: { endIndex: twoFactSpans[0].effectiveEndByte, text: twoFactBytes.subarray(0, twoFactSpans[0].effectiveEndByte).toString('utf8') }, groundingChunkIndices: [0] },
+              { segment: { endIndex: twoFactSpans[1].effectiveEndByte, text: twoFactBytes.subarray(0, twoFactSpans[1].effectiveEndByte).toString('utf8') }, groundingChunkIndices: [1] },
+            ],
+          },
+        };
+      }
+      return { text: JSON.stringify(strategyFixture()), candidates: [{ finishReason: 'STOP' }] };
+    },
+  });
+  const cumulativeResult = await cumulativeSecond({
+    ownerId: 'sec2-cumulative',
+    schema: StrategySchema,
+    name: 'helmer_strategy',
+    instructions: 'Follow rules',
+    input: 'Check current prices for Azerbaijan SaaS',
+  });
+  assert.equal(cumulativeResult.orchestration.evidence.length, 1);
+  assert.equal(cumulativeResult.orchestration.evidence[0].text, azFact1);
 });
 
 test('explicitNoSearch distinguishes quoted/untrusted context from direct user instructions', () => {
@@ -282,13 +374,13 @@ test('explicitNoSearch distinguishes quoted/untrusted context from direct user i
   assert.equal(directAz.mandatorySearch, false);
 });
 
-test('MAX_TOKENS/timeout step-down updates timeout+deadline, enforces attempt limits, falls back us->global->unary, keeps Scout facts out of Argon, and isolates checkpoints per owner', async () => {
+test('MAX_TOKENS/timeout step-down updates timeout+deadline, enforces attempt limits, falls back us->global->unary, keeps Scout facts out of Carbon, and isolates checkpoints per owner', async () => {
   const finalCalls = [];
   const collector = makeChunkCollector();
-  const leakedScoutFact = 'SECRET_SCOUT_FACT_MUST_NOT_REACH_ARGON';
+  const leakedScoutFact = 'SECRET_SCOUT_FACT_MUST_NOT_REACH_FINAL';
   const leakedFocus = 'SECRET_SCOUT_FOCUS_AREA';
 
-  const customTimeouts = { HIGH: 9000, MEDIUM: 4500, LOW: 2000 };
+  const customTimeouts = { XHIGH: 9000, HIGH: 9000, MEDIUM: 4500, LOW: 2000 };
   const run = makeOrchestrator({
     config: {
       location: 'us',
@@ -296,9 +388,10 @@ test('MAX_TOKENS/timeout step-down updates timeout+deadline, enforces attempt li
       maxFinalAttempts: 3,
       maxScoutAttempts: 2,
       finalTimeoutMs: customTimeouts,
+      carbonTimeoutMs: customTimeouts,
     },
     onStream: async ({ params, location }) => {
-      if (params.model === 'gemini-4-argon') {
+      if (params.model === 'gemini-4-carbon') {
         finalCalls.push({ kind: 'stream', location, params });
         return (async function* () {
           yield { text: '{"title":"Partial', candidates: [{}] };
@@ -307,14 +400,15 @@ test('MAX_TOKENS/timeout step-down updates timeout+deadline, enforces attempt li
           yield { text: '', candidates: [{ finishReason: 'MAX_TOKENS' }] };
         })();
       }
-      throw new Error('Unexpected stream for Flash');
+      throw new Error('Unexpected stream for Scout');
     },
     onCall: async ({ params, location }) => {
       if (params.config.responseSchema?.properties?.needs_search) {
         return {
           text: JSON.stringify({
             needs_search: false,
-            argon_thinking_level: 'High',
+            target_model: 'gemini-4-carbon',
+            thinking_level: 'high',
             facts: [leakedScoutFact],
             focus_area: leakedFocus,
           }),
@@ -355,34 +449,34 @@ test('MAX_TOKENS/timeout step-down updates timeout+deadline, enforces attempt li
   assert.equal(finalCalls[1].params.config.thinkingConfig.thinkingLevel, 'MEDIUM');
   assert.equal(finalCalls[1].params.config.httpOptions.timeout, customTimeouts.MEDIUM);
   assert.ok(collector.events.some(e => e.resetStream === true));
-  // Attempt 2: stepped down to LOW unary on 'us' with LOW timeout
+  // Attempt 2: degrades to Hydrogen XHIGH unary on 'us'
   assert.equal(finalCalls[2].kind, 'unary');
   assert.equal(finalCalls[2].location, 'us');
-  assert.equal(finalCalls[2].params.config.thinkingConfig.thinkingLevel, 'LOW');
-  assert.equal(finalCalls[2].params.config.httpOptions.timeout, customTimeouts.LOW);
+  assert.equal(finalCalls[2].params.model, 'gemini-4-hydrogen');
+  assert.equal(finalCalls[2].params.config.thinkingConfig.thinkingLevel, 'XHIGH');
+  assert.equal(finalCalls[2].params.config.httpOptions.timeout, customTimeouts.HIGH);
 
-  // Scout facts and focus_area must never appear in any Argon prompt
+  // Scout facts and focus_area must never appear in any Carbon/final prompt
   for (const call of finalCalls) {
     const serialized = JSON.stringify(call.params);
-    assert.ok(!serialized.includes(leakedScoutFact), 'Scout facts leaked into Argon prompt');
-    assert.ok(!serialized.includes(leakedFocus), 'Scout focus_area leaked into Argon prompt');
+    assert.ok(!serialized.includes(leakedScoutFact), 'Scout facts leaked into Carbon prompt');
+    assert.ok(!serialized.includes(leakedFocus), 'Scout focus_area leaked into Carbon prompt');
   }
 
   // Stage attempt limit config is actually enforced & owner checkpoint stays tenant-isolated
   let checkpointScoutCalls = 0;
-  let failFinalOnce = true;
+  let forceFinalDown = true;
   const runLimits = makeOrchestrator({
     config: { maxScoutAttempts: 2, maxFinalAttempts: 1 },
     onCall: async ({ params }) => {
       if (params.config.responseSchema?.properties?.needs_search) {
         checkpointScoutCalls++;
         return {
-          text: JSON.stringify({ needs_search: false, argon_thinking_level: 'Low', facts: ['Internal'], focus_area: 'Internal' }),
+          text: JSON.stringify({ needs_search: false, target_model: 'gemini-4-hydrogen', thinking_level: 'low', facts: ['Internal'], focus_area: 'Internal' }),
           candidates: [{ finishReason: 'STOP' }],
         };
       }
-      if (failFinalOnce) {
-        failFinalOnce = false;
+      if (forceFinalDown) {
         throw Object.assign(new Error('transient final failure'), { status: 503 });
       }
       return { text: JSON.stringify(strategyFixture()), candidates: [{ finishReason: 'STOP' }] };
@@ -395,25 +489,27 @@ test('MAX_TOKENS/timeout step-down updates timeout+deadline, enforces attempt li
   assert.equal(checkpointScoutCalls, 1);
 
   // Retry by same owner reuses scout checkpoint (no extra Flash call)
+  forceFinalDown = false;
   await runLimits({ ownerId: 'owner-A', schema: StrategySchema, name: 's', instructions: 'i', input: 'SHARED_CHECKPOINT_INPUT' });
   assert.equal(checkpointScoutCalls, 1, 'Same owner should reuse scout checkpoint');
 
   // Seed fresh checkpoint for owner-A again, then verify owner-B cannot reuse it
-  failFinalOnce = true;
+  forceFinalDown = true;
   await assert.rejects(
     () => runLimits({ ownerId: 'owner-A', schema: StrategySchema, name: 's', instructions: 'i', input: 'SHARED_CHECKPOINT_INPUT_2' }),
     err => err.status === 503,
   );
   assert.equal(checkpointScoutCalls, 2);
+  forceFinalDown = false;
   await runLimits({ ownerId: 'owner-B', schema: StrategySchema, name: 's', instructions: 'i', input: 'SHARED_CHECKPOINT_INPUT_2' });
   assert.equal(checkpointScoutCalls, 3, 'Different owner must not reuse owner-A scout checkpoint');
 
-  // Verify maxScoutAttempts hard limit stops after exactly configured count
-  let hardStopCalls = 0;
+  // Verify maxScoutAttempts hard limit caps scout retries at 2 before fallback
+  let scoutTries = 0;
   const runHardStop = makeOrchestrator({
     config: { maxScoutAttempts: 2, retryAttempts: undefined },
-    onCall: async () => {
-      hardStopCalls++;
+    onCall: async ({ params }) => {
+      if (params.config.responseSchema?.properties?.needs_search) scoutTries++;
       throw Object.assign(new Error('503'), { status: 503 });
     },
   });
@@ -421,7 +517,7 @@ test('MAX_TOKENS/timeout step-down updates timeout+deadline, enforces attempt li
     () => runHardStop({ ownerId: 'owner-hard', schema: StrategySchema, name: 's', instructions: 'i', input: 'Plan' }),
     err => err.status === 503,
   );
-  assert.equal(hardStopCalls, 2);
+  assert.equal(scoutTries, 2);
 });
 
 test('retry wait cleans up timers and abort listeners on completion, abort, and wait-setup failure', async () => {
@@ -447,7 +543,7 @@ test('retry wait cleans up timers and abort listeners on completion, abort, and 
       if (params.config.responseSchema?.properties?.needs_search) {
         callCount1++;
         if (callCount1 === 1) throw Object.assign(new Error('Retry me'), { status: 503 });
-        return { text: JSON.stringify({ needs_search: false, argon_thinking_level: 'Low', facts: [], focus_area: 'F' }), candidates: [{ finishReason: 'STOP' }] };
+        return { text: JSON.stringify({ needs_search: false, target_model: 'gemini-4-hydrogen', thinking_level: 'low', facts: [], focus_area: 'F' }), candidates: [{ finishReason: 'STOP' }] };
       }
       return { text: JSON.stringify(strategyFixture()), candidates: [{ finishReason: 'STOP' }] };
     },

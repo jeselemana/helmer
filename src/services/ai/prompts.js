@@ -189,8 +189,8 @@ export const HELMER_BUILD_SHARED_QUALITY_POLICY = `
 `;
 
 export const BUILD_MODE_DIRECTIVES = Object.freeze({
-  auto: `\n\n[BUILD EXECUTION MODE: AUTO — DEEP ARCHITECTURAL SYNTHESIS (Gemini 4 Argon). Deliver deep multi-layered architectural reasoning, explicit scenario trade-offs, unit-economics sensitivity analysis, and comprehensive operational dependency mapping while strictly avoiding repetitive filler.]`,
-  faster: `\n\n[BUILD EXECUTION MODE: FASTER — HIGH-VELOCITY FOCUSED SYNTHESIS (Gemini 3.8 Flash). Deliver sharp, high-density, execution-ready strategic and architectural decisions across all required sections. Maximize signal-to-noise ratio, keep prose tight and concrete, and maintain 100% mathematical, financial, and epistemic rigor.]`,
+  auto: `\n\n[BUILD EXECUTION MODE: AUTO — CALIBRATED STRATEGIC SYNTHESIS (Gemini 4 Hydrogen / Gemini 4 Carbon). Deliver deep, decision-calibrated architectural and strategic reasoning, explicit scenario trade-offs, unit-economics sensitivity analysis, and comprehensive operational dependency mapping while strictly avoiding repetitive filler.]`,
+  faster: `\n\n[BUILD EXECUTION MODE: FASTER — HIGH-VELOCITY FOCUSED SYNTHESIS (Gemini 4 Hydrogen). Deliver sharp, high-density, execution-ready strategic and architectural decisions across all required sections. Maximize signal-to-noise ratio, keep prose tight and concrete, and maintain 100% mathematical, financial, and epistemic rigor.]`,
 });
 
 export const STRATEGY_PROMPT = `You are Helmer Build, the Head Product & Systems Architect within the Helmer ecosystem. Create an actionable, commercially realistic marketing and business strategy from the supplied brief and clarification context.
@@ -476,7 +476,7 @@ export function detectGuestFunctionalRestriction({
   const text = (lastUserMsg || "").toLowerCase();
 
   // 1. Thinking
-  if (explicitLowThinking || rawThinkingLevel === "xhigh" || rawThinkingLevel === "high" || rawThinkingLevel === "medium") {
+  if (explicitLowThinking || rawThinkingLevel === "high" || rawThinkingLevel === "medium") {
     return GUEST_RESTRICTION_NOTICES.thinking;
   }
   if (

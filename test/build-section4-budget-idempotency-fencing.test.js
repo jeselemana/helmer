@@ -27,21 +27,21 @@ import { getBuildVertexClient, getGeminiClient } from '../src/services/ai/client
 
 installBuildRoutingFixture();
 
-test('Shared pricing (resolveEffectiveModelPricing): gemini-4-argon stageMetrics matches AiPolicy settlement before and after Dec 1, 2026 transition', async t => {
+test('Shared pricing (resolveEffectiveModelPricing): gemini-4-carbon stageMetrics matches AiPolicy settlement before and after Dec 1, 2026 transition', async t => {
   const preTransitionMs = Date.UTC(2026, 10, 15, 12, 0, 0);
   const postTransitionMs = Date.UTC(2026, 11, 5, 12, 0, 0);
 
   for (const [label, nowMs, expectedInputRate, expectedOutputRate] of [
-    ['pre-2026-12-01', preTransitionMs, 2.20, 11.00],
-    ['post-2026-12-01', postTransitionMs, 4.40, 22.00],
+    ['pre-2026-12-01', preTransitionMs, 2.00, 10.00],
+    ['post-2026-12-01', postTransitionMs, 4.00, 20.00],
   ]) {
     t.mock.method(Date, 'now', () => nowMs);
-    const pricing = resolveEffectiveModelPricing('gemini-4-argon');
+    const pricing = resolveEffectiveModelPricing('gemini-4-carbon');
     assert.equal(pricing.input, expectedInputRate, `${label} input rate mismatch`);
     assert.equal(pricing.output, expectedOutputRate, `${label} output rate mismatch`);
-    assert.equal(DEFAULT_MODEL_PRICING['gemini-4-argon'].input, expectedInputRate);
+    assert.equal(DEFAULT_MODEL_PRICING['gemini-4-carbon'].input, expectedInputRate);
 
-    const argonUsage = {
+    const carbonUsage = {
       promptTokenCount: 1000,
       candidatesTokenCount: 250,
       thoughtsTokenCount: 50,
@@ -53,7 +53,7 @@ test('Shared pricing (resolveEffectiveModelPricing): gemini-4-argon stageMetrics
         generateContent: async params => {
           if (params.config.responseSchema?.properties?.needs_search) {
             return {
-              text: JSON.stringify({ needs_search: false, argon_thinking_level: 'Medium', facts: [], focus_area: 'F' }),
+              text: JSON.stringify({ needs_search: false, target_model: 'gemini-4-carbon', thinking_level: 'medium', facts: [], focus_area: 'F' }),
               candidates: [{ finishReason: 'STOP' }],
               usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, thoughtsTokenCount: 5 },
             };
@@ -61,14 +61,14 @@ test('Shared pricing (resolveEffectiveModelPricing): gemini-4-argon stageMetrics
           return {
             text: JSON.stringify(strategyFixture()),
             candidates: [{ finishReason: 'STOP' }],
-            usageMetadata: argonUsage,
+            usageMetadata: carbonUsage,
           };
         },
         generateContentStream: async params => (async function* () {
           yield {
             text: JSON.stringify(strategyFixture()),
             candidates: [{ finishReason: 'STOP' }],
-            usageMetadata: argonUsage,
+            usageMetadata: carbonUsage,
           };
         })(),
       },
@@ -84,20 +84,20 @@ test('Shared pricing (resolveEffectiveModelPricing): gemini-4-argon stageMetrics
       onUsage: u => recordedMetrics.push(u),
     });
 
-    const finalStage = recordedMetrics.find(m => m.phase === 'final' && m.model === 'gemini-4-argon');
-    assert.ok(finalStage, `${label} final Argon stageMetric should exist`);
+    const finalStage = recordedMetrics.find(m => m.phase === 'final' && m.model === 'gemini-4-carbon');
+    assert.ok(finalStage, `${label} final Carbon stageMetric should exist`);
 
     // Compare against AiPolicy reserve + settle for identical token counts
     const aiPolicy = new AiPolicy({ env: { AI_USER_DAILY_USD: '100', AI_PLATFORM_DAILY_USD: '500' } });
     const ownerId = `policy-${label}`;
     const release = await aiPolicy.reserveProvider(
       { ownerId },
-      { model: 'gemini-4-argon', contents: 'prompt', config: {} },
-      { outputTokenReservation: resolveBuildOutputReservation({ model: 'gemini-4-argon', config: { thinkingConfig: { thinkingLevel: 'MEDIUM' } } }) },
+      { model: 'gemini-4-carbon', contents: 'prompt', config: {} },
+      { outputTokenReservation: resolveBuildOutputReservation({ model: 'gemini-4-carbon', config: { thinkingConfig: { thinkingLevel: 'MEDIUM' } } }) },
     );
     await release.recordUsage({
-      inputTokens: argonUsage.promptTokenCount,
-      outputTokens: argonUsage.candidatesTokenCount + argonUsage.thoughtsTokenCount,
+      inputTokens: carbonUsage.promptTokenCount,
+      outputTokens: carbonUsage.candidatesTokenCount + carbonUsage.thoughtsTokenCount,
       searchCalls: 0,
       searchUsageKnown: true,
     });
@@ -144,7 +144,7 @@ test('provider-policy settlement handles partial text error, partial search cuto
       assertAuthorized: async () => {},
       onProviderUsage: async u => usages.push(u),
     }, async () => {
-      const stream = await client.models.generateContentStream({ model: 'gemini-3.8-flash', contents: 'Analyze pricing', config: {} });
+      const stream = await client.models.generateContentStream({ model: 'gemini-4-hydrogen', contents: 'Analyze pricing', config: {} });
       await assert.rejects(async () => { for await (const _ of stream) {} }, err => err.code === 'ECONNRESET');
     });
 
@@ -175,7 +175,7 @@ test('provider-policy settlement handles partial text error, partial search cuto
       onProviderUsage: async u => usages.push(u),
     }, async () => {
       const stream = await client.models.generateContentStream({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-4-hydrogen',
         contents: 'Find rate',
         config: { tools: [{ googleSearch: {} }] },
       });
@@ -214,7 +214,7 @@ test('provider-policy settlement handles partial text error, partial search cuto
       onProviderUsage: async u => usages.push(u),
     }, async () => {
       const stream = await client.models.generateContentStream({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-4-hydrogen',
         contents: 'Direct question',
         config: { tools: [{ googleSearch: {} }] },
       });
@@ -225,8 +225,8 @@ test('provider-policy settlement handles partial text error, partial search cuto
     assert.equal(usages[0].searchCalls, 0);
     assert.equal(usages[0].searchUsageKnown, true);
     assert.equal(usages[0].searchSettlementEvidence, 'completed_without_grounding');
-    // Token cost for 100*0.75 + 20*3.75 = 150 micros (< 35_000 search fee)
-    assert.equal(budgetOf(ownerId), 150);
+    // Token cost for 100*1.50 + 20*7.50 = 300 micros (< 35_000 search fee)
+    assert.equal(budgetOf(ownerId), 300);
   }
 
   // D. Incomplete Gemini stream with googleSearch tool, partial usageMetadata, NO finishReason & NO grounding -> searchUsageKnown: false & retains $0.035 search reserve
@@ -254,7 +254,7 @@ test('provider-policy settlement handles partial text error, partial search cuto
       onProviderUsage: async u => usages.push(u),
     }, async () => {
       const stream = await client.models.generateContentStream({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-4-hydrogen',
         contents: 'Query',
         config: { tools: [{ googleSearch: {} }] },
       });
@@ -264,8 +264,8 @@ test('provider-policy settlement handles partial text error, partial search cuto
     assert.equal(usages.length, 1);
     assert.equal(usages[0].searchUsageKnown, false);
     assert.equal(usages[0].searchSettlementEvidence, 'unknown_incomplete_stream');
-    // 100*0.75 + 10*3.75 + 35_000 retained search reserve = 35_113 micros
-    assert.equal(budgetOf(ownerId), 35_113);
+    // 100*1.50 + 10*7.50 + 35_000 retained search reserve = 35_225 micros
+    assert.equal(budgetOf(ownerId), 35_225);
   }
 
   // E. Pre-output failure refunds cleanly, and retry charges exactly once (no double charge)
@@ -294,13 +294,13 @@ test('provider-policy settlement handles partial text error, partial search cuto
       assertAuthorized: async () => {},
       onProviderUsage: async u => usages.push(u),
     }, async () => {
-      await assert.rejects(() => client.models.generateContent({ model: 'gemini-3.8-flash', contents: 'Hi', config: {} }));
+      await assert.rejects(() => client.models.generateContent({ model: 'gemini-4-hydrogen', contents: 'Hi', config: {} }));
       assert.equal(budgetOf(ownerId), 0, 'Pre-output failure must refund reservation completely');
-      await client.models.generateContent({ model: 'gemini-3.8-flash', contents: 'Hi', config: {} });
+      await client.models.generateContent({ model: 'gemini-4-hydrogen', contents: 'Hi', config: {} });
     });
 
     assert.equal(usages.length, 1);
-    assert.equal(budgetOf(ownerId), 150, 'Retry must settle exact single-call cost');
+    assert.equal(budgetOf(ownerId), 300, 'Retry must settle exact single-call cost');
   }
 });
 

@@ -25,10 +25,10 @@ export class PrivacyPolicy {
       return true;
     } catch { return false; }
   }
-  async assertExecution(context) {
+  async assertExecution(context = executionContext.getStore()) {
+    if (!context) return;
     context.signal?.throwIfAborted();
-    // Every streaming boundary still revalidates authoritative state. These
-    // independent reads share one round trip instead of a serial cloud queue.
+    // Every streaming boundary revalidates authoritative state cleanly in parallel.
     await Promise.all([
       (async () => {
         if (!context.guest) {

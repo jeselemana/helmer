@@ -139,16 +139,14 @@ async function loadTenantContextData(ownerId, chatRepository, strategyRepository
     now - cached.timestamp < USER_CONTEXT_CACHE_TTL_MS &&
     cached.chatRepoRef === chatRepository &&
     cached.strategyRepoRef === strategyRepository &&
-    (!chatRepository || typeof chatRepository.getById === 'function') &&
-    (!strategyRepository || typeof strategyRepository.getById === 'function')
+    (!chatRepository || typeof chatRepository.getById === "function") &&
+    (!strategyRepository || typeof strategyRepository.getById === "function")
   ) {
-    // Local invalidation cannot observe deletion on another replica. Keep the
-    // parallel authoritative reads even for repositories with shard-tag caches.
-    const [chats, strategies] = await Promise.all([
-      Promise.all(cached.allChats.map(item => chatRepository.getById(item.id, ownerId).catch(() => null))),
-      Promise.all(cached.allStrategies.map(item => strategyRepository.getById(item.id, ownerId).catch(() => null))),
-    ]);
-    return { allChats: chats.filter(item => item && !item.deleted && item.ownerId === ownerId), allStrategies: strategies.filter(item => item && !item.deleted && item.ownerId === ownerId) };
+    return {
+      allChats: cached.allChats,
+      allStrategies: cached.allStrategies,
+      fromCache: true,
+    };
   }
 
   const [rawChats, rawStrategies] = await Promise.all([
@@ -183,7 +181,7 @@ async function loadTenantContextData(ownerId, chatRepository, strategyRepository
     allStrategies,
   });
 
-  return { allChats, allStrategies };
+  return { allChats, allStrategies, fromCache: false };
 }
 
 export async function getRelevantUserContext({
@@ -199,7 +197,7 @@ export async function getRelevantUserContext({
   const queryTokens = tokens(userMessage);
   if (!queryTokens.size) return "";
 
-  const { allChats, allStrategies } = await loadTenantContextData(ownerId, chatRepository, strategyRepository);
+  const { allChats, allStrategies, fromCache } = await loadTenantContextData(ownerId, chatRepository, strategyRepository);
   const candidates = [];
 
   const groundedStrategyIds = new Set(
@@ -220,6 +218,8 @@ export async function getRelevantUserContext({
           label: `Əvvəlki istifadəçi qeydi (${clip(chat.title, 80) || "söhbət"})`,
           value: clip(message.content),
           resourceKey: chat.id ? `chat:${chat.id}` : null,
+          sourceType: "chat",
+          sourceId: chat.id,
           exists: chatRepository?.getById ? async () => Boolean(await chatRepository.getById(chat.id, ownerId)) : null,
         });
       }
@@ -237,6 +237,8 @@ export async function getRelevantUserContext({
         label: `Yadda saxlanmış strategiya (${clip(strategy.title, 80) || "strategiya"})`,
         value: clip(strategy.brief || strategy.context?.business || strategy.summary),
         resourceKey: strategy.id ? `strategy:${strategy.id}` : null,
+        sourceType: "strategy",
+        sourceId: strategy.id,
         exists: strategyRepository?.getById ? async () => Boolean(await strategyRepository.getById(strategy.id, ownerId)) : null,
       });
     }
@@ -251,9 +253,51 @@ export async function getRelevantUserContext({
     });
   }
 
-  const selected = candidates
-    .sort((a, b) => b.score - a.score || String(b.updatedAt).localeCompare(String(a.updatedAt)))
-    .slice(0, maxItems);
+  const ranked = candidates
+    .sort((a, b) => b.score - a.score || String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+  let selected;
+  if (fromCache && ranked.length) {
+    // Revalidate only matching top candidates (deduplicated per resource) rather than all 45 cached records.
+    const liveRevalidations = new Map();
+    const revalidateResource = (type, id) => {
+      const key = `${type}:${id}`;
+      if (!liveRevalidations.has(key)) {
+        const loader = type === "chat"
+          ? chatRepository?.getById?.(id, ownerId)
+          : strategyRepository?.getById?.(id, ownerId);
+        liveRevalidations.set(key, Promise.resolve(loader).catch(() => null));
+      }
+      return liveRevalidations.get(key);
+    };
+    selected = [];
+    for (let i = 0; i < ranked.length && selected.length < maxItems; ) {
+      const needed = maxItems - selected.length;
+      const batch = ranked.slice(i, i + needed);
+      i += batch.length;
+      const resolved = await Promise.all(batch.map(async (item) => {
+        if (!item.sourceId || !item.sourceType) return item;
+        const fresh = await revalidateResource(item.sourceType, item.sourceId);
+        if (!fresh || fresh.deleted || fresh.ownerId !== ownerId) return null;
+        if (item.sourceType === "strategy") {
+          return {
+            ...item,
+            label: `Yadda saxlanmış strategiya (${clip(fresh.title, 80) || "strategiya"})`,
+            value: clip(fresh.brief || fresh.context?.business || fresh.summary),
+          };
+        }
+        return {
+          ...item,
+          label: `Əvvəlki istifadəçi qeydi (${clip(fresh.title, 80) || "söhbət"})`,
+        };
+      }));
+      for (const entry of resolved) {
+        if (entry && selected.length < maxItems) selected.push(entry);
+      }
+    }
+  } else {
+    selected = ranked.slice(0, maxItems);
+  }
   if (!selected.length) return "";
   const execution = executionContext.getStore();
   if (execution?.ownerId === ownerId) {

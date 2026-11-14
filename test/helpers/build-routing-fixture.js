@@ -12,7 +12,7 @@ export function installBuildRoutingFixture() {
     const legacy = getGeminiClient(), build = getBuildVertexClient();
     t.mock.method(build.models, 'generateContent', async params => {
       if (params.config.responseSchema.properties.needs_search) return {
-        text: JSON.stringify({ needs_search: false, argon_thinking_level: 'Low', facts: [], focus_area: 'Narrow edit' }),
+        text: JSON.stringify({ needs_search: false, target_model: 'gemini-4-hydrogen', thinking_level: 'low', facts: [], focus_area: 'Narrow edit' }),
         candidates: [{ finishReason: 'STOP' }],
       };
       return legacy.models.generateContent(params, { signal: params.config.abortSignal });

@@ -106,6 +106,7 @@ export const StrategySchema = z.object({
       searchGrounded: z.boolean().nullable().optional(),
       sources: z.array(z.object({
         title: z.string().max(200).nullable().optional(),
+        domain: z.string().trim().max(255).nullable().optional(),
         url: z.string().refine((u) => {
           try {
             const p = new URL(u).protocol;
@@ -115,6 +116,7 @@ export const StrategySchema = z.object({
           }
         }, "URL must be http or https"),
       }).strict()).max(20).nullable().optional(),
+      groundingUnavailable: z.boolean().nullable().optional(),
       evidence: z.array(z.object({
         text: z.string().trim().min(1).max(2000),
         sourceIndices: z.array(z.number().int().min(0).max(19)).min(1).max(20),
@@ -131,6 +133,8 @@ export const StrategySchema = z.object({
       strategistModel: z.string().trim().max(100).nullable().optional(),
       thinkingLevel: z.string().trim().max(32).nullable().optional(),
       fasterThinkingLevel: z.enum(["medium", "high"]).nullable().optional(),
+      escalatedToFlagship: z.boolean().nullable().optional(),
+      routingTier: z.enum(["standard", "flagship"]).nullable().optional(),
       sourcesCount: z.number().int().nonnegative().nullable().optional(),
       stageMetrics: z.array(z.object({
         phase: z.string().trim().max(64),
@@ -182,6 +186,28 @@ export const GenerateRequestSchema = z.object({
   buildMode: z.enum(["auto", "faster"]).optional(),
   fasterThinkingLevel: z.enum(["medium", "high"]).optional(),
 }).strict();
+
+export const EmptyBodySchema = z.object({}).strict();
+
+export const RefineByIdRequestSchema = z
+  .object({
+    action: z.enum(refinementActions),
+    request: z.string().trim().max(2000).default(""),
+    language: z.enum(["az", "en"]).optional(),
+    idempotencyKey: z.string().trim().max(120).optional(),
+    buildMode: z.enum(["auto", "faster"]).optional(),
+    fasterThinkingLevel: z.enum(["medium", "high"]).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.action === "custom" && value.request.length < 3) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["request"],
+        message: "Dəyişiklik istəyini yaz.",
+      });
+    }
+  });
 
 export const RefineRequestSchema = z
   .object({

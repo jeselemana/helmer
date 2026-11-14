@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import {
   DEFAULT_MODEL_PRICING,
   AiPolicy,
@@ -134,7 +135,20 @@ test("Pricing registration for gemini-decision-1 and gemini-3.5-flash-lite in Ai
 test("Dual-client config respects AQ. Vertex key bypass, location env vars, and HTTP 400 safety blocks", async () => {
   assert.equal(hasDecisionApiConfiguration({ GEMINI_API_KEY: "AIza-test-key" }), true);
   assert.equal(hasDecisionApiConfiguration({ GEMINI_API_KEY: "AQ.vertex-express-key" }), false);
+  assert.equal(hasDecisionApiConfiguration({ GEMINI_DECISION_API_KEY: "AQ.decision-enabled-key" }), true);
   assert.equal(hasDecisionApiConfiguration({}), false);
+
+  let capturedDecisionKey = null;
+  await callDecisionsApi({
+    input: "Context",
+    questions: { needs_web_search: { type: "noul", instructions: "Need search?" } },
+    env: { GEMINI_DECISION_API_KEY: "AQ.decision-enabled-key", GEMINI_API_KEY: "AQ.vertex-express-key" },
+    fetcher: async (_url, options) => {
+      capturedDecisionKey = options?.headers?.["x-goog-api-key"];
+      return new Response(JSON.stringify({ answers: {} }), { status: 200 });
+    },
+  });
+  assert.equal(capturedDecisionKey, "AQ.decision-enabled-key");
 
   const vertexGlobal = resolveDecisionVertexConfig(
     { GOOGLE_CLOUD_PROJECT: "helmer-prod-123", GOOGLE_CLOUD_LOCATION: "global" },
@@ -658,8 +672,11 @@ test("HTTP integration: createAskHandler and createStrategyRouter respect Helmer
     { "Idempotency-Key": "build_decision_test_123456" }
   );
   assert.equal(genRes.status, 200);
-  assert.equal(capturedStrategyArgs.buildMode, "faster");
+  assert.equal(capturedStrategyArgs.buildMode, "auto");
   assert.equal(capturedStrategyArgs.buildDecision.briefDepth, 0);
+  assert.equal(capturedStrategyArgs.buildDecision.routeTier, "hydrogen_low");
+  assert.equal(capturedStrategyArgs.buildDecision.targetModel, "gemini-4-hydrogen");
+  assert.equal(capturedStrategyArgs.buildDecision.thinkingLevel, "LOW");
   assert.equal(capturedStrategyArgs.buildDecision.needsMarketSearch, true);
   assert.equal(capturedLearningRecord.onlyNecessaryData, true);
 });
@@ -749,4 +766,208 @@ test("HelmerDecisionRouter bounds Vertex fallback timeout, trips circuit on 404/
   assert.equal(r4.routerSource, "local_rules");
   assert.equal(vertexCalls, 3);
   assert.ok(Date.now() - startOpen < 100);
+});
+
+test("Decision 1 Build Auto route_tier matrix covers Hydrogen (low..xhigh) and Carbon (low..high) across Decisions API & Vertex Flash-Lite without affecting Faster mode", async () => {
+  const expectedMatrix = [
+    { tier: "hydrogen_low", targetModel: "gemini-4-hydrogen", thinkingLevel: "LOW", carbonEscalated: false },
+    { tier: "hydrogen_medium", targetModel: "gemini-4-hydrogen", thinkingLevel: "MEDIUM", carbonEscalated: false },
+    { tier: "hydrogen_high", targetModel: "gemini-4-hydrogen", thinkingLevel: "HIGH", carbonEscalated: false },
+    { tier: "hydrogen_xhigh", targetModel: "gemini-4-hydrogen", thinkingLevel: "XHIGH", carbonEscalated: false },
+    { tier: "carbon_low", targetModel: "gemini-4-carbon", thinkingLevel: "LOW", carbonEscalated: true },
+    { tier: "carbon_medium", targetModel: "gemini-4-carbon", thinkingLevel: "MEDIUM", carbonEscalated: true },
+    { tier: "carbon_high", targetModel: "gemini-4-carbon", thinkingLevel: "HIGH", carbonEscalated: true },
+  ];
+
+  // 1. Primary Decisions API path
+  let activeTier = "hydrogen_low";
+  const decisionsRouter = createHelmerDecisionRouter({
+    redis: createMockRedis(),
+    env: { GEMINI_API_KEY: "AIza-dev-key" },
+    fetcher: async () =>
+      new Response(
+        JSON.stringify({
+          results: {
+            brief_action: { choice: "draft_brief" },
+            brief_depth: { score: 2 },
+            needs_market_search: { score: 0.25 },
+            has_enough_context: { score: 0.92 },
+            route_tier: { choice: activeTier },
+          },
+        }),
+        { status: 200 },
+      ),
+  });
+
+  for (const entry of expectedMatrix) {
+    activeTier = entry.tier;
+    const res = await decisionsRouter.routeBuild({
+      prompt: `Architecture tier verification ${entry.tier}`,
+      isBriefGeneration: true,
+    });
+    assert.equal(res.routerSource, "decisions_api");
+    assert.equal(res.routeTier, entry.tier);
+    assert.equal(res.targetModel, entry.targetModel);
+    assert.equal(res.thinkingLevel, entry.thinkingLevel);
+    assert.equal(res.carbonEscalated, entry.carbonEscalated);
+  }
+
+  // 2. Fallback Vertex Flash-Lite path
+  const vertexRouter = createHelmerDecisionRouter({
+    redis: createMockRedis(),
+    hasDecisionApiConfigFn: () => false,
+    env: { GEMINI_API_KEY: "AIza-dev-key", GOOGLE_CLOUD_PROJECT: "helmer-prod-123" },
+    fetcher: async () => new Response("Service Unavailable", { status: 503 }),
+    getVertexClientFn: () => ({
+      models: {
+        generateContent: async () => ({
+          text: JSON.stringify({
+            a: "draft_brief",
+            d: 2,
+            m: false,
+            c: true,
+            t: activeTier,
+          }),
+        }),
+      },
+    }),
+  });
+
+  for (const entry of expectedMatrix) {
+    activeTier = entry.tier;
+    const res = await vertexRouter.routeBuild({
+      prompt: `Vertex fallback tier verification ${entry.tier}`,
+      isBriefGeneration: true,
+    });
+    assert.equal(res.routerSource, "vertex_flash_lite");
+    assert.equal(res.routeTier, entry.tier);
+    assert.equal(res.targetModel, entry.targetModel);
+    assert.equal(res.thinkingLevel, entry.thinkingLevel);
+    assert.equal(res.carbonEscalated, entry.carbonEscalated);
+  }
+
+  // 3. Faster mode bypasses Decision 1 completely on /api/strategy
+  let routerCalls = 0;
+  let capturedBuildDecision;
+  const fasterOwnerId = randomUUID();
+  const fasterUser = {
+    id: fasterOwnerId,
+    status: "active",
+    email: "faster@helmer.ai",
+    emailVerifiedAt: new Date().toISOString(),
+    authVersion: 1,
+    privacyEpoch: 0,
+    settings: { modelImprovement: true },
+  };
+  const aiPolicy = new AiPolicy({ env: { AI_USER_DAILY_USD: "5", AI_PLATFORM_DAILY_USD: "50" } });
+  const privacyPolicy = new PrivacyPolicy({ findById: async (id) => (id === fasterOwnerId ? fasterUser : null) });
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.ownerId = fasterOwnerId;
+    req.user = fasterUser;
+    req.auth = { user: fasterUser };
+    next();
+  });
+  app.use(privacyPolicy.middleware());
+  app.use(aiPolicy.middleware());
+  app.use(
+    "/api/strategy",
+    createStrategyRouter(
+      {
+        readAll: async () => [],
+        list: async () => [],
+        getById: async () => null,
+        create: async (record) => ({ ...record, id: randomUUID() }),
+        rememberProvenance: async () => {},
+      },
+      null,
+      {
+        decisionRouter: {
+          routeBuild: async () => {
+            routerCalls++;
+            throw new Error("Decision 1 must not be called in faster mode");
+          },
+        },
+        generationServices: {
+          assessBrief: async () => ({}),
+          generateStrategy: async ({ buildDecision }) => {
+            capturedBuildDecision = buildDecision;
+            return {
+              title: "Faster manual brief",
+              summary: "Summary",
+              context: {},
+              sections: [{ id: "s1", title: "S1", content: "C1" }],
+              recommendations: ["R1"],
+              kpis: [{ name: "K1", target: "10", metric: "%" }],
+              nextSteps: [{ step: "Do", owner: "Team", timeline: "W1", priority: "high" }],
+              orchestration: { buildMode: "faster", fasterThinkingLevel: "high", generatorModel: "gemini-4-hydrogen", thinkingLevel: "HIGH", escalatedToFlagship: false },
+            };
+          },
+          refineStrategy: async () => ({}),
+        },
+      },
+    ),
+  );
+  const fasterIdemKey = randomUUID();
+  const fasterRes = await runExpressRequest(
+    app,
+    "POST",
+    "/api/strategy/generate",
+    {
+      brief: "Manual faster brief without Decision 1 intervention",
+      language: "en",
+      buildMode: "faster",
+      fasterThinkingLevel: "high",
+      idempotencyKey: fasterIdemKey,
+    },
+    { "Idempotency-Key": fasterIdemKey },
+  );
+  assert.equal(fasterRes.status, 200);
+  assert.equal(routerCalls, 0);
+  assert.equal(capturedBuildDecision, null);
+  assert.equal(fasterRes.json.escalatedToFlagship, undefined);
+});
+
+test("gemini-decision-1 noul parser reads entry.noul instead of inverting high-confidence NO answers via confidence", async () => {
+  const router = createHelmerDecisionRouter({
+    env: { GEMINI_API_KEY: "AIza-dev-key" },
+    fetcher: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.questions?.needs_web_search) {
+        return new Response(
+          JSON.stringify({
+            answers: {
+              needs_web_search: { type: "noul", noul: 0.12, confidence: 0.88 },
+              require_grounding: { type: "noul", noul: 0.04, confidence: 0.96 },
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          answers: {
+            brief_action: { type: "choice", choice: "draft_brief", confidence: 0.85 },
+            brief_depth: { type: "score", score: 1.2, confidence: 0.7 },
+            needs_market_search: { type: "noul", noul: 0.08, confidence: 0.92 },
+            has_enough_context: { type: "noul", noul: 0.14, confidence: 0.86 },
+            route_tier: { type: "choice", choice: "hydrogen_medium", confidence: 0.78 },
+          },
+        }),
+        { status: 200 }
+      );
+    },
+  });
+
+  const askRes = await router.routeAsk({ prompt: "Bir neçə saniyə sonra yenidən yoxla." });
+  assert.equal(askRes.routerSource, "decisions_api");
+  assert.equal(askRes.enableSearch, false);
+  assert.equal(askRes.requireGrounding, false);
+
+  const buildRes = await router.routeBuild({ prompt: "Məhsulum üçün strategiya lazımdır" });
+  assert.equal(buildRes.routerSource, "decisions_api");
+  assert.equal(buildRes.needsMarketSearch, false);
+  assert.equal(buildRes.hasEnoughContext, false);
+  assert.equal(buildRes.briefAction, "ask_questions");
 });

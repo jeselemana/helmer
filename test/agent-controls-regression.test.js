@@ -530,14 +530,14 @@ test('kill switch during an active provider call aborts the linked route and pre
 
 test('usage reconciliation refunds unused tokens once, retains unknown search charges and never adds thinking budget twice', async () => {
   const redis = new RedisFixture(), policy = new AiPolicy({ redis, env: {} });
-  const params = { model: 'gemini-3.8-flash', config: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 24576 }, tools: [{ googleSearch: {} }] } };
+  const params = { model: 'gemini-4-hydrogen', config: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 24576 }, tools: [{ googleSearch: {} }] } };
   const release = await policy.reserveProvider({ ownerId: randomUUID() }, params);
   const reservation = Number(redis.budgetReservations[0][0]);
-  assert.equal(reservation, Math.ceil(Buffer.byteLength(JSON.stringify(params)) * 0.75 + 8192 * 3.75 + 35000));
+  assert.equal(reservation, Math.ceil(Buffer.byteLength(JSON.stringify(params)) * 1.50 + 8192 * 7.50 + 35000));
   await release.recordUsage({ inputTokens: 100, outputTokens: 200, searchCalls: 0, searchUsageKnown: false });
   await release.recordUsage({ inputTokens: 100, outputTokens: 200, searchCalls: 0, searchUsageKnown: false });
   assert.equal(redis.usageWrites.length, 1);
-  assert.equal(Number(redis.usageWrites[0][0]), Math.ceil(100 * 0.75 + 200 * 3.75 + 35000) - reservation);
+  assert.equal(Number(redis.usageWrites[0][0]), Math.ceil(100 * 1.50 + 200 * 7.50 + 35000) - reservation);
   await release();
 });
 
@@ -1206,7 +1206,7 @@ test('Priority 5: Telemetry accounts for Gemini thinking tokens and Redis budget
 
   await telemetry.trackBuildStrategy({
     ownerId: randomUUID(),
-    model: 'gemini-3.8-flash',
+    model: 'gemini-4-hydrogen',
     usage: { promptTokenCount: 1000, candidatesTokenCount: 500, thoughtsTokenCount: 1500, totalTokenCount: 3000 },
     onlyNecessaryData: true,
     modelImprovement: false,
@@ -1258,7 +1258,7 @@ test('Priority 5: Telemetry accounts for Gemini thinking tokens and Redis budget
   const redis = new BudgetFloorRedis();
   const policy = new AiPolicy({ redis, env: {} });
   const ownerId = randomUUID();
-  const release = await policy.reserveProvider({ ownerId }, { model: 'gemini-3.8-flash', config: { maxOutputTokens: 8192 } });
+  const release = await policy.reserveProvider({ ownerId }, { model: 'gemini-4-hydrogen', config: { maxOutputTokens: 8192 } });
   const day = new Date().toISOString().slice(0, 10);
   const userBudgetKey = `security:budget:${day}:${ownerId}`;
   const globalBudgetKey = `security:budget:${day}:global`;
@@ -1269,7 +1269,7 @@ test('Priority 5: Telemetry accounts for Gemini thinking tokens and Redis budget
   await release.recordUsage({ inputTokens: 100, outputTokens: 200, searchCalls: 0, searchUsageKnown: true });
   const userBudgetAfter = Number(redis.values.get(userBudgetKey));
   const globalBudgetAfter = Number(redis.values.get(globalBudgetKey));
-  const expectedObservedMicros = Math.ceil(100 * 0.75 + 200 * 3.75);
+  const expectedObservedMicros = Math.ceil(100 * 1.50 + 200 * 7.50);
   assert.equal(userBudgetAfter, expectedObservedMicros);
   assert.equal(globalBudgetAfter, expectedObservedMicros);
   assert.ok(userBudgetAfter > 0, 'Budget counter must never become negative when key was evicted');

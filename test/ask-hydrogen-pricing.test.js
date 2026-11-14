@@ -82,15 +82,15 @@ test('AiPolicy.reserveProvider reserves and settles gemini-4-hydrogen with xhigh
   assert.equal(policy.inMemoryBudgets.get(`security:budget:${day}:user-hydrogen-1`), expectedMicros);
 });
 
-test('Ask UI exposes Extra (xhigh) thinking pill and New/Yeni chip without exposing model name', async () => {
+test('Ask UI exposes low/medium/high thinking pills without Extra (xhigh) or model name', async () => {
   const [scriptJs, i18nJs] = await Promise.all([
     fs.readFile(path.join(process.cwd(), 'public/script.js'), 'utf8'),
     fs.readFile(path.join(process.cwd(), 'public/i18n.js'), 'utf8'),
   ]);
 
-  assert.ok(scriptJs.includes('["low", "medium", "high", "xhigh"]'));
-  assert.ok(scriptJs.includes('xhigh: "Extra"'));
-  assert.ok(scriptJs.includes('Thinking · Extra'));
+  assert.ok(scriptJs.includes('["low", "medium", "high"]'));
+  assert.ok(!scriptJs.includes('xhigh: "Extra"'));
+  assert.ok(!scriptJs.includes('Thinking · Extra'));
   assert.ok(scriptJs.includes('ask-model-chip'));
   assert.ok(i18nJs.includes('newBadge: "Yeni"'));
   assert.ok(i18nJs.includes('newBadge: "New"'));

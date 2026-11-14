@@ -506,9 +506,9 @@ test('Ask HTTP: skips strategy provenance reads on plain Ask while enforcing the
   assert.ok(provenanceCalls >= 1);
 });
 
-test('Ask HTTP: routes to gemini-4-hydrogen with low, medium, high, xhigh thinking and enforces guest xhigh restriction', async t => {
+test('Ask HTTP: routes to gemini-4-hydrogen with low, medium, high thinking and rejects xhigh with 400 VALIDATION_ERROR', async t => {
   const f = await fixture(t), guest = 'guest_fixture';
-  for (const level of ['low', 'medium', 'high', 'xhigh']) {
+  for (const level of ['low', 'medium', 'high']) {
     const response = await f.ask({ stream: false, thinkingLevel: level });
     assert.equal(response.status, 200);
     const body = await response.json();
@@ -516,11 +516,17 @@ test('Ask HTTP: routes to gemini-4-hydrogen with low, medium, high, xhigh thinki
     assert.equal(f.calls.at(-1).model, 'gemini-4-hydrogen');
     assert.deepEqual(f.calls.at(-1).config.thinkingConfig, { thinkingLevel: level.toUpperCase() });
   }
-  const callsBeforeGuest = f.calls.length;
+  const callsBeforeXhigh = f.calls.length;
+  const authXhigh = await f.ask({ stream: false, thinkingLevel: 'xhigh' });
+  assert.equal(authXhigh.status, 400);
+  assert.equal((await authXhigh.json()).code, 'VALIDATION_ERROR');
   const guestXhigh = await f.ask({ thinkingLevel: 'xhigh' }, guest);
-  assert.equal(guestXhigh.status, 401);
-  assert.equal((await guestXhigh.json()).reply, GUEST_RESTRICTION_NOTICES.thinking);
-  assert.equal(f.calls.length, callsBeforeGuest);
+  assert.equal(guestXhigh.status, 400);
+  assert.equal((await guestXhigh.json()).code, 'VALIDATION_ERROR');
+  const guestHigh = await f.ask({ thinkingLevel: 'high' }, guest);
+  assert.equal(guestHigh.status, 401);
+  assert.equal((await guestHigh.json()).reply, GUEST_RESTRICTION_NOTICES.thinking);
+  assert.equal(f.calls.length, callsBeforeXhigh);
 });
 
 test('Ask HTTP: authenticated SSE flushes headers before decisionRouter.routeAsk and runs strategy provenance reads in parallel', async t => {
@@ -669,4 +675,219 @@ test('createAskService deduplicates identical groundingMetadata emissions across
   assert.equal(emittedGrounding[0]?.groundingChunks?.length, 1);
   assert.equal(emittedGrounding[1], null);
   assert.equal(emittedGrounding[2], null);
+});
+
+test('Ask referenceContext forwards XML-wrapped strategy and task blocks without double JSON serialization', async (t) => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-ask-refctx-'));
+  t.after(() => fs.rm(tmpDir, { recursive: true, force: true }));
+
+  const ownerId = 'refctx-user-1';
+  const user = {
+    id: ownerId,
+    email: 'user@example.com',
+    status: 'active',
+    emailVerifiedAt: '2026-01-01T00:00:00.000Z',
+    authVersion: 1,
+    privacyEpoch: 1,
+    settings: { modelImprovement: false },
+  };
+  const strategyId = randomUUID();
+  const taskId = randomUUID();
+  const captured = [];
+
+  const chatRepository = new FileChatRepository(path.join(tmpDir, 'chats.json'));
+  const strategyRepository = {
+    getById: async (id, owner) => id === strategyId && owner === ownerId
+      ? { id: strategyId, ownerId, title: 'B2B Launch', brief: 'Sell SaaS', strategy: { summary: 'Positioning' } }
+      : null,
+    readAll: async () => [{ id: strategyId, ownerId, title: 'B2B Launch', brief: 'Sell SaaS', strategy: { summary: 'Positioning' } }],
+  };
+  const plannerRepository = {
+    list: async (owner) => owner === ownerId
+      ? [{ id: taskId, ownerId, text: 'Publish landing page', groupLabel: 'Growth', strategyTitle: 'B2B Launch', completed: false, strategyId }]
+      : [],
+  };
+
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.ownerId = ownerId;
+    req.user = user;
+    req.auth = { user };
+    next();
+  });
+  app.use(new PrivacyPolicy({ findById: async () => user }).middleware());
+  app.post('/api/ask', createAskHandler({
+    configured: () => true,
+    chatRepository,
+    strategyRepository,
+    plannerRepository,
+    researchService: {},
+    decisionRouter: { routeAsk: async () => ({ useSearch: false, reason: 'SKIP', latencyMs: 1, model: 'test' }) },
+    learningLoop: { createInteractionId: randomUUID, recordInteraction: async () => {}, recordSignal: async () => {} },
+    telemetryService: { trackAskQuery: async () => {} },
+    sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
+    generateAsk: async (payload) => {
+      captured.push(payload.referenceContext);
+      return { text: 'OK', model: 'gemini-4-hydrogen', provider: 'google', usage: { inputTokens: 5, outputTokens: 2 } };
+    },
+  }));
+
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/api/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({
+      strategyId,
+      taskId,
+      messages: [{ role: 'user', content: 'Review my plan' }],
+    }),
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(captured.length, 1);
+  assert.match(captured[0], /<saved_strategy_json>/);
+  assert.match(captured[0], /<planned_task_json>/);
+  assert.ok(!captured[0].startsWith('{"strategy":'));
+});
+
+test('createCapabilityRouter returns 400 FILE_CONTEXT_EXPIRED when hydrated file has neither data nor textContent', async (t) => {
+  const ownerId = 'cap-expired-user';
+  const user = {
+    id: ownerId,
+    email: 'user@example.com',
+    status: 'active',
+    emailVerifiedAt: '2026-01-01T00:00:00.000Z',
+    authVersion: 1,
+    privacyEpoch: 1,
+    settings: { modelImprovement: true },
+  };
+  const chatId = randomUUID();
+  const expiredFileId = `gfc_${randomUUID()}`;
+
+  const chats = {
+    getById: async () => ({
+      id: chatId,
+      ownerId,
+      revision: 1,
+      messages: [{ role: 'user', content: 'Old', file: { fileId: expiredFileId, name: 'old.csv', size: 100, type: 'text/csv' } }],
+    }),
+  };
+
+  const registry = createPluginRegistry();
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.ownerId = ownerId;
+    req.user = user;
+    req.auth = { user };
+    next();
+  });
+  app.use(new PrivacyPolicy({ findById: async () => user }).middleware());
+  app.use('/api/ask', createCapabilityRouter({
+    registry,
+    workflow: { execute: async () => { throw new Error('Should not execute'); } },
+    artifacts: {},
+    chats,
+    strategies: { getById: async () => null },
+    planner: { list: async () => [] },
+    hydrateFile: async (file) => file,
+  }));
+
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/api/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({
+      chatId,
+      chatRevision: 1,
+      pluginIds: ['pdf'],
+      messages: [
+        { role: 'user', content: 'Old', file: { fileId: expiredFileId, name: 'old.csv', size: 100, type: 'text/csv' } },
+        { role: 'user', content: 'Export this file to PDF' },
+      ],
+    }),
+  });
+
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.code, 'FILE_CONTEXT_EXPIRED');
+  assert.equal(body.retryable, false);
+});
+
+test('Ask handler forwards personalizationContext separately from referenceContext when personalIntelligence is enabled', async (t) => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-ask-pi-'));
+  t.after(() => fs.rm(tmpDir, { recursive: true, force: true }));
+
+  const ownerId = randomUUID();
+  const user = {
+    id: ownerId,
+    fullName: 'Aysel Həsənova',
+    email: 'aysel@example.com',
+    status: 'active',
+    emailVerifiedAt: '2026-01-01T00:00:00.000Z',
+    authVersion: 1,
+    privacyEpoch: 1,
+    settings: {
+      personalIntelligence: true,
+      modelImprovement: false,
+      brandName: 'NovaPay',
+      industry: 'FinTech',
+      tone: 'executive',
+      customInstructions: 'Həmişə AZN büdcə ilə cavab ver.',
+      autoContext: false,
+    },
+  };
+  const captured = [];
+  const chatRepository = new FileChatRepository(path.join(tmpDir, 'chats.json'));
+
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.ownerId = ownerId;
+    req.user = user;
+    req.auth = { user };
+    next();
+  });
+  app.use(new PrivacyPolicy({ findById: async () => user }).middleware());
+  app.post('/api/ask', createAskHandler({
+    configured: () => true,
+    chatRepository,
+    strategyRepository: { getById: async () => null },
+    plannerRepository: { list: async () => [] },
+    researchService: {},
+    decisionRouter: { routeAsk: async () => ({ enableSearch: false, requireGrounding: false, routerSource: 'fast_path', latencyMs: 0 }) },
+    learningLoop: { createInteractionId: randomUUID, recordInteraction: async () => {}, recordSignal: async () => {} },
+    telemetryService: { trackAskQuery: async () => {} },
+    sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
+    generateAsk: async (payload) => {
+      captured.push(payload);
+      return { text: 'OK', model: 'gemini-4-hydrogen', provider: 'google', usage: { inputTokens: 5, outputTokens: 2 } };
+    },
+  }));
+
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/api/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'Instagram kampaniya planı yaz' }],
+    }),
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].referenceContext, '');
+  assert.match(captured[0].personalizationContext, /<user_personalization_context>/);
+  assert.match(captured[0].personalizationContext, /NovaPay/);
+  assert.match(captured[0].personalizationContext, /Həmişə AZN büdcə ilə cavab ver\./);
 });

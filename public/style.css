@@ -31231,6 +31231,34 @@ html.dark .ask-context-suggestion-btn:hover .ask-context-suggestion-icon {
 .intelligence-view .build-countdown-info { display: flex; align-items: center; flex: 0 0 24px; margin: 0; }
 .build-countdown-tooltip::after { content: ""; position: absolute; top: 100%; left: 0; right: 0; height: 12px; }
 .intelligence-view > .build-estimate-card[hidden] { display: none; }
+.intelligence-escalation-notice {
+  display: inline-flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 9px;
+  max-width: min(500px, 92vw);
+  margin: 0 auto 14px;
+  padding: 10px 15px;
+  border: 1px solid color-mix(in srgb, #70aaff 26%, var(--theme-border, #233044));
+  border-radius: 12px;
+  background: color-mix(in srgb, #70aaff 7%, transparent);
+  color: var(--theme-ink);
+  font-size: 12.5px;
+  line-height: 1.55;
+  text-align: left;
+  animation: intelligence-reveal 360ms ease-out both;
+}
+.intelligence-escalation-notice[hidden] { display: none; }
+.intelligence-escalation-dot {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: #70aaff;
+  box-shadow: 0 0 10px rgb(112 170 255 / 55%);
+}
+.intelligence-escalation-text { margin: 0; font-size: inherit; line-height: inherit; color: inherit; }
 
 /* Intake-only preparation tab, joined to the Build composer. */
 .build-estimate-composer > .ask-composer { position: relative; z-index: 1; margin-bottom: 0; }

@@ -40,7 +40,7 @@ export const askRequestSchema = z.object({
     searchGrounded: z.boolean().optional(), groundingActive: z.boolean().optional(),
     updatedAt: z.string().max(100).optional(), id: uuid.optional(),
   }).strict()).min(1).max(200),
-  model: z.string().max(100).optional(), mode: z.enum(["ask", "research"]).optional(), thinkingLevel: z.enum(["low", "medium", "high", "xhigh", "off", "auto"]).optional(),
+  model: z.string().max(100).optional(), mode: z.enum(["ask", "research"]).optional(), thinkingLevel: z.enum(["low", "medium", "high", "off", "auto"]).optional(),
   strategyId: uuid.optional(), taskId: uuid.optional(), chatId: uuid.optional(),
   pluginIds: z.array(z.string().regex(/^[a-z][a-z0-9-]{0,40}$/)).max(6).optional(),
   chatRevision: z.number().int().positive().optional(),
@@ -236,7 +236,13 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
         transport.signal.throwIfAborted();
         assertCachedFileReference(message.file, chat);
         message.file = await prepareUploadedContext(hydrateFile ? await hydrateFile(message.file, req.ownerId) : message.file);
-        if (!message.file.data && !message.file.textContent) throw new Error("Uploaded context expired; attach the file again");
+        if (!message.file.data && !message.file.textContent) {
+          throw Object.assign(new Error("Yüklənmiş fayl kontekstinin müddəti bitib; faylı yenidən əlavə edin."), {
+            status: 400,
+            code: "FILE_CONTEXT_EXPIRED",
+            retryable: false,
+          });
+        }
       }
       allocatedChatId = chat?.id || randomUUID();
       // Establish an owner-scoped chat before artifact persistence; failed runs stay retryable.
@@ -288,11 +294,18 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
     } catch (error) {
       if (completedResult && !committed) for (const artifact of completedResult.artifacts.reverse()) await artifacts.rollback(artifact, req.ownerId).catch(() => {});
       // Provider/renderer internals and raw model output never appear in the conversation.
-      const response = { error: "Tapşırığı tamamlamaq mümkün olmadı. Yenidən cəhd edin.", code: "CAPABILITY_EXECUTION_FAILED", retryable: true, execution: error.execution, chatId: allocatedChatId, chatRevision: initialChat?.revision };
+      const isFileContextExpired = error?.code === "FILE_CONTEXT_EXPIRED";
+      const isValidationError = error?.code === "VALIDATION_ERROR" || error?.code === "FILE_TOO_LARGE";
+      const statusCode = isFileContextExpired || isValidationError ? 400 : 502;
+      const response = isFileContextExpired
+        ? { error: error.message || "Yüklənmiş fayl kontekstinin müddəti bitib; faylı yenidən əlavə edin.", code: "FILE_CONTEXT_EXPIRED", retryable: false, chatId: allocatedChatId, chatRevision: initialChat?.revision }
+        : isValidationError
+          ? { error: "Yüklənmiş fayl formatı və ya ölçüsü dəstəklənmir.", code: error.code, retryable: false, chatId: allocatedChatId, chatRevision: initialChat?.revision }
+          : { error: "Tapşırığı tamamlamaq mümkün olmadı. Yenidən cəhd edin.", code: "CAPABILITY_EXECUTION_FAILED", retryable: true, execution: error.execution, chatId: allocatedChatId, chatRevision: initialChat?.revision };
       console.error("Capability execution failed:", error.code || error.name);
       if (transport?.streaming) return transport.fail(error, response);
       if (res.destroyed || res.writableEnded) return;
-      if (!res.headersSent) return res.status(502).json(response);
+      if (!res.headersSent) return res.status(statusCode).json(response);
     } finally { transport?.dispose(); }
   });
   return router;

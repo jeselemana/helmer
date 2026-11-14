@@ -14,7 +14,6 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
     target[method] = async (params, options) => {
       const outputTokenReservation = buildVertex ? resolveBuildOutputReservation(params) : undefined;
       if (buildVertex && (!isValidBuildOutputReservation(params.model, outputTokenReservation) || params.config?.maxOutputTokens !== undefined ||
-          (params.model === 'gemini-4-argon' && params.config?.tools?.length) ||
           (params.config?.tools && (!Array.isArray(params.config.tools) || params.config.tools.length > 1 || params.config.tools.some(tool =>
             !tool?.googleSearch || Object.keys(tool).length !== 1 || Object.keys(tool.googleSearch).length !== 0))))) {
         throw Object.assign(new Error('Invalid Build provider configuration'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
@@ -209,7 +208,7 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
               if (bufferPrelude) {
                 // Attach a rejection handler immediately, even while the next
                 // provider event is pending. Failed checks never publish data.
-                const validation = validate(event).then(() => ({}), error => {
+                const validation = validate(event, { streamChunk: true }).then(() => ({}), error => {
                   context.controller?.abort(error);
                   return { error };
                 });

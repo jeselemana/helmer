@@ -341,7 +341,7 @@ function buildAuthoritativeOrchestration(recordOrStrategy, existingOrchestration
 
   return {
     mode: rawOrch.mode || prevOrch.mode || "auto",
-    strategistModel: rawOrch.strategistModel || prevOrch.strategistModel || "gemini-4-argon",
+    strategistModel: rawOrch.strategistModel || prevOrch.strategistModel || "gemini-4-hydrogen",
     thinkingLevel: rawOrch.thinkingLevel || prevOrch.thinkingLevel || "HIGH",
     searchGrounded: true,
     sourcesCount: Math.max(Number(rawOrch.sourcesCount || 0), Number(prevOrch.sourcesCount || 0), evidence.length, sources.length, 1),

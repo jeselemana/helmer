@@ -364,6 +364,7 @@ app.use(express.urlencoded({ limit: '64kb', extended: false }));
 const MAX_JSON_ARRAY_LENGTH = 250;
 const MAX_JSON_OBJECT_KEYS = 250;
 const MAX_JSON_DEPTH = 14;
+const DANGEROUS_JSON_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 function hasOversizedJsonCollection(value, depth = 0) {
   if (!value || typeof value !== 'object') return false;
   if (depth > MAX_JSON_DEPTH) return true;
@@ -377,6 +378,7 @@ function hasOversizedJsonCollection(value, depth = 0) {
   const keys = Object.keys(value);
   if (keys.length > MAX_JSON_OBJECT_KEYS) return true;
   for (let i = 0; i < keys.length; i += 1) {
+    if (DANGEROUS_JSON_KEYS.has(keys[i])) return true;
     if (hasOversizedJsonCollection(value[keys[i]], depth + 1)) return true;
   }
   return false;
@@ -878,7 +880,7 @@ const researchService = new ResearchService({
 researchService.resumeOrphanedJobs().catch(() => {});
 app.use("/api/ask/research", requireAuth, createResearchRouter({ researchService, chatRepository, rateLimit: askRateLimit(20) }));
 app.use("/api/ask", createAskExecutionGuard({ redis, allowGuest: true, allowParallelChats: allowParallelAskChats, hasActiveJobForOwner: ownerId => researchService.hasActiveJobForOwner(ownerId) }), createCapabilityRouter({ allowGuestChat: true, registry: pluginRegistry, workflow: capabilityWorkflow, artifacts: artifactRepository, chats: chatRepository, strategies: strategyRepository, planner: plannerRepository, rateLimit: foregroundAskRateLimit,
-  hydrateFile: (file, ownerId) => geminiFileCache.resolveFile(file, ownerId),
+  hydrateFile: (file, ownerId) => geminiFileCache.resolveFileAsync(file, ownerId),
   onComplete: ({ req, result }) => telemetryService.trackAskQuery({ ownerId: req.ownerId, sessionId: req.guestOwnerId, model: result.model, latencyMs: Date.parse(result.execution.completedAt) - Date.parse(result.execution.startedAt), usage: result.usage, groundingActive: Boolean(result.groundingMetadata), status: "success", querySnippet: "", onlyNecessaryData: true, modelImprovement: false }).catch(() => {}),
 }));
 app.use("/api/artifacts", createArtifactRouter({ artifacts: artifactRepository, chats: chatRepository }));

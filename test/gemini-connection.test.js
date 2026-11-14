@@ -10,7 +10,7 @@ test('Gemini health check uses supported generation, never Express-incompatible 
     get: () => { throw new Error('Metadata must not be used for Express health'); },
     generateContent: async params => {
       calls++;
-      assert.equal(params.model, 'gemini-3.8-flash');
+      assert.equal(params.model, 'gemini-4-hydrogen');
       assert.equal(params.contents, 'Reply with exactly OK.');
       assert.equal(params.config.abortSignal, signal);
       assert.equal(params.config.maxOutputTokens, 64);

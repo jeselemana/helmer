@@ -81,7 +81,7 @@ export class TelemetryService {
     brief = "",
     answers = [],
     strategy = null,
-    model = "gemini-3.8-flash",
+    model = "gemini-4-hydrogen",
     latencyMs = null,
     usage = null,
     groundingActive = false,
@@ -608,7 +608,7 @@ export class TelemetryService {
               maskedUserId: maskIdentifier(item.ownerId || item.sessionId),
               marketMode,
               category: isRestricted ? "Zəruri Əməliyyat" : (item.mode === "build" ? categorizeBrief(item.userPrompt) : "İnteraktiv Məsləhət"),
-              model: item.modelName || "gemini-3.8-flash",
+              model: item.modelName || "gemini-4-hydrogen",
               groundingActive,
               latencyMs: item.latencyMs || null,
               tokens: {

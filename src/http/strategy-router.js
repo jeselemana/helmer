@@ -8,7 +8,9 @@ import { acquireIdempotencyLock } from "./execution-lock.js";
 import { httpStatusOf, publicErrorMessage } from "./error-response.js";
 import {
   AssessRequestSchema,
+  EmptyBodySchema,
   GenerateRequestSchema,
+  RefineByIdRequestSchema,
   RefineRequestSchema,
   SaveStrategyRequestSchema,
   StrategyFeedbackSchema,
@@ -25,7 +27,7 @@ import { buildStrategyPersonalizationContext } from "../services/ai/personal-con
 import { detectTargetMarket, getGuestBuildCtaNotice, GUEST_BUILD_EXHAUSTED_MESSAGE } from "../services/ai/prompts.js";
 import { BuildEstimateRequestSchema } from "../services/ai/build-estimate.js";
 import { buildConfig } from "../services/ai/build-config.js";
-import { createHelmerDecisionRouter } from "../services/ai/decision-router.js";
+import { createHelmerDecisionRouter, deterministicBuildFallbackRoute } from "../services/ai/decision-router.js";
 import {
   isGroundedStrategyRecord,
   isExpiredGroundedStrategyRecord,
@@ -37,6 +39,8 @@ import { aiConfig } from "../services/ai/config.js";
 import { logWithoutBlocking } from "../services/learning/learning-loop-service.js";
 import { isModelImprovementEnabled } from "./auth-middleware.js";
 
+const DANGEROUS_PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 export function canonicalize(value) {
   if (value === null || typeof value !== "object") {
     return value;
@@ -44,8 +48,9 @@ export function canonicalize(value) {
   if (Array.isArray(value)) {
     return value.map(canonicalize);
   }
-  const sorted = {};
+  const sorted = Object.create(null);
   for (const key of Object.keys(value).sort()) {
+    if (DANGEROUS_PROTO_KEYS.has(key)) continue;
     if (value[key] !== undefined) {
       sorted[key] = canonicalize(value[key]);
     }
@@ -142,14 +147,17 @@ function getClientIp(req) {
   return req.ip || req.socket?.remoteAddress || "127.0.0.1";
 }
 
-function rateLimit(limit, windowMs = 10 * 60 * 1000, scope = "generation") {
-  return (req, res, next) => {
+function rateLimit(limit, windowMs = 10 * 60 * 1000, scope = "generation", redis = null) {
+  const applyLocalRateLimit = (req, res, next) => {
     const now = Date.now();
     const clientIp = getClientIp(req);
     const identifier = req.user?.id ? `user:${req.user.id}` : `ip:${clientIp}`;
     const key = `strat:${scope}:${identifier}:${req.baseUrl || "/api/strategy"}`;
     const history = (requestWindows.get(key) || []).filter((timestamp) => now - timestamp < windowMs);
     if (history.length >= limit) {
+      const oldestTs = history[0] || now;
+      const retryAfterSec = Math.max(1, Math.ceil((oldestTs + windowMs - now) / 1000));
+      res.setHeader("Retry-After", String(retryAfterSec));
       return res.status(429).json({
         error: "Hazırda çox sayda sorğu göndərilib. Bir neçə dəqiqə sonra yenidən yoxla.",
         code: "RATE_LIMITED",
@@ -158,6 +166,55 @@ function rateLimit(limit, windowMs = 10 * 60 * 1000, scope = "generation") {
     history.push(now);
     requestWindows.set(key, history);
     return next();
+  };
+
+  return (req, res, next) => {
+    if (!redis?.isReady) {
+      return applyLocalRateLimit(req, res, next);
+    }
+    const now = Date.now();
+    const clientIp = getClientIp(req);
+    const identifier = req.user?.id ? `user:${req.user.id}` : `ip:${clientIp}`;
+    const actorDigest = createHash("sha256")
+      .update(`${scope}:${identifier}:${req.baseUrl || "/api/strategy"}`)
+      .digest("hex")
+      .slice(0, 32);
+    const windowBucket = Math.floor(now / windowMs);
+    const redisKey = `strat:rl:${scope}:${actorDigest}:${windowBucket}`;
+    const retryAfterSec = Math.max(1, Math.ceil(((windowBucket + 1) * windowMs - now) / 1000));
+
+    return (async () => {
+      try {
+        let count = null;
+        if (typeof redis.eval === "function") {
+          count = Number(
+            await redis.eval(
+              "local c = redis.call('incr', KEYS[1]); if tonumber(c) == 1 then redis.call('pexpire', KEYS[1], ARGV[1]); end; return c",
+              { keys: [redisKey], arguments: [String(windowMs)] },
+            ),
+          );
+        } else if (typeof redis.incr === "function") {
+          count = Number(await redis.incr(redisKey));
+          if (count === 1) {
+            if (typeof redis.pExpire === "function") await redis.pExpire(redisKey, windowMs);
+            else if (typeof redis.expire === "function") await redis.expire(redisKey, Math.max(1, Math.ceil(windowMs / 1000)));
+          }
+        }
+        if (Number.isFinite(count) && count >= 1) {
+          if (count > limit) {
+            res.setHeader("Retry-After", String(retryAfterSec));
+            return res.status(429).json({
+              error: "Hazırda çox sayda sorğu göndərilib. Bir neçə dəqiqə sonra yenidən yoxla.",
+              code: "RATE_LIMITED",
+            });
+          }
+          return next();
+        }
+      } catch {
+        // Fallback to process-local rate window if Redis encounters a transient error
+      }
+      return applyLocalRateLimit(req, res, next);
+    })().catch(next);
   };
 }
 
@@ -178,6 +235,7 @@ function hasOversizedCollection(value, depth = 0) {
   const keys = Object.keys(value);
   if (keys.length > MAX_BODY_OBJECT_KEYS) return true;
   for (let i = 0; i < keys.length; i += 1) {
+    if (DANGEROUS_PROTO_KEYS.has(keys[i])) return true;
     if (hasOversizedCollection(value[keys[i]], depth + 1)) return true;
   }
   return false;
@@ -380,17 +438,50 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
   const generationServices = options.generationServices || { assessBrief, generateStrategy, refineStrategy };
   const decisionRouter = options?.decisionRouter || createHelmerDecisionRouter({ redis: options?.redis || null });
   const resolvePreFlightBuildDecision = async ({ payload, existingStrategy = null, isBriefGeneration = true, signal }) => {
-    const decision = await decisionRouter.routeBuild({
-      prompt: payload.action === "custom" ? payload.request : (payload.brief || ""),
-      hasAttachments: Boolean(payload.hasAttachments),
-      isBriefGeneration,
-      hasExistingBrief: Boolean(existingStrategy || payload.strategy),
-      existingBriefSummary: existingStrategy?.summary || payload.strategy?.summary || "",
-      signal,
-    });
-    const effectiveBuildMode =
-      payload.buildMode || (decision?.briefDepth === 0 ? "faster" : undefined);
-    return { buildDecision: decision, effectiveBuildMode };
+    const effectiveBuildMode = payload.buildMode === "faster"
+      ? "faster"
+      : (payload.buildMode || (existingStrategy?.orchestration?.buildMode === "faster" ? "faster" : "auto"));
+    if (effectiveBuildMode === "faster") {
+      return { buildDecision: null, effectiveBuildMode: "faster" };
+    }
+    const promptText = payload.action === "custom" ? payload.request : (payload.brief || "");
+    const existingSummary = existingStrategy?.summary || payload.strategy?.summary || "";
+    try {
+      const decision = await decisionRouter.routeBuild({
+        prompt: promptText,
+        hasAttachments: Boolean(payload.hasAttachments),
+        isBriefGeneration,
+        hasExistingBrief: Boolean(existingStrategy || payload.strategy),
+        existingBriefSummary: existingSummary,
+        signal,
+      });
+      if (!decision || typeof decision !== "object" || !decision.targetModel || !decision.thinkingLevel) {
+        return {
+          buildDecision: deterministicBuildFallbackRoute({
+            prompt: promptText,
+            hasExistingBrief: Boolean(existingStrategy || payload.strategy),
+            existingBriefSummary: existingSummary,
+            fallbackReason: "decision_invalid_format",
+          }),
+          effectiveBuildMode,
+        };
+      }
+      return { buildDecision: decision, effectiveBuildMode };
+    } catch (error) {
+      if (signal?.aborted || error?.name === "AbortError") throw error;
+      console.warn("[Build decision] Pre-flight routing failed; using deterministic Hydrogen fallback", {
+        code: error?.code || "DECISION_ERROR",
+      });
+      return {
+        buildDecision: deterministicBuildFallbackRoute({
+          prompt: promptText,
+          hasExistingBrief: Boolean(existingStrategy || payload.strategy),
+          existingBriefSummary: existingSummary,
+          fallbackReason: "decision_exception",
+        }),
+        effectiveBuildMode,
+      };
+    }
   };
   const isGenerationRequest = req => req.method === "POST" && /^\/(?:estimate|assess|generate|generate-stream|refine|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path);
 
@@ -591,7 +682,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     }
   }
 
-  function runWithRouteIdempotency(operation, ownerId, idKey, fingerprint, fn) {
+  async function runWithRouteIdempotency(operation, ownerId, idKey, fingerprint, fn) {
     if (!idKey) return fn();
     const requestKey = createHash("sha256").update(`${ownerId}:${operation}:${idKey}`).digest("hex");
     const now = Date.now();
@@ -604,11 +695,59 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       throw conflictErr;
     }
     if (previous?.status === "completed" && previous.response) {
-      return Promise.resolve(previous.response);
+      return previous.response;
     }
     if (previous?.status === "pending" && previous.promise) {
       return previous.promise;
     }
+
+    const redis = options?.redis;
+    const useRedis = Boolean(redis?.isReady && typeof redis.set === "function" && typeof redis.get === "function");
+    const redisKey = `strat:route_idem:${requestKey}`;
+    const lockToken = randomUUID();
+    const pendingPayload = JSON.stringify({ state: "pending", fingerprint, token: lockToken });
+
+    if (useRedis) {
+      let claimed = false;
+      try {
+        claimed = Boolean(await redis.set(redisKey, pendingPayload, { NX: true, EX: 900 }));
+      } catch {
+        claimed = false;
+      }
+      if (!claimed) {
+        let rawExisting = null;
+        try {
+          rawExisting = await redis.get(redisKey);
+        } catch {
+          rawExisting = null;
+        }
+        if (rawExisting) {
+          let existing = null;
+          try { existing = JSON.parse(rawExisting); } catch { existing = null; }
+          if (!existing || existing.fingerprint !== fingerprint) {
+            const conflictErr = new Error("Eyni sorğu açarı fərqli parametrlərlə istifadə edilib.");
+            conflictErr.code = "IDEMPOTENCY_CONFLICT";
+            conflictErr.status = 409;
+            throw conflictErr;
+          }
+          if (existing.state === "completed" && existing.response !== undefined) {
+            return existing.response;
+          }
+          if (existing.state === "pending") {
+            const pendingErr = new Error("Eyni sorğu artıq icra olunur.");
+            pendingErr.code = "REQUEST_ALREADY_SUBMITTED";
+            pendingErr.status = 409;
+            throw pendingErr;
+          }
+        } else {
+          // Transient error or race where key disappeared right before get: try NX claim once more cleanly
+          try {
+            claimed = Boolean(await redis.set(redisKey, pendingPayload, { NX: true, EX: 900 }));
+          } catch {}
+        }
+      }
+    }
+
     if (routeIdempotencyState.size >= 512) routeIdempotencyState.delete(routeIdempotencyState.keys().next().value);
     const entry = {
       fingerprint,
@@ -618,24 +757,49 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       promise: null,
     };
     entry.promise = Promise.resolve().then(fn).then(
-      (result) => {
+      async (result) => {
         entry.status = "completed";
         entry.response = result;
+        if (useRedis) {
+          const completedPayload = JSON.stringify({ state: "completed", fingerprint, response: result });
+          try {
+            if (typeof redis.eval === "function") {
+              await redis.eval(
+                "if redis.call('get',KEYS[1]) == ARGV[1] then redis.call('set',KEYS[1],ARGV[2],'EX',900); return 1 end; return 0",
+                { keys: [redisKey], arguments: [pendingPayload, completedPayload] },
+              );
+            } else {
+              await redis.set(redisKey, completedPayload, { EX: 900 });
+            }
+          } catch {}
+        }
         return result;
       },
-      (err) => {
+      async (err) => {
         if (routeIdempotencyState.get(requestKey) === entry) {
           routeIdempotencyState.delete(requestKey);
         }
+        if (useRedis) {
+          try {
+            if (typeof redis.eval === "function") {
+              await redis.eval(
+                "if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) end; return 0",
+                { keys: [redisKey], arguments: [pendingPayload] },
+              );
+            } else if (typeof redis.del === "function") {
+              await redis.del(redisKey);
+            }
+          } catch {}
+        }
         throw err;
-      }
+      },
     );
     routeIdempotencyState.set(requestKey, entry);
     return entry.promise;
   }
 
-  const estimateRateLimit = rateLimit(20, 10 * 60 * 1000, "estimate");
-  const generationRateLimit = rateLimit(30);
+  const estimateRateLimit = rateLimit(20, 10 * 60 * 1000, "estimate", options?.redis);
+  const generationRateLimit = rateLimit(30, 10 * 60 * 1000, "generation", options?.redis);
   router.use((req, res, next) => (req.path === "/estimate" ? estimateRateLimit : generationRateLimit)(req, res, next));
   router.use((req, res, next) => {
     if (isGenerationRequest(req)) {
@@ -669,10 +833,18 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     res.setHeader("Cache-Control", "no-store");
     try {
       const responseBody = await runWithRouteIdempotency("estimate", req.ownerId, idKey, fingerprint, async () => {
+        const buildDecision = payload.buildMode === "faster"
+          ? null
+          : (await resolvePreFlightBuildDecision({
+            payload,
+            isBriefGeneration: true,
+            signal: controller.signal,
+          })).buildDecision;
         const preparationEstimate = await estimateBuildPreparation({
           brief: payload.brief,
           buildMode: payload.buildMode,
           fasterThinkingLevel: payload.fasterThinkingLevel,
+          buildDecision,
           ownerId: req.ownerId,
           signal: controller.signal,
         });
@@ -1011,10 +1183,16 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           }
         }
         const completedResult = { ...tracked, result: savedRecord?.strategy || tracked.result, savedRecord };
+        const escalatedToFlagship = Boolean(completedResult.result?.orchestration?.escalatedToFlagship);
         req?.securityContext?.recordIdempotentResult?.(200, {
           strategy: completedResult.result,
           savedStrategy: savedRecord ? publicRecord(savedRecord) : null,
           savedId: savedRecord ? savedRecord.id : null,
+          ...(escalatedToFlagship
+            ? { escalatedToFlagship: true, routingTier: "flagship" }
+            : (completedResult.result?.orchestration?.buildMode === "auto"
+              ? { escalatedToFlagship: false, routingTier: "standard" }
+              : {})),
         });
         if (!shouldAutoSave) await distLock.saveResult({ fingerprint, tracked: completedResult });
         return completedResult;
@@ -1064,10 +1242,16 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         });
         if (!disconnected && !res.writableEnded && !res.destroyed) {
           const savedRecord = tracked.savedRecord || null;
+          const escalatedToFlagship = Boolean(tracked.result?.orchestration?.escalatedToFlagship);
           res.json({
             strategy: tracked.result,
             savedStrategy: savedRecord ? publicRecord(savedRecord) : null,
             savedId: savedRecord ? savedRecord.id : null,
+            ...(escalatedToFlagship
+            ? { escalatedToFlagship: true, routingTier: "flagship" }
+            : (tracked.result?.orchestration?.buildMode === "auto"
+              ? { escalatedToFlagship: false, routingTier: "standard" }
+              : {})),
             ...(req.user ? {} : {
               remainingGuestBriefs: req.remainingGuestBriefs,
               isGuest: true,
@@ -1132,21 +1316,29 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           req,
           subscriberId,
           onEntry: (entry) => { generationEntry = entry; if (disconnected) onClose(); },
-          onChunk: ({ chunk, finishReason, preparationEstimate, resetStream }) => sendEvent({
+          onChunk: ({ chunk, finishReason, preparationEstimate, resetStream, escalatedToFlagship, routingTier }) => sendEvent({
             chunk,
             finishReason,
             preparationEstimate,
             ...(resetStream ? { resetStream: true } : {}),
+            ...(typeof escalatedToFlagship === "boolean" ? { escalatedToFlagship } : {}),
+            ...(routingTier ? { routingTier } : {}),
           }),
         });
         const strategy = tracked.result;
         const savedRecord = tracked.savedRecord || null;
+        const escalatedToFlagship = Boolean(strategy?.orchestration?.escalatedToFlagship);
 
         sendEvent({
           done: true,
           strategy,
           savedStrategy: savedRecord ? publicRecord(savedRecord) : null,
           savedId: savedRecord ? savedRecord.id : null,
+          ...(escalatedToFlagship
+            ? { escalatedToFlagship: true, routingTier: "flagship" }
+            : (strategy?.orchestration?.buildMode === "auto"
+              ? { escalatedToFlagship: false, routingTier: "standard" }
+              : {})),
           ...(req.user ? {} : {
             remainingGuestBriefs: req.remainingGuestBriefs,
             isGuest: true,
@@ -1228,7 +1420,15 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             modelImprovement,
             privacySnapshot: getReqPrivacySnapshot(req),
           });
-          return { strategy: tracked.result };
+          const escalatedToFlagship = Boolean(tracked.result?.orchestration?.escalatedToFlagship);
+          return {
+            strategy: tracked.result,
+            ...(escalatedToFlagship
+            ? { escalatedToFlagship: true, routingTier: "flagship" }
+            : (tracked.result?.orchestration?.buildMode === "auto"
+              ? { escalatedToFlagship: false, routingTier: "standard" }
+              : {})),
+          };
         },
       });
       if (!res.writableEnded && !res.destroyed && !res.closed) {
@@ -1267,7 +1467,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             modificationRequest: latestVersion.changeRequest,
             response: latestVersion.data,
             modelProvider: "google",
-            modelName: buildConfig.strategistModel,
+            modelName: latestVersion?.data?.orchestration?.generatorModel || buildConfig.strategistModel,
             finalAccepted: true,
           }) : null);
         logWithoutBlocking(learningUpdate, "Build acceptance logging");
@@ -1358,18 +1558,25 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         throw error;
       }
 
+      const clientPayload = parse(RefineByIdRequestSchema, req.body);
+
       const existing = await repository.getById(req.params.id, req.ownerId);
       if (!existing) return res.status(404).json({ error: "Strategiya tapılmadı.", code: "NOT_FOUND" });
 
       const payload = parse(RefineRequestSchema, {
-        ...req.body,
+        action: clientPayload.action,
+        request: clientPayload.request,
+        language: clientPayload.language,
+        idempotencyKey: clientPayload.idempotencyKey,
+        buildMode: clientPayload.buildMode,
+        fasterThinkingLevel: clientPayload.fasterThinkingLevel,
         brief: existing.brief || "",
         answers: existing.clarification?.answers || existing.answers || [],
         strategy: existing.strategy,
       });
 
       const effectiveKey = resolveRequestIdempotencyKey(req, payload);
-      const fingerprint = computePayloadFingerprint("refine_id", req.body, req.params.id);
+      const fingerprint = computePayloadFingerprint("refine_id", clientPayload, req.params.id);
       const refineKey = effectiveKey ? `${req.ownerId}:${effectiveKey}` : null;
 
       // Check if version with this idempotencyKey was already appended (replay after restart)
@@ -1378,7 +1585,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         if (completedVersion) {
           if (completedVersion.payloadFingerprint) {
             const matchesCanonical = completedVersion.payloadFingerprint === fingerprint;
-            const matchesLegacy = completedVersion.payloadFingerprint === computeLegacyPayloadFingerprint("refine_id", req.body, req.params.id);
+            const matchesLegacy = completedVersion.payloadFingerprint === computeLegacyPayloadFingerprint("refine_id", clientPayload, req.params.id);
             if (!matchesCanonical && !matchesLegacy) {
               const conflictErr = new Error("Eyni idempotency açarı fərqli parametrlərlə istifadə edilib.");
               conflictErr.code = "IDEMPOTENCY_CONFLICT";
@@ -1446,7 +1653,15 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             changeRequest,
             { clientSaveId: effectiveKey || null, payloadFingerprint: fingerprint }
           );
-          const responsePayload = { strategy: publicRecord(updated) };
+          const escalatedToFlagship = Boolean(strategy?.orchestration?.escalatedToFlagship);
+          const responsePayload = {
+            strategy: publicRecord(updated),
+            ...(escalatedToFlagship
+            ? { escalatedToFlagship: true, routingTier: "flagship" }
+            : (strategy?.orchestration?.buildMode === "auto"
+              ? { escalatedToFlagship: false, routingTier: "standard" }
+              : {})),
+          };
           req.securityContext?.recordIdempotentResult?.(200, responsePayload);
           const isGroundedRefine = isGroundedStrategyRecord(strategy) || tracked.providerMeta?.stageMetrics?.some(stage => stage.groundingActive);
           if (modelImprovement && !isGroundedRefine && learningLoop && existing.learningInteractionId) {
@@ -1527,6 +1742,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) {
         return res.status(400).json({ error: "Strategiya ID-si düzgün deyil.", code: "VALIDATION_ERROR" });
       }
+      parse(EmptyBodySchema, req.body ?? {});
       const duplicate = await repository.duplicate(req.params.id, req.ownerId);
       if (!duplicate) return res.status(404).json({ error: "Strategiya tapılmadı.", code: "NOT_FOUND" });
       return res.status(201).json({ strategy: publicRecord(duplicate) });
