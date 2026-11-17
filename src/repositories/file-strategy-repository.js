@@ -8,6 +8,8 @@ import {
   readStrategyObject,
   writeStrategyObject,
   deleteStrategyObject,
+  readTenantObject,
+  writeTenantObject,
   listTenantObjects,
 } from "../http/r2-storage.js";
 import { TenantLockManager } from "./tenant-lock.js";
@@ -23,6 +25,7 @@ import {
   applyGroundedProvenanceToStrategy,
   exportOwnerProvenanceEntries,
   hydrateOwnerProvenanceEntries,
+  clearOwnerProvenance,
 } from "../services/ai/grounded-chat-retention.js";
 
 function parseValidDateMs(value, now = Date.now()) {
@@ -46,6 +49,9 @@ export class FileStrategyRepository {
     this.writeCloud = options.writeCloud || writeStrategyObject;
     this.deleteCloud = options.deleteCloud || deleteStrategyObject;
     this.listCloudShards = options.listCloudShards || (() => listTenantObjects("strategies-v1/"));
+    this.readProvenanceCloud = options.readProvenanceCloud || readTenantObject;
+    this.writeProvenanceCloud = options.writeProvenanceCloud || writeTenantObject;
+    this.listProvenanceCloud = options.listProvenanceCloud || (() => listTenantObjects("strategy-provenance-v1/"));
 
     // Resolve directories and legacy file paths
     if (filePath && path.extname(filePath) === ".json") {
@@ -235,7 +241,7 @@ export class FileStrategyRepository {
             console.error(`Failed to migrate shard to R2 for tenant ${tenantKey}:`, err?.message || err);
             break;
           }
-          const fresh = await this.readCloud(tenantKey).catch(() => null);
+          const fresh = await this.readCloud(tenantKey, { force: true }).catch(() => null);
           const freshRecord = fresh?.record;
           if (!fresh || fresh.tombstone || (freshRecord && typeof freshRecord === "object" && !Array.isArray(freshRecord) && freshRecord._tombstone)) {
             tombstoned = Boolean(fresh?.tombstone || freshRecord?._tombstone);
@@ -324,7 +330,7 @@ export class FileStrategyRepository {
     // A later authorization must not join a snapshot already received from R2.
     let pending = this.inFlightTenantReads.get(tenantKey);
     if (!pending) {
-      pending = Promise.resolve().then(() => this.readCloud(tenantKey, { clone: false }));
+      pending = Promise.resolve().then(() => this.readCloud(tenantKey, { force: true, clone: false }));
       this.inFlightTenantReads.set(tenantKey, pending);
       const clear = () => { if (this.inFlightTenantReads.get(tenantKey) === pending) this.inFlightTenantReads.delete(tenantKey); };
       pending.then(clear, clear);
@@ -517,44 +523,63 @@ export class FileStrategyRepository {
     return path.join(this.strategiesDir, ".provenance", `${tenantKey}.json`);
   }
 
-  async loadOwnerProvenance(ownerId, now = Date.now()) {
-    if (!ownerId || typeof ownerId !== "string") return [];
-    const tenantKey = this.tenantKey(ownerId);
-    const filePath = this.provenanceFilePath(tenantKey);
+  async readProvenanceFile(tenantKey) {
     try {
-      const raw = await fs.readFile(filePath, "utf8");
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      const { retained, removed } = hydrateOwnerProvenanceEntries(ownerId, parsed, now);
-      if (removed > 0) {
-        if (retained.length === 0) {
-          await fs.rm(filePath, { force: true }).catch(() => {});
-        } else {
-          await writeJsonAtomically(filePath, retained).catch(() => {});
-        }
-      }
-      return retained;
-    } catch {
-      return [];
+      return JSON.parse(await fs.readFile(this.provenanceFilePath(tenantKey), "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") return [];
+      throw error;
     }
   }
 
-  async persistOwnerProvenance(ownerId, now = Date.now()) {
+  async loadOwnerProvenance(ownerId, now = Date.now()) {
+    if (!ownerId || typeof ownerId !== "string") return [];
+    const tenantKey = this.tenantKey(ownerId);
+    try {
+      if (this.cloud) {
+        const { record, notFound } = await this.readProvenanceCloud("strategy-provenance-v1", tenantKey, { force: true });
+        if (record?._tombstone) throw new Error("Tenant deleted");
+        if (!notFound && !Array.isArray(record)) throw new Error("Invalid cloud provenance shard");
+        const legacy = await this.readProvenanceFile(tenantKey);
+        if (!Array.isArray(legacy)) throw new Error("Invalid local provenance shard");
+        hydrateOwnerProvenanceEntries(ownerId, legacy, now);
+        const { retained, removed } = hydrateOwnerProvenanceEntries(ownerId, record || [], now);
+        if (removed || legacy.length) return await this.persistOwnerProvenance(ownerId, now);
+        return retained;
+      }
+      const parsed = await this.readProvenanceFile(tenantKey);
+      if (!Array.isArray(parsed)) throw new Error("Invalid local provenance shard");
+      const { retained, removed } = hydrateOwnerProvenanceEntries(ownerId, parsed, now);
+      if (removed) return await this.persistOwnerProvenance(ownerId, now);
+      return retained;
+    } catch (cause) {
+      throw Object.assign(new Error("Strategy provenance unavailable", { cause }), { code: "PROVENANCE_UNAVAILABLE", status: 503 });
+    }
+  }
+
+  async persistOwnerProvenance(ownerId, now = Date.now(), entry = null) {
     if (!ownerId || typeof ownerId !== "string") return [];
     const tenantKey = this.tenantKey(ownerId);
     const filePath = this.provenanceFilePath(tenantKey);
     return this.lockManager.runInLock(`prov:${tenantKey}`, async () => {
-      let existing = [];
-      try {
-        const raw = await fs.readFile(filePath, "utf8");
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) existing = parsed;
-      } catch {
-        // File does not exist yet
+      if (this.cloud) {
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const { record, etag, notFound } = await this.readProvenanceCloud("strategy-provenance-v1", tenantKey, { force: true });
+          if (record?._tombstone || (!notFound && !Array.isArray(record))) throw new Error("Invalid cloud provenance shard");
+          hydrateOwnerProvenanceEntries(ownerId, record || [], now);
+          if (entry) hydrateOwnerProvenanceEntries(ownerId, [entry], now);
+          const entries = exportOwnerProvenanceEntries(ownerId, now);
+          if (await this.writeProvenanceCloud("strategy-provenance-v1", tenantKey, entries, etag)) {
+            await fs.rm(filePath, { force: true });
+            return entries;
+          }
+        }
+        throw new Error("Strategy provenance write conflict");
       }
-      if (existing.length > 0) {
-        hydrateOwnerProvenanceEntries(ownerId, existing, now);
-      }
+      const existing = await this.readProvenanceFile(tenantKey);
+      if (!Array.isArray(existing)) throw new Error("Invalid local provenance shard");
+      hydrateOwnerProvenanceEntries(ownerId, existing, now);
+      if (entry) hydrateOwnerProvenanceEntries(ownerId, [entry], now);
       const entries = exportOwnerProvenanceEntries(ownerId, now);
       if (entries.length === 0) {
         await fs.rm(filePath, { force: true }).catch(() => {});
@@ -563,18 +588,38 @@ export class FileStrategyRepository {
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await writeJsonAtomically(filePath, entries);
       return entries;
+    }).catch(cause => {
+      throw Object.assign(new Error("Strategy provenance unavailable", { cause }), { code: "PROVENANCE_UNAVAILABLE", status: 503 });
     });
   }
 
   async rememberProvenance(ownerId, strategyOrRecord, meta = {}) {
+    await this.loadOwnerProvenance(ownerId);
     const entry = rememberGroundedStrategyProvenance(ownerId, strategyOrRecord, {
       ...meta,
       forceGrounded: meta.forceGrounded ?? true,
     });
     if (entry) {
-      await this.persistOwnerProvenance(ownerId).catch(() => {});
+      await this.persistOwnerProvenance(ownerId, Date.now(), entry);
     }
     return entry;
+  }
+
+  async deleteOwnerProvenance(ownerId) {
+    const tenantKey = this.tenantKey(ownerId);
+    await this.lockManager.runInLock(`prov:${tenantKey}`, async () => {
+      if (this.cloud) {
+        let deleted = false;
+        for (let attempt = 0; attempt < 12 && !deleted; attempt++) {
+          const { record, etag } = await this.readProvenanceCloud("strategy-provenance-v1", tenantKey, { force: true });
+          deleted = record?._tombstone === true ||
+            await this.writeProvenanceCloud("strategy-provenance-v1", tenantKey, { _tombstone: true }, etag);
+        }
+        if (!deleted) throw new Error("Strategy provenance deletion conflict");
+      }
+      await fs.rm(this.provenanceFilePath(tenantKey), { force: true });
+      clearOwnerProvenance(ownerId);
+    });
   }
 
   async resolveProvenance(ownerId, candidate, existingRecords = null) {
@@ -584,7 +629,7 @@ export class FileStrategyRepository {
     await this.loadOwnerProvenance(ownerId);
     const records = Array.isArray(existingRecords)
       ? existingRecords
-      : await this.readTenant(ownerId, { clone: false }).catch(() => []);
+      : await this.readTenant(ownerId, { clone: false });
     return resolveGroundedStrategyProvenance(ownerId, candidate, records);
   }
 
@@ -648,13 +693,22 @@ export class FileStrategyRepository {
         } catch {}
       }
       if (this.cloud ?? isR2Configured()) {
+        for (const key of await this.listProvenanceCloud().catch(() => [])) {
+          const tenantKey = /^(?:data\/)?strategy-provenance-v1\/([a-f0-9]{64})\.json$/.exec(key)?.[1];
+          if (!tenantKey) continue;
+          try {
+            const { record } = await this.readProvenanceCloud("strategy-provenance-v1", tenantKey, { force: true });
+            const ownerId = Array.isArray(record) && record.find(item => typeof item?.ownerId === "string")?.ownerId;
+            if (ownerId && this.tenantKey(ownerId) === tenantKey) await this.loadOwnerProvenance(ownerId, now);
+          } catch {}
+        }
         const cloudKeys = await this.listCloudShards().catch(() => []);
         for (const rawKey of cloudKeys) {
           if (typeof rawKey !== "string" || !rawKey.endsWith(".json")) continue;
           const stripped = rawKey.replace(/^data\//, "").replace(/^strategies-v1\//, "").replace(/\.json$/, "");
           if (!stripped) continue;
           try {
-            const snap = await this.readCloud(stripped);
+            const snap = await this.readCloud(stripped, { force: true });
             const cloudRecords = snap?.record;
             if (!Array.isArray(cloudRecords)) continue;
             const expiredCount = cloudRecords.filter((r) => isExpiredGroundedStrategyRecord(r, now)).length;
@@ -804,7 +858,7 @@ export class FileStrategyRepository {
    */
   async create(payload, ownerId) {
     if (!ownerId) throw new Error("ownerId is required to create a strategy");
-    await this.loadOwnerProvenance(ownerId).catch(() => {});
+    await this.loadOwnerProvenance(ownerId);
 
     const created = await this.mutateTenant(ownerId, (records) => {
       pruneExpiredGroundedStrategies(records);
@@ -828,9 +882,16 @@ export class FileStrategyRepository {
         return { records, result: null };
       }
 
+      const requestedOrigin = payload.saveOrigin === "generate"
+        ? "generate"
+        : (payload.saveOrigin === "manual" ? "manual" : null);
       if (payload.clientSaveId) {
         const dupIndex = records.findIndex(
-          (record) => record.ownerId === ownerId && record.clientSaveId === payload.clientSaveId
+          (record) =>
+            record.ownerId === ownerId &&
+            record.clientSaveId === payload.clientSaveId &&
+            ((record.saveOrigin || null) === requestedOrigin ||
+              (!record.saveOrigin && !requestedOrigin))
         );
         if (dupIndex !== -1) {
           if (isExpiredGroundedStrategyRecord(records[dupIndex], nowMs)) {
@@ -939,6 +1000,7 @@ export class FileStrategyRepository {
         id: randomUUID(),
         ownerId,
         clientSaveId: payload.clientSaveId,
+        saveOrigin: requestedOrigin,
         payloadFingerprint: payload.payloadFingerprint || null,
         title: effectiveStrategy?.title || "Untitled Strategy",
         brief: payload.brief,
@@ -1278,6 +1340,7 @@ export class FileStrategyRepository {
       if (this.redis?.isReady) {
         await this.redis.del(this.tenantRedisKey(ownerId)).catch(() => {});
       }
+      await this.deleteOwnerProvenance(ownerId);
 
       return count;
     });

@@ -80,13 +80,12 @@ test("AGENTS.md & GEMINI.md: contains Section 10 Zero Clutter Policy rule", asyn
   const agentsMd = await fs.readFile(path.join(process.cwd(), "AGENTS.md"), "utf8");
   const geminiMd = await fs.readFile(path.join(process.cwd(), "GEMINI.md"), "utf8");
 
-  for (const doc of [agentsMd, geminiMd]) {
-    assert.ok(doc.includes("10. UI Card & Teaser Permanent Dismissal (Zero Clutter Policy)"), "Rule 10 title is present");
-    assert.ok(doc.includes("Permanent Dismissal with X / Close"), "X / Close dismissal clause is documented");
-    assert.ok(doc.includes("Zero Temporary Memory / No Session Clutter"), "Zero temporary memory clause is documented");
-    assert.ok(doc.includes("Cross-Mode Cleanliness"), "Cross-mode cleanliness clause is documented");
-    assert.ok(doc.includes("Interaction & Action Dismissal"), "Action dismissal clause is documented");
-  }
+  assert.ok(agentsMd.includes("10. UI Card & Teaser Permanent Dismissal (Zero Clutter Policy)"), "Rule 10 title is present");
+  assert.ok(agentsMd.includes("Permanent Dismissal with X / Close"), "X / Close dismissal clause is documented");
+  assert.ok(agentsMd.includes("Zero Temporary Memory / No Session Clutter"), "Zero temporary memory clause is documented");
+  assert.ok(agentsMd.includes("Cross-Mode Cleanliness"), "Cross-mode cleanliness clause is documented");
+  assert.ok(agentsMd.includes("Interaction & Action Dismissal"), "Action dismissal clause is documented");
+  assert.match(geminiMd, /AGENTS\.md/, "GEMINI.md must reference canonical AGENTS.md");
 });
 
 test("mobile positioning: info cards are placed above the Input Bar and eliminated when a strategy is selected", async () => {

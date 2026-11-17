@@ -493,7 +493,7 @@ export async function deleteTenantObject(prefixOrKey, maybeTenantKey = null) {
 
 // Strategy domain helpers
 export async function readStrategyObject(tenantKey, options = {}) {
-  return readTenantObject("strategies-v1", tenantKey, options);
+  return readTenantObject("strategies-v1", tenantKey, { force: true, ...options });
 }
 
 export async function writeStrategyObject(tenantKey, record, etag = null) {
@@ -506,7 +506,7 @@ export async function deleteStrategyObject(tenantKey) {
 
 // Chat domain helpers
 export async function readChatObject(tenantKey, options = {}) {
-  return readTenantObject("chats-v1", tenantKey, options);
+  return readTenantObject("chats-v1", tenantKey, { force: true, ...options });
 }
 
 export async function writeChatObject(tenantKey, record, etag = null) {
@@ -519,7 +519,7 @@ export async function deleteChatObject(tenantKey) {
 
 // Planner domain helpers
 export async function readPlannerObject(tenantKey, options = {}) {
-  return readTenantObject("planner-v1", tenantKey, options);
+  return readTenantObject("planner-v1", tenantKey, { force: true, ...options });
 }
 
 export async function writePlannerObject(tenantKey, record, etag = null) {
@@ -557,13 +557,21 @@ export async function tombstonePlannerObject(tenantKey, etag = null) {
 
 
 export async function listTenantObjects(prefix) {
-  if (!/^[a-z0-9-]+\/$/.test(prefix)) throw new Error('Invalid storage prefix');
-  if (!isR2Configured()) return [];
-  const keys = []; let token;
+  const keys = [];
+  let cursor;
   do {
-    const page = await getS3Client().send(new ListObjectsV2Command({ Bucket: getBucket(), Prefix: `data/${prefix}`, ContinuationToken: token, MaxKeys: 1000 }));
-    keys.push(...(page.Contents || []).map(item => item.Key));
-    token = page.IsTruncated ? page.NextContinuationToken : undefined;
-  } while (token);
+    const page = await listTenantObjectsPage(prefix, { cursor, limit: 1000 });
+    keys.push(...page.keys);
+    cursor = page.cursor;
+  } while (cursor);
   return keys;
+}
+
+export async function listTenantObjectsPage(prefix, { cursor, limit = 64 } = {}) {
+  if (!/^(?:[a-z0-9-]+\/)+$/.test(prefix)) throw new Error('Invalid storage prefix');
+  if (!isR2Configured()) return { keys: [] };
+  const page = await getS3Client().send(new ListObjectsV2Command({
+    Bucket: getBucket(), Prefix: `data/${prefix}`, ContinuationToken: cursor, MaxKeys: limit,
+  }));
+  return { keys: (page.Contents || []).map(item => item.Key), cursor: page.IsTruncated ? page.NextContinuationToken : undefined };
 }

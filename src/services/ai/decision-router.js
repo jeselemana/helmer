@@ -5,6 +5,7 @@ import {
   hasDecisionApiConfiguration,
 } from "./client.js";
 import { extractJsonFromText } from "./llm-router.js";
+import { assertExecutionActive } from "../security/execution-control.js";
 import { evaluateSearchRoute, hasGroundedAssistantHistory } from "./search-router.js";
 
 export const DECISION_MODEL = "gemini-decision-1";
@@ -661,6 +662,7 @@ export class HelmerDecisionRouter {
       await this._resetFailures();
       return { skipped: false, data: result };
     } catch (error) {
+      assertExecutionActive(error?.name === "AbortError" ? undefined : error, signal);
       if (signal?.aborted && !timeoutSignal.aborted) {
         throw error;
       }
@@ -723,6 +725,14 @@ export class HelmerDecisionRouter {
           abortSignal: composedSignal,
         },
       });
+      const finishReason = response?.candidates?.[0]?.finishReason;
+      const blockReason = response?.promptFeedback?.blockReason;
+      if (["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "RECITATION", "MODEL_ARMOR"].includes(finishReason) ||
+          (blockReason && blockReason !== "BLOCKED_REASON_UNSPECIFIED")) {
+        throw Object.assign(new Error("Request blocked by safety policy."), {
+          code: "AI_SAFETY_BLOCKED", status: 400, isSafetyBlock: true,
+        });
+      }
       const rawText =
         response?.text ||
         response?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("") ||
@@ -731,6 +741,7 @@ export class HelmerDecisionRouter {
       await this._resetFailures("vertex");
       return parsed;
     } catch (error) {
+      assertExecutionActive(error?.name === "AbortError" ? undefined : error, signal);
       if (signal?.aborted && !timeoutSignal.aborted) {
         throw error;
       }
@@ -919,7 +930,8 @@ export class HelmerDecisionRouter {
         latencyMs: Date.now() - startedAt,
       });
     } catch (error) {
-      if (signal?.aborted) throw error;
+      assertExecutionActive(error?.name === "AbortError" ? undefined : error, signal);
+      if (error?.isSafetyBlock || ["AI_SAFETY_BLOCKED", "AI_CONTENT_BLOCKED"].includes(error?.code)) throw error;
     }
 
     // 4. Fallback 2: Deterministic Local Rules
@@ -1095,7 +1107,8 @@ export class HelmerDecisionRouter {
         latencyMs: Date.now() - startedAt,
       };
     } catch (error) {
-      if (signal?.aborted) throw error;
+      assertExecutionActive(error?.name === "AbortError" ? undefined : error, signal);
+      if (error?.isSafetyBlock || ["AI_SAFETY_BLOCKED", "AI_CONTENT_BLOCKED"].includes(error?.code)) throw error;
     }
 
     // 4. Fallback 2: Deterministic Input Analysis -> Gemini 4 Hydrogen (medium or high)

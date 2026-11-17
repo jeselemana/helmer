@@ -182,7 +182,8 @@ test('research across replicas rejects a second job and ordinary requests while 
 test('durable recovery reuses checkpointed phases, preserves deadline and never repeats completed model calls', async t => {
   const f = await researchFixture(t), id = randomUUID(), ownerId = randomUUID(), chatId = randomUUID();
   f.records.set(chatId, { id: chatId, ownerId, messages: [{ id: randomUUID(), jobId: id, type: 'research', role: 'assistant', status: 'running' }] });
-  const saved = { version: 1, id, ownerId, chatId, status: 'running', prompt: 'fixture', language: 'en', privacySnapshot: { enabled: false, epoch: 0 }, deadlineAt: Date.now() + 60000, createdAt: new Date().toISOString(), steps: [], sources: [], artifacts: [], checkpoint: { subqueries: [{ query: 'one', label: 'One' }, { query: 'two', label: 'Two' }], searches: { 0: { text: 'first evidence', sources: [] }, 1: { text: 'second evidence', sources: [] } }, gapResult: { hasGap: false }, synthesis: { rawText: 'Recovered report', metadata: null, response: null } } };
+  const metadata = { groundingChunks: [{ web: { uri: 'https://example.com/report', title: 'Report' } }] };
+  const saved = { version: 1, id, ownerId, chatId, status: 'running', prompt: 'fixture', language: 'en', privacySnapshot: { enabled: false, epoch: 0 }, deadlineAt: Date.now() + 60000, createdAt: new Date().toISOString(), steps: [], sources: [], artifacts: [], checkpoint: { subqueries: [{ query: 'one', label: 'One' }, { query: 'two', label: 'Two' }], searches: { 0: { text: 'first evidence', metadata }, 1: { text: 'second evidence', metadata } }, gapResult: { hasGap: false }, synthesis: { rawText: 'Recovered report', metadata, verifiedResearchSources: true, response: null } } };
   await f.store.mutate(`research:${id}`, () => ({ value: saved }));
   const service = f.make({ models: { generateContent: async () => assert.fail('completed phases must not invoke a model') } });
   await service.resumeOrphanedJobs(); await service.waitForAllJobs();
@@ -349,7 +350,7 @@ test('expired durable research is interrupted without model calls or resetting i
   const f = await researchFixture(t), id = randomUUID(), chatId = randomUUID(), ownerId = randomUUID();
   f.records.set(chatId, { id: chatId, ownerId, messages: [{ id: randomUUID(), jobId: id, type: 'research', status: 'running' }] });
   const deadlineAt = Date.now() - 1;
-  await f.store.mutate(`research:${id}`, () => ({ value: { id, ownerId, chatId, version: 1, status: 'running', deadlineAt, privacySnapshot: { enabled: false, epoch: 0 }, steps: [], sources: [] } }));
+  await f.store.mutate(`research:${id}`, () => ({ value: { id, ownerId, chatId, version: 1, status: 'running', createdAt: new Date().toISOString(), deadlineAt, privacySnapshot: { enabled: false, epoch: 0 }, steps: [], sources: [] } }));
   const service = f.make({ models: { generateContent: async () => assert.fail('expired work cannot invoke models') } });
   await service.resumeOrphanedJobs();
   assert.equal((await f.store.read(`research:${id}`)).status, 'interrupted');
@@ -483,7 +484,7 @@ test('new Research worker fences every old worker checkpoint, status, chat proje
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const chats = new FileChatRepository(path.join(directory, 'chats.json'), null, { cloud: false });
   await chats.saveChat({ id: chatId, ownerId, messages: [{ role: 'assistant', type: 'research', jobId: id, status: 'running', content: '' }] });
-  const saved = { id, ownerId, chatId, status: 'running', version: 1, language: 'en', prompt: 'fixture', deadlineAt: Date.now() + 60000, privacySnapshot: { enabled: false, epoch: 0 }, steps: [], sources: [], artifacts: [], checkpoint: {} };
+  const saved = { id, ownerId, chatId, status: 'running', version: 1, language: 'en', prompt: 'fixture', createdAt: new Date().toISOString(), deadlineAt: Date.now() + 60000, privacySnapshot: { enabled: false, epoch: 0 }, steps: [], sources: [], artifacts: [], checkpoint: {} };
   await f.store.mutate(`research:${id}`, () => ({ value: saved }));
   const first = f.make(), second = f.make(); first.chatRepository = chats; second.chatRepository = chats;
   const old = { ...saved, abortController: new AbortController(), subscribers: new Set() };
@@ -1373,7 +1374,7 @@ test('Priority 7: Grounded interactions are excluded from LearningLoopService tr
   }
 });
 
-test('Priority 8: SignupSchema enforces ageConfirmed literal true when provided and rejects false', async () => {
+test('Priority 8: SignupSchema enforces ageConfirmed literal true and rejects missing or false', async () => {
   const { SignupSchema } = await import('../src/auth/validation.js');
 
   const validWithAge = SignupSchema.safeParse({
@@ -1384,6 +1385,14 @@ test('Priority 8: SignupSchema enforces ageConfirmed literal true when provided 
     ageConfirmed: true,
   });
   assert.equal(validWithAge.success, true);
+
+  const missingAge = SignupSchema.safeParse({
+    fullName: 'Test User',
+    username: 'missing_age_user',
+    email: 'noage@example.com',
+    password: 'StrongPassword123',
+  });
+  assert.equal(missingAge.success, false);
 
   const invalidUnderage = SignupSchema.safeParse({
     fullName: 'Test User',

@@ -34,9 +34,9 @@ test("script.js: technical support card is removed and replaced with clean v3.5 
   assert.ok(!scriptContent.includes("v35-toast-badge"), "Badges are removed from card");
 });
 
-test("i18n.js: release card translations have general subtext and full parity for Helmer 4", () => {
+test("i18n.js: release card translations have general subtext and full parity for Helmer 4.5", () => {
   // Azerbaijani
-  assert.equal(t("announcement.title", {}, "az"), "Helmer 4 istifadənizdədir");
+  assert.equal(t("announcement.title", {}, "az"), "Helmer 4.5 istifadənizdədir");
   assert.equal(
     t("announcement.body", {}, "az"),
     "Yüksək təhlükəsizlik standartlarına cavab verən tamamilə yenilənmiş müasir təməl arxitektura, yeni funksiyalar və daha çoxu. Ətraflı Yeniliklər bölməsində."
@@ -46,7 +46,7 @@ test("i18n.js: release card translations have general subtext and full parity fo
   assert.equal(t("announcement.closeAria", {}, "az"), "Bağla");
 
   // English
-  assert.equal(t("announcement.title", {}, "en"), "Helmer 4 is now available");
+  assert.equal(t("announcement.title", {}, "en"), "Helmer 4.5 is now available");
   assert.ok(t("announcement.body", {}, "en").includes("foundational architecture"));
   assert.equal(t("announcement.dontShow", {}, "en"), "Don't show again");
   assert.equal(t("announcement.cta", {}, "en"), "Got it");

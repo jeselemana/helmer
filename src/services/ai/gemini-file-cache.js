@@ -193,6 +193,15 @@ export class GeminiFileCache {
     return this.cloud ?? isR2Configured();
   }
 
+  _isNotFoundError(err) {
+    return (
+      err?.code === "ENOENT" ||
+      err?.name === "NoSuchKey" ||
+      err?.Code === "NoSuchKey" ||
+      err?.$metadata?.httpStatusCode === 404
+    );
+  }
+
   _ownerHash(ownerId) {
     if (!ownerId || typeof ownerId !== "string") return null;
     return crypto.createHash("sha256").update(ownerId.trim()).digest("hex");
@@ -273,7 +282,10 @@ export class GeminiFileCache {
         }
         if (!record || typeof record !== "object") return null;
         if (record.ownerId !== ownerId || String(record.fileId || "").toLowerCase() !== fileId.toLowerCase()) return null;
-        if (record.expiresAt && record.expiresAt <= Date.now()) return null;
+        if (record.expiresAt && record.expiresAt <= Date.now()) {
+          await this._deletePersistedLocation(loc).catch(() => {});
+          return null;
+        }
         if (!record.data && !record.textContent) return null;
         const entry = {
           ownerId: record.ownerId,
@@ -413,6 +425,23 @@ export class GeminiFileCache {
     return null;
   }
 
+  async _deletePersistedLocation(loc) {
+    if (!loc || !this.persist) return;
+    if (this._isCloud()) {
+      try {
+        await this.deleteCloud(ASK_FILES_PREFIX, loc.cloudKey);
+      } catch (err) {
+        if (!this._isNotFoundError(err)) throw err;
+      }
+      return;
+    }
+    try {
+      await fs.rm(loc.localPath, { force: true });
+    } catch (err) {
+      if (!this._isNotFoundError(err)) throw err;
+    }
+  }
+
   async deleteChatFiles(ownerId, messages = []) {
     if (!ownerId || !Array.isArray(messages) || messages.length === 0) return;
     const fileIds = [...new Set(
@@ -428,12 +457,16 @@ export class GeminiFileCache {
       if (!this.persist) continue;
       const loc = this._storageLocation(ownerId, fileId);
       if (!loc) continue;
-      if (this._isCloud()) {
-        await this.deleteCloud(ASK_FILES_PREFIX, loc.cloudKey).catch(() => {});
-      } else {
-        await fs.rm(loc.localPath, { force: true }).catch(() => {});
-      }
+      await this._deletePersistedLocation(loc);
     }
+  }
+
+  _normalizeCloudKey(rawKey) {
+    if (typeof rawKey !== "string") return "";
+    return rawKey
+      .replace(/^data\//, "")
+      .replace(new RegExp(`^${ASK_FILES_PREFIX}/`), "")
+      .replace(/\.json$/i, "");
   }
 
   async deleteOwnerPersistedFiles(ownerId) {
@@ -442,21 +475,94 @@ export class GeminiFileCache {
     const ownerHash = this._ownerHash(ownerId);
     if (!ownerHash) return;
     if (this._isCloud()) {
-      const keys = await this.listCloud(`${ASK_FILES_PREFIX}/`).catch(() => []);
-      const prefixSegment = `${ASK_FILES_PREFIX}/${ownerHash}-`;
+      const keys = await this.listCloud(`${ASK_FILES_PREFIX}/`);
       for (const key of keys) {
-        if (typeof key !== "string") continue;
-        if (key.includes(prefixSegment)) {
-          await this.deleteCloud(key).catch(() => {});
-        } else if (key.startsWith(`${ownerHash}-`)) {
-          const cleanKey = key.replace(/\.json$/i, "");
-          await this.deleteCloud(ASK_FILES_PREFIX, cleanKey).catch(() => {});
+        const cleanKey = this._normalizeCloudKey(key);
+        if (!cleanKey.startsWith(`${ownerHash}-`)) continue;
+        try {
+          await this.deleteCloud(ASK_FILES_PREFIX, cleanKey);
+        } catch (err) {
+          if (!this._isNotFoundError(err)) throw err;
         }
       }
       return;
     }
     const ownerDir = path.join(this.storageDir, ownerHash);
-    await fs.rm(ownerDir, { recursive: true, force: true }).catch(() => {});
+    try {
+      await fs.rm(ownerDir, { recursive: true, force: true });
+    } catch (err) {
+      if (!this._isNotFoundError(err)) throw err;
+    }
+  }
+
+  async cleanupPersistedExpired(now = Date.now()) {
+    if (!this.persist) return 0;
+    if (this._persistedCleanupPromise) return this._persistedCleanupPromise;
+    this._persistedCleanupPromise = (async () => {
+      let deleted = 0;
+      if (this._isCloud()) {
+        const keys = await this.listCloud(`${ASK_FILES_PREFIX}/`);
+        for (const key of keys) {
+          const cleanKey = this._normalizeCloudKey(key);
+          if (!cleanKey) continue;
+          try {
+            const res = await this.readCloud(ASK_FILES_PREFIX, cleanKey, { force: false });
+            const record = res?.record || null;
+            if (!record || (record.expiresAt && record.expiresAt <= now)) {
+              await this.deleteCloud(ASK_FILES_PREFIX, cleanKey);
+              deleted += 1;
+            }
+          } catch (err) {
+            if (!this._isNotFoundError(err)) throw err;
+          }
+        }
+        return deleted;
+      }
+
+      let ownerDirs = [];
+      try {
+        ownerDirs = await fs.readdir(this.storageDir, { withFileTypes: true });
+      } catch (err) {
+        if (this._isNotFoundError(err)) return 0;
+        throw err;
+      }
+      for (const dirEntry of ownerDirs) {
+        if (!dirEntry.isDirectory()) continue;
+        const ownerDir = path.join(this.storageDir, dirEntry.name);
+        let files = [];
+        try {
+          files = await fs.readdir(ownerDir, { withFileTypes: true });
+        } catch (err) {
+          if (this._isNotFoundError(err)) continue;
+          throw err;
+        }
+        for (const fileEntry of files) {
+          if (!fileEntry.isFile() || !fileEntry.name.endsWith(".json")) continue;
+          const filePath = path.join(ownerDir, fileEntry.name);
+          let expired = false;
+          try {
+            const record = JSON.parse(await fs.readFile(filePath, "utf8"));
+            expired = !record || typeof record !== "object" || (record.expiresAt && record.expiresAt <= now);
+          } catch (err) {
+            if (this._isNotFoundError(err)) continue;
+            expired = true;
+          }
+          if (expired) {
+            try {
+              await fs.rm(filePath, { force: true });
+              deleted += 1;
+            } catch (err) {
+              if (!this._isNotFoundError(err)) throw err;
+            }
+          }
+        }
+        await fs.rmdir(ownerDir).catch(() => {});
+      }
+      return deleted;
+    })().finally(() => {
+      this._persistedCleanupPromise = null;
+    });
+    return this._persistedCleanupPromise;
   }
 
   deleteFile(fileId) {
@@ -474,6 +580,9 @@ export class GeminiFileCache {
       if (entry.expiresAt <= now) {
         this.deleteFile(id);
       }
+    }
+    if (this.persist) {
+      void this.cleanupPersistedExpired(now).catch(() => {});
     }
   }
 

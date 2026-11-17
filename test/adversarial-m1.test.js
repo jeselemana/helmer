@@ -370,7 +370,7 @@ test("ADVERSARIAL: All mutation schemas enforce strict() and reject unexpected f
     {
       name: "SignupSchema",
       schema: SignupSchema,
-      valid: { fullName: "User", username: "user123", email: "u@example.com", password: "Password123!" },
+      valid: { fullName: "User", username: "user123", email: "u@example.com", password: "Password123!", ageConfirmed: true },
       extra: { role: "admin" },
     },
     {
@@ -574,6 +574,7 @@ test("ADVERSARIAL: HTTP endpoints reject extra keys with HTTP 400 and VALIDATION
       username: "new_hacker",
       email: "hacker@example.com",
       password: "StrongPassword123!",
+      ageConfirmed: true,
       role: "admin",
     }),
   });

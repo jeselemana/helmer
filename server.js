@@ -6,8 +6,10 @@ import { createAskService } from './src/services/ai/ask-service.js';
 import { createHelmerDecisionRouter } from './src/services/ai/decision-router.js';
 import { readTenantObject } from "./src/http/r2-storage.js";
 import { z } from "zod";
+import { EmptyBodySchema } from "./src/domain/strategy.js";
 import { isR2Configured, loadJSONFromR2, saveJSONToR2, testR2Connection } from "./src/http/r2-storage.js";
 import express from "express";
+import { createHash } from "node:crypto";
 import { maintenanceMiddleware } from "./src/http/maintenance.js";
 import cors from "cors";
 import fs from "fs";
@@ -41,12 +43,13 @@ import { FileTelemetryRepository } from "./src/repositories/file-telemetry-repos
 import { TelemetryService } from "./src/services/telemetry/telemetry-service.js";
 import { createTelemetryAdminRouter, createTelemetryClientRouter } from "./src/http/telemetry-router.js";
 import { createAdminMfaRouter } from "./src/auth/admin-mfa.js";
-import { validateSecurityConfig, guestDailyLimit, guestBuildDailyLimit } from "./src/services/security/config.js";
-import { AiPolicy, ASK_REQUESTS_PER_MINUTE } from "./src/services/security/ai-policy.js";
+import { validateSecurityConfig, ensureStartupRedisConnection, guestDailyLimit, guestBuildDailyLimit } from "./src/services/security/config.js";
+import { AiPolicy, ASK_REQUESTS_PER_MINUTE, createReplayResourceCheck } from "./src/services/security/ai-policy.js";
 import { configureProviderPolicy } from "./src/services/security/provider-policy.js";
 import { CleanupQueue } from "./src/services/security/cleanup-queue.js";
 import { DurableStore } from "./src/services/security/durable-store.js";
 import { PrivacyPolicy, executionContext } from "./src/services/security/privacy-policy.js";
+import { ResearchJobStore } from "./src/services/security/research-job-store.js";
 import { createRequireAdmin } from "./src/http/admin-authorization.js";
 import { createClient } from "redis";
 import { ArtifactRepository } from "./src/repositories/artifact-repository.js";
@@ -74,16 +77,10 @@ const redis = process.env.REDIS_URL
 
 // Event listeners — createClient-dən SONRA gəlməlidir
 redis?.on("connect", () => console.log("🔥 Redis connected"));
-redis?.on("error", (err) => console.error("❌ Redis error:", err));
+redis?.on("error", (err) => console.error("❌ Redis error:", { name: err?.name, code: err?.code }));
 
-// Render-da auto-reconnect üçün
-if (redis) {
-  try {
-    await redis.connect();
-  } catch (err) {
-    console.error("❌ Redis connection error:", err.message);
-  }
-}
+// İstehsal və ya REQUIRE_REDIS=true olduqda fail-closed Redis bağlantısı
+await ensureStartupRedisConnection(redis, process.env);
 
 const app = express();
 app.set("trust proxy", 1);
@@ -147,7 +144,7 @@ app.use((req, res, next) => {
     "Permissions-Policy": "camera=(), geolocation=(), microphone=()",
     "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
     "Cross-Origin-Resource-Policy": "same-origin",
-    "Content-Security-Policy": "default-src 'self'; script-src 'self' https://accounts.google.com https://challenges.cloudflare.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://*.googleusercontent.com https://lh3.googleusercontent.com; connect-src 'self' https://accounts.google.com https://challenges.cloudflare.com https://cloudflareinsights.com; font-src 'self' data: https://fonts.gstatic.com; frame-src https://accounts.google.com https://challenges.cloudflare.com; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' https://accounts.google.com https://challenges.cloudflare.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://*.googleusercontent.com https://lh3.googleusercontent.com; connect-src 'self' https://accounts.google.com https://challenges.cloudflare.com https://cloudflareinsights.com; font-src 'self' data: https://fonts.gstatic.com; frame-src https://accounts.google.com https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
   });
   next();
 });
@@ -260,9 +257,10 @@ const TELEMETRY_PATH = path.join(DATA_DIR, "telemetry.json");
 const strategyRepository = new FileStrategyRepository(STRATEGIES_PATH, redis);
 const chatRepository = new FileChatRepository(CHATS_PATH, redis);
 const durableStore = new DurableStore(path.join(DATA_DIR, 'security-v4'));
+const researchJobStore = new ResearchJobStore(path.join(DATA_DIR, 'research-jobs-v1'));
 const artifactRepository = new ArtifactRepository(path.join(DATA_DIR, "artifacts"), redis);
 chatRepository.artifactRepository = artifactRepository;
-const cleanupQueue = new CleanupQueue(durableStore, artifactRepository, geminiFileCache);
+const cleanupQueue = new CleanupQueue(durableStore, artifactRepository, geminiFileCache, researchJobStore);
 chatRepository.cleanupQueue = cleanupQueue;
 const pluginRegistry = createPluginRegistry();
 const plannerRepository = new FilePlannerRepository(PLANNER_PATH, redis);
@@ -274,17 +272,21 @@ const guestRetention = new GuestRetention([
 const userRepository = new FileUserRepository(USERS_PATH, redis);
 const authStore = redis?.isReady ? new RedisAuthStore(redis) : new FileAuthStore(AUTH_STORE_PATH);
 const aiLearningRepository = new FileAiLearningRepository(AI_LEARNING_PATH, redis);
-const privacyPolicy = new PrivacyPolicy(userRepository);
+const privacyPolicy = new PrivacyPolicy(userRepository, authStore);
 const learningLoop = new LearningLoopService(aiLearningRepository, undefined, privacyPolicy);
 const telemetryRepository = new FileTelemetryRepository(TELEMETRY_PATH, redis);
 const telemetryService = new TelemetryService(telemetryRepository, privacyPolicy, { strategyRepository });
 const upRepository = new FileUpRepository(path.join(DATA_DIR, "up-v1"));
 const upService = new UpService(upRepository, { telemetry: telemetryService });
 const emailService = new PasswordResetEmailService({ dataDir: DATA_DIR });
+const staticAdminIds = new Set(
+  String(process.env.ADMIN_USER_IDS || '').split(',').map(value => value.trim()).filter(Boolean)
+);
+const resolvedAdminUserIds = new Set();
 const adminUsernames = new Set([
-  ...String(process.env.ADMIN_USER_IDS || '').split(','),
-  ...String(process.env.ADMIN_USERNAMES || '').split(',')
-].map(value => value.trim()).filter(Boolean));
+  ...staticAdminIds,
+  ...String(process.env.ADMIN_USERNAMES || '').split(',').map(value => value.trim()).filter(Boolean),
+]);
 
 async function refreshAdminIdentities() {
   const candidateNames = new Set(
@@ -295,15 +297,26 @@ async function refreshAdminIdentities() {
   );
   if (candidateNames.size === 0) return;
   try {
-    const { users } = await userRepository.readStore();
+    const { users } = await userRepository.readStore({ force: true });
+    const nextResolvedIds = new Set();
     for (const u of users || []) {
       const uName = (u.username || '').toLowerCase().replace(/^@+/, '');
       const uEmail = (u.email || '').toLowerCase();
       if (candidateNames.has(uName) || candidateNames.has(uEmail)) {
-        if (u.emailVerifiedAt && u.status === 'active' && !u.scheduledDeletionAt) {
-          adminUsernames.add(u.id);
+        if (u.emailVerifiedAt && (!u.status || u.status === 'active') && !u.scheduledDeletionAt) {
+          nextResolvedIds.add(u.id);
         }
       }
+    }
+    for (const prevId of resolvedAdminUserIds) {
+      if (!nextResolvedIds.has(prevId) && !staticAdminIds.has(prevId)) {
+        adminUsernames.delete(prevId);
+      }
+    }
+    resolvedAdminUserIds.clear();
+    for (const id of nextResolvedIds) {
+      resolvedAdminUserIds.add(id);
+      adminUsernames.add(id);
     }
   } catch {}
 }
@@ -332,7 +345,7 @@ async function syncAllStores() {
   }
 
   await refreshAdminIdentities();
-  userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
+  userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore, cleanupQueue, researchJobStore }).catch(() => {});
   guestRetention.prune().catch(() => {});
   strategyRepository.pruneInactiveGroundedData().catch(() => {});
   chatRepository.pruneInactiveGroundedData().catch(() => {});
@@ -340,7 +353,7 @@ async function syncAllStores() {
 
 // Periodic background check for expired account deletion (every 1 hour)
 setInterval(() => {
-  userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
+  userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore, cleanupQueue, researchJobStore }).catch(() => {});
   guestRetention.prune().catch(() => {});
   strategyRepository.pruneInactiveGroundedData().catch(() => {});
   chatRepository.pruneInactiveGroundedData().catch(() => {});
@@ -348,17 +361,92 @@ setInterval(() => {
 
 const requireAdmin = createRequireAdmin(adminUsernames);
 const allowParallelAskChats = true;
-const aiPolicy = new AiPolicy({ redis, allowParallelAskChats });
+const aiPolicy = new AiPolicy({
+  redis, allowParallelAskChats,
+  canReplay: createReplayResourceCheck({
+    chatRepository, strategyRepository,
+    getResearchJob: (jobId, ownerId) => researchService.getJob(jobId, ownerId),
+  }),
+});
 configureProviderPolicy(aiPolicy);
 
 
 app.use(guestSession);
 app.use(createIdentityMiddleware({ authStore, userRepository }));
 app.use(privacyPolicy.middleware());
+app.use(['/api/ask', '/api/strategy'], (_req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  next();
+});
 app.use('/api/auth', express.json({ limit: '64kb' }));
+const askResearchJsonParser = express.json({ limit: '64kb' });
 const askGuestJsonParser = express.json({ limit: '512kb' });
 const askAuthJsonParser = express.json({ limit: '25mb' });
-app.use('/api/ask', (req, res, next) => (req.user ? askAuthJsonParser(req, res, next) : askGuestJsonParser(req, res, next)));
+const preParseAskWindows = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, history] of preParseAskWindows.entries()) {
+    const valid = history.filter((ts) => now - ts < 60000);
+    if (valid.length === 0) preParseAskWindows.delete(key);
+    else preParseAskWindows.set(key, valid);
+  }
+}, 5 * 60 * 1000).unref();
+async function askPreParseLoadGuard(req, res, next) {
+  const isResearchSubpath = Boolean(req.baseUrl?.endsWith('/research')) || req.path === '/research' || req.path.startsWith('/research/');
+  const maxBytes = isResearchSubpath
+    ? 64 * 1024
+    : (req.user?.emailVerifiedAt ? 25 * 1024 * 1024 : 512 * 1024);
+  const contentLength = Number.parseInt(req.headers['content-length'] || '', 10);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    return res.status(413).json({ code: 'PAYLOAD_TOO_LARGE', error: 'Sorğu həcmi icazə verilən limiti aşır.' });
+  }
+  const isCreatePost = req.path === '/' || req.path === '/research' || req.path === '/research/';
+  if (req.method === 'POST' && (isCreatePost || isResearchSubpath)) {
+    if (isCreatePost && req.ownerId && typeof researchService?.hasActiveJobForOwner === 'function' && researchService.hasActiveJobForOwner(req.ownerId)) {
+      return res.status(429).json({
+        code: 'EXECUTION_BUSY',
+        error: 'Hazırda başqa tapşırıq icra olunur. Bir az sonra yenidən cəhd edin.',
+        retryable: true,
+      });
+    }
+    const actor = req.user?.id ? `user:${req.user.id}` : `ip:${getClientIp(req)}`;
+    const preLimit = 60;
+    const now = Date.now();
+    if (redis?.isReady && typeof redis.eval === 'function') {
+      try {
+        const bucket = Math.floor(now / 60000);
+        const rlKey = `ask:preparse:${createHash('sha256').update(actor).digest('hex').slice(0, 32)}:${bucket}`;
+        const count = Number(await redis.eval(
+          "local c = redis.call('incr', KEYS[1]); if tonumber(c) == 1 then redis.call('pexpire', KEYS[1], ARGV[1]); end; return c",
+          { keys: [rlKey], arguments: ['60000'] },
+        ));
+        if (Number.isFinite(count) && count > preLimit) {
+          res.setHeader('Retry-After', String(Math.max(1, Math.ceil(((bucket + 1) * 60000 - now) / 1000))));
+          return res.status(429).json({ code: 'RATE_LIMITED', error: 'Hazırda çox sayda Ask sorğusu göndərilib. Zəhmət olmasa bir neçə dəqiqə sonra yenidən cəhd edin.' });
+        }
+        if (Number.isSafeInteger(count) && count > 0) return next();
+      } catch {
+        // Use the local rolling window if Redis fails before parsing.
+      }
+    }
+    const history = (preParseAskWindows.get(actor) || []).filter((ts) => now - ts < 60000);
+    if (history.length >= preLimit) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((history[0] + 60000 - now) / 1000))));
+      return res.status(429).json({ code: 'RATE_LIMITED', error: 'Hazırda çox sayda Ask sorğusu göndərilib. Zəhmət olmasa bir neçə dəqiqə sonra yenidən cəhd edin.' });
+    }
+    history.push(now);
+    preParseAskWindows.set(actor, history);
+  }
+  return next();
+}
+app.use('/api/ask/research', askPreParseLoadGuard, askResearchJsonParser);
+app.use('/api/ask', (req, res, next) => {
+  if (req.path === '/research' || req.path.startsWith('/research/')) return next();
+  return askPreParseLoadGuard(req, res, (err) => {
+    if (err) return next(err);
+    return req.user?.emailVerifiedAt ? askAuthJsonParser(req, res, next) : askGuestJsonParser(req, res, next);
+  });
+});
 app.use(express.json({ limit: '256kb' }));
 app.use(express.urlencoded({ limit: '64kb', extended: false }));
 const MAX_JSON_ARRAY_LENGTH = 250;
@@ -408,6 +496,8 @@ app.use("/api/auth", createAuthRouter({
   upRepository,
   appUrl: APP_URL,
   telemetryService,
+  cleanupQueue,
+  researchJobStore,
 }));
 
 app.use("/api/auth/admin-mfa", createAdminMfaRouter({
@@ -559,7 +649,7 @@ app.post("/api/legal-report", async (req, res) => {
     const userAgent = req.get("user-agent") || "";
     const timestamp = new Date().toISOString();
 
-    // 1. Send email (will be delivered to elemanajes@gmail.com on server side if SMTP configured)
+    // 1. Notify the configured legal-report recipient.
     try {
       await emailService.sendLegalReportEmail({
         issueType: cleanIssueType,
@@ -573,26 +663,32 @@ app.post("/api/legal-report", async (req, res) => {
         userAgent,
         ip,
       });
-    } catch (emailErr) {
-      console.warn("⚠️ Legal report email dispatch warning:", emailErr.message);
+    } catch {
+      console.warn("⚠️ Legal report email dispatch failed");
     }
 
     // 2. Persist audit record in local data store & Cloudflare R2
+    const MAX_LEGAL_REPORTS = 2000;
     try {
-      await mutateLegalReports(reports => reports.unshift({
-        id: `rep_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        issueType: cleanIssueType,
-        description: cleanDescription,
-        userEmail: cleanEmail,
-        userName,
-        userId,
-        model: cleanModel,
-        messageContent: cleanMessageContent,
-        createdAt: timestamp,
-        ip,
-        userAgent,
-        status: "received", // "received" | "in_review" | "resolved"
-      }));
+      await mutateLegalReports((reports) => {
+        reports.unshift({
+          id: `rep_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          issueType: cleanIssueType,
+          description: cleanDescription,
+          userEmail: cleanEmail,
+          userName,
+          userId,
+          model: cleanModel,
+          messageContent: cleanMessageContent,
+          createdAt: timestamp,
+          ip,
+          userAgent,
+          status: "received", // "received" | "in_review" | "resolved"
+        });
+        if (reports.length > MAX_LEGAL_REPORTS) {
+          reports.length = MAX_LEGAL_REPORTS;
+        }
+      });
     } catch (saveErr) {
       throw saveErr;
     }
@@ -602,7 +698,7 @@ app.post("/api/legal-report", async (req, res) => {
       message: "Hüquqi probleminizlə bağlı müraciət qəbul edildi. Təşəkkür edirik!",
     });
   } catch (error) {
-    console.error("❌ Legal report error:", error);
+    console.error("❌ Legal report error:", { name: error?.name, code: error?.code });
     return res.status(500).json({
       error: "Müraciət göndərilərkən xəta baş verdi. Zəhmət olmasa bir az sonra yenidən cəhd edin.",
       code: "REPORT_FAILED",
@@ -761,7 +857,7 @@ app.get("/api/usage/stats", async (req, res, next) => {
       },
     });
   } catch (error) {
-    console.error("Usage stats error:", error);
+    console.error("Usage stats error:", { name: error?.name, code: error?.code });
     return res.status(500).json({ error: "İstifadə statistikasını əldə etmək mümkün olmadı." });
   }
 });
@@ -792,6 +888,7 @@ app.get("/api/ask/chats/:id", async (req, res) => {
 });
 
 app.delete("/api/ask/chats/:id", async (req, res) => {
+  if (!EmptyBodySchema.safeParse(req.body ?? {}).success) return res.status(400).json({ code: "VALIDATION_ERROR" });
   try {
     const { id } = req.params;
     if (!/^[0-9a-f-]{36}$/i.test(id)) {
@@ -825,7 +922,7 @@ setInterval(() => {
 }, 5 * 60 * 1000).unref();
 
 function askRateLimit(limit = 60, windowMs = 10 * 60 * 1000, scope = "ask") {
-  return (req, res, next) => {
+  const applyLocalRateLimit = (req, res, next) => {
     const now = Date.now();
     const clientIp = getClientIp(req);
     const identifier = req.user?.id ? `user:${req.user.id}` : `ip:${clientIp}`;
@@ -841,6 +938,52 @@ function askRateLimit(limit = 60, windowMs = 10 * 60 * 1000, scope = "ask") {
     history.push(now);
     askRequestWindows.set(key, history);
     return next();
+  };
+
+  return (req, res, next) => {
+    if (!redis?.isReady) {
+      return applyLocalRateLimit(req, res, next);
+    }
+    const now = Date.now();
+    const clientIp = getClientIp(req);
+    const identifier = req.user?.id ? `user:${req.user.id}` : `ip:${clientIp}`;
+    const actorDigest = createHash("sha256").update(`${scope}:${identifier}`).digest("hex").slice(0, 32);
+    const windowBucket = Math.floor(now / windowMs);
+    const redisKey = `ask:rl:${scope}:${actorDigest}:${windowBucket}`;
+    const retryAfterSec = Math.max(1, Math.ceil(((windowBucket + 1) * windowMs - now) / 1000));
+
+    return (async () => {
+      try {
+        let count = null;
+        if (typeof redis.eval === "function") {
+          count = Number(
+            await redis.eval(
+              "local c = redis.call('incr', KEYS[1]); if tonumber(c) == 1 then redis.call('pexpire', KEYS[1], ARGV[1]); end; return c",
+              { keys: [redisKey], arguments: [String(windowMs)] },
+            ),
+          );
+        } else if (typeof redis.incr === "function") {
+          count = Number(await redis.incr(redisKey));
+          if (count === 1) {
+            if (typeof redis.pExpire === "function") await redis.pExpire(redisKey, windowMs);
+            else if (typeof redis.expire === "function") await redis.expire(redisKey, Math.max(1, Math.ceil(windowMs / 1000)));
+          }
+        }
+        if (Number.isFinite(count) && count >= 1) {
+          if (count > limit) {
+            res.setHeader("Retry-After", String(retryAfterSec));
+            return res.status(429).json({
+              code: "RATE_LIMITED",
+              error: "Hazırda çox sayda Ask sorğusu göndərilib. Zəhmət olmasa bir neçə dəqiqə sonra yenidən cəhd edin.",
+            });
+          }
+          return next();
+        }
+      } catch {
+        // Fallback to process-local rate window on transient Redis failure
+      }
+      return applyLocalRateLimit(req, res, next);
+    })().catch(next);
   };
 }
 
@@ -869,7 +1012,7 @@ const capabilityWorkflow = new CapabilityWorkflow({
   }),
 });
 const researchService = new ResearchService({
-  jobStore: durableStore, redis, userRepository,
+  jobStore: researchJobStore, redis, userRepository, authStore,
   chatRepository,
   strategyRepository,
   plannerRepository,
@@ -878,8 +1021,12 @@ const researchService = new ResearchService({
   artifactRepository,
 });
 researchService.resumeOrphanedJobs().catch(() => {});
-app.use("/api/ask/research", requireAuth, createResearchRouter({ researchService, chatRepository, rateLimit: askRateLimit(20) }));
-app.use("/api/ask", createAskExecutionGuard({ redis, allowGuest: true, allowParallelChats: allowParallelAskChats, hasActiveJobForOwner: ownerId => researchService.hasActiveJobForOwner(ownerId) }), createCapabilityRouter({ allowGuestChat: true, registry: pluginRegistry, workflow: capabilityWorkflow, artifacts: artifactRepository, chats: chatRepository, strategies: strategyRepository, planner: plannerRepository, rateLimit: foregroundAskRateLimit,
+app.use("/api/ask/research", requireAuth, createResearchRouter({
+  researchService, chatRepository, strategyRepository, plannerRepository, authStore, redis,
+  rateLimit: askRateLimit(20),
+  readRateLimit: askRateLimit(120, 60000, "research-read"),
+}));
+app.use("/api/ask", createAskExecutionGuard({ redis, allowGuest: true, allowParallelChats: allowParallelAskChats, hasActiveJobForOwner: ownerId => researchService.hasActiveJobForOwner(ownerId) }), createCapabilityRouter({ allowGuestChat: true, registry: pluginRegistry, workflow: capabilityWorkflow, artifacts: artifactRepository, chats: chatRepository, strategies: strategyRepository, planner: plannerRepository, rateLimit: foregroundAskRateLimit, cleanupQueue,
   hydrateFile: (file, ownerId) => geminiFileCache.resolveFileAsync(file, ownerId),
   onComplete: ({ req, result }) => telemetryService.trackAskQuery({ ownerId: req.ownerId, sessionId: req.guestOwnerId, model: result.model, latencyMs: Date.parse(result.execution.completedAt) - Date.parse(result.execution.startedAt), usage: result.usage, groundingActive: Boolean(result.groundingMetadata), status: "success", querySnippet: "", onlyNecessaryData: true, modelImprovement: false }).catch(() => {}),
 }));
@@ -890,6 +1037,7 @@ app.post("/api/ask", foregroundAskRateLimit, createAskHandler({
   sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
   generateAsk,
   decisionRouter: createHelmerDecisionRouter({ redis }),
+  cleanupQueue,
 }));
 
 // 🧠 ADMIN PANEL – YALNIZ SƏNİN ÜÇÜN
@@ -986,7 +1134,12 @@ app.use((error, req, res, next) => {
   });
 });
 
-// 📜 Standalone Legal & Google Compliance Pages
+// 📜 Standalone Legal & Product Pages
+app.get(["/about", "/haqqimizda"], (req, res) => {
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  return res.sendFile(path.join(__dirname, "public", "about.html"));
+});
+
 app.get(["/privacy", "/privacy-policy"], (req, res) => {
   res.setHeader("Cache-Control", "public, max-age=3600");
   return res.sendFile(path.join(__dirname, "public", "privacy.html"));

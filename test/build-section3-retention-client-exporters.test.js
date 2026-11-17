@@ -537,6 +537,7 @@ test('Client isolation (script.js): grounded bg job retention, detached Build st
     },
   };
 
+  dom.window.localStorage.setItem('helmer_bg_jobs', JSON.stringify([{ ownerId: 'user-A', brief: 'legacy private brief' }]));
   vm.createContext(context);
   vm.runInContext(
     [
@@ -553,15 +554,16 @@ test('Client isolation (script.js): grounded bg job retention, detached Build st
   const now = Date.now();
   const expiredBgIso = new Date(now - MAX_GROUNDED_CHAT_RETENTION_MS - 60_000).toISOString();
   const freshBgIso = new Date(now - 10 * 86_400_000).toISOString();
-  dom.window.localStorage.setItem('helmer_bg_jobs', JSON.stringify([
+  assert.equal(dom.window.localStorage.getItem('helmer_bg_jobs'), null);
+  context.backgroundJobFixtures = [
     { id: 'bg-expired', ownerId: 'user-A', searchGrounded: true, completedAt: expiredBgIso, strategy: { orchestration: { searchGrounded: true, firstGroundedAt: expiredBgIso } } },
     { id: 'bg-undated', ownerId: 'user-A', searchGrounded: true, strategy: { orchestration: { searchGrounded: true } } },
     { id: 'bg-fresh', ownerId: 'user-A', searchGrounded: true, completedAt: freshBgIso, strategy: { orchestration: { searchGrounded: true, firstGroundedAt: freshBgIso } } },
-  ]));
+  ];
+  vm.runInContext('backgroundJobs = backgroundJobFixtures', context);
   const loadedJobs = context.loadBackgroundJobs();
   assert.deepEqual([...loadedJobs.map(j => j.id)], ['bg-fresh']);
-  const persistedAfterLoad = JSON.parse(dom.window.localStorage.getItem('helmer_bg_jobs'));
-  assert.deepEqual([...persistedAfterLoad.map(j => j.id)], ['bg-fresh']);
+  assert.equal(dom.window.localStorage.getItem('helmer_bg_jobs'), null);
 
   // 2. Detach Build stream + in-flight background autosave + research stream -> helmer:logout aborts all of them
   const streamCtrl = context.currentAbortController;
@@ -569,6 +571,7 @@ test('Client isolation (script.js): grounded bg job retention, detached Build st
   const researchCtrl = new AbortController();
   context.activeResearchStreams.set('job-1', researchCtrl);
   context.minimizeToBackground();
+  assert.equal(dom.window.localStorage.getItem('helmer_bg_jobs'), null);
   assert.equal(streamCtrl.signal.aborted, false, 'minimizeToBackground should detach without aborting');
   const autoSavePromise = context.autoSaveBackgroundJob({ id: 'bg-fresh', ownerId: 'user-A', idempotencyKey: 'k1', brief: 'B', answers: [], strategy: strategyFixture(), versions: [] });
 

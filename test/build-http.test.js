@@ -34,7 +34,12 @@ async function fixture(t) {
       usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 20 } };
   };
   const gemini = wrapProvider({ models: {
-    generateContent: async params => { f.calls.push({ params }); if (params.model === 'gemini-4-carbon' && f.hold) await f.hold; return googleResponse(params); },
+    generateContent: async params => {
+      f.calls.push({ params });
+      await f.onProviderCall?.();
+      if (params.model === 'gemini-4-carbon' && f.hold) await f.hold;
+      return googleResponse(params);
+    },
     generateContentStream: async params => {
       f.calls.push({ params });
       if (f.hold) await f.hold;
@@ -51,6 +56,12 @@ async function fixture(t) {
   f.repository = repository;
   const app = express(); app.use(express.json());
   app.use((req, _res, next) => { req.ownerId = req.get('X-Test-Owner') || ownerA; req.user = users.get(req.ownerId); req.auth = { user: req.user }; next(); });
+  app.use((req, res, next) => {
+    if (f.streamBuffer !== undefined && req.path === '/api/strategy/generate-stream') {
+      Object.defineProperty(res, 'writableLength', { get: () => f.streamBuffer });
+    }
+    next();
+  });
   app.use(new PrivacyPolicy({ findById: async id => users.get(id) }).middleware());
   app.use(policy.middleware());
   const learning = { createInteractionId: randomUUID, recordInteraction: async data => f.learning.push(data) };
@@ -105,6 +116,13 @@ test('Build HTTP: disabled profile consent sends no profile; a no-search decisio
   assert.deepEqual(f.calls[0].params.config.tools, [{ googleSearch: {} }]);
   assert.equal(f.calls[1].params.config.tools, undefined);
   const result = await response.json(); assert.equal(result.strategy.orchestration.searchGrounded, false);
+});
+
+test('Build HTTP: output over the SSE buffer ceiling disconnects the subscriber and stops saving', async t => {
+  const f = await fixture(t);
+  f.streamBuffer = 2 * 1024 * 1024;
+  await assert.rejects(async () => (await f.post('/generate-stream', f.payload())).text());
+  assert.deepEqual(await f.repository.list(f.ownerA), []);
 });
 
 test('Build HTTP: strict fields, missing idempotency header, unverified users and active Research block before model calls', async t => {
@@ -377,6 +395,21 @@ test('Build HTTP blocks grounded refinements before provider calls and learning'
   }
   assert.equal(f.calls.length, callCount);
   assert.equal(f.learning.filter(item => item.taskType?.startsWith('build_refine')).length, 0);
+});
+
+test('Build HTTP revokes a refinement when its saved strategy is deleted during provider execution', async t => {
+  const f = await fixture(t);
+  const saved = await f.repository.create({
+    clientSaveId: randomUUID(), brief: f.payload().brief, answers: [], strategy: strategyFixture(),
+  }, f.ownerA);
+  f.onProviderCall = async () => {
+    f.onProviderCall = null;
+    assert.equal(await f.repository.delete(saved.id, f.ownerA), true);
+  };
+  const response = await f.post(`/${saved.id}/refine`, { action: 'shorten', buildMode: 'faster' });
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).code, 'EXECUTION_REVOKED');
+  assert.equal(await f.repository.getById(saved.id, f.ownerA), null);
 });
 
 test('Build HTTP delivers ungrounded brief with groundingUnavailable and redacts learning when facts cannot be verified', async t => {

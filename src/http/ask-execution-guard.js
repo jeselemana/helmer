@@ -43,12 +43,14 @@ export function createAskExecutionGuard({
 
     if (process.env.NODE_ENV === 'production' && (process.env.REDIS_URL || process.env.REQUIRE_REDIS === 'true') && !redis?.isReady) return res.status(503).json({ code: 'EXECUTION_UNAVAILABLE' });
     const key = shared ? (chatId ? `helmer:ask-lock:${req.ownerId}:chat:${chatId}` : null) : `helmer:ask-lock:${req.ownerId}`;
+    const platformSlotsKey = "helmer:ask:platform-slots";
     const token = randomUUID();
     active.add(target);
     activeOwners.set(req.ownerId, active);
     activeCount++;
 
     let locked = false;
+    let platformSlotAcquired = false;
     let heartbeat;
     let released = false;
 
@@ -59,6 +61,9 @@ export function createAskExecutionGuard({
       active.delete(target);
       if (!active.size) activeOwners.delete(req.ownerId);
       activeCount--;
+      if (platformSlotAcquired && redis?.isReady) {
+        await redis.zRem?.(platformSlotsKey, token).catch(() => {});
+      }
       if (locked && redis?.isReady) {
         await redis.eval(
           "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
@@ -68,6 +73,22 @@ export function createAskExecutionGuard({
     };
 
     try {
+      if (redis?.isReady && typeof redis.eval === "function" && typeof redis.zRem === "function") {
+        const now = Date.now();
+        const admitted = await redis.eval(
+          "redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1]); if redis.call('zcard', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end; redis.call('zadd', KEYS[1], ARGV[3], ARGV[4]); redis.call('pexpire', KEYS[1], 300000); return 1",
+          { keys: [platformSlotsKey], arguments: [String(now), String(capacity), String(now + 240000), token] },
+        );
+        if (admitted !== 1) {
+          await release();
+          return res.status(429).json({
+            error: "Server hazırda yüksək yüklənmə altındadır. Bir az sonra yenidən cəhd edin.",
+            code: "EXECUTION_BUSY",
+            retryable: true,
+          });
+        }
+        platformSlotAcquired = true;
+      }
       if (key && redis?.isReady) {
         locked = await redis.set(key, token, { NX: true, PX: 240000 });
         if (!locked) {
@@ -79,11 +100,20 @@ export function createAskExecutionGuard({
           });
         }
       }
-      if (locked) {
+      if (locked || platformSlotAcquired) {
         heartbeat = setInterval(async () => {
           try {
-            const owned = await redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; return redis.call('pexpire',KEYS[1],240000)", { keys: [key], arguments: [token] });
-            if (!owned) req.securityContext?.controller?.abort(new Error('Execution lease lost'));
+            if (locked) {
+              const owned = await redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; return redis.call('pexpire',KEYS[1],240000)", { keys: [key], arguments: [token] });
+              if (!owned) req.securityContext?.controller?.abort(new Error('Execution lease lost'));
+            }
+            if (platformSlotAcquired && typeof redis.eval === "function") {
+              const now = Date.now();
+              await redis.eval(
+                "local expiry = redis.call('zscore', KEYS[1], ARGV[1]); if not expiry or tonumber(expiry) <= tonumber(ARGV[2]) then return 0 end; redis.call('zadd', KEYS[1], ARGV[3], ARGV[1]); redis.call('pexpire', KEYS[1], 300000); return 1",
+                { keys: [platformSlotsKey], arguments: [token, String(now), String(now + 240000)] },
+              );
+            }
           } catch { req.securityContext?.controller?.abort(new Error('Execution lease unavailable')); }
         }, 30000); heartbeat.unref();
       }

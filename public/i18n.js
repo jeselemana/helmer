@@ -29,11 +29,13 @@ export const TRANSLATIONS = {
       askChat: "Söhbət",
       archive: "Arxiv",
       planner: "Planlaşdırılanlar",
+      deepResearch: "Dərin Araşdırma",
       up: "Helmer UP",
       comingSoon: "Tezliklə",
       limits: "İstifadə",
       installApp: "Tətbiqi yüklə",
       whatsNew: "Yeniliklər",
+      about: "Haqqımızda",
       settings: "Parametrlər",
       search: "Axtarış",
       searchChats: "Axtarış",
@@ -42,6 +44,7 @@ export const TRANSLATIONS = {
       newChat: "Yeni söhbət",
       recentWork: "Son işlər",
       chatHistory: "Söhbət tarixçəsi",
+      more: "Daha çox",
       recentWorkEmptyTitle: "Strategiyalar burada görünəcək.",
       recentWorkEmptySubtitle: "Yadda saxladığın işlər bu bölmədə qalır.",
       recentChatsEmptyTitle: "Söhbətlər burada görünəcək.",
@@ -65,6 +68,43 @@ export const TRANSLATIONS = {
       themeToggleLight: "Light Mode-a keç",
       accountSettings: "Hesab tənzimləmələri",
       openAccountSettings: "Hesab tənzimləmələrini aç",
+    },
+
+    // ── Deep Research Page ─────────────────────────────────────────────────
+    deepResearch: {
+      badge: "Deep Research",
+      welcomeTitle: "Bu gün nəyi dərindən araşdıraq?",
+      welcomeSubtitle: "Bazar dinamikası, rəqib təhlili və mənbəyə əsaslanan ətraflı hesabatlar hazırlayın.",
+      placeholder: "Araşdırmaq istədiyiniz mövzunu və ya sualı yazın...",
+      newResearch: "Yeni araşdırma",
+      exitThread: "Geri",
+      historyTitle: "Tarixçə",
+      historyShowAll: "Hamısı",
+      historyShowLess: "İlk 3",
+      historyEmpty: "Hələ araşdırma tarixçəsi yoxdur.",
+      statusCompleted: "Tamamlandı",
+      statusRunning: "Davam edir",
+      statusFailed: "Xəta",
+      guestRequiredNotice: "Dərin Araşdırma funksiyasından istifadə etmək üçün hesabınıza daxil olun və ya qeydiyyatdan keçin.",
+      sendLabel: "Araşdırmanı başlat",
+      customizationsTitle: "Customizations",
+      googleSearchLabel: "Google Search",
+      googleSearchDesc: "Canlı veb mənbələrdə axtarış",
+      progressStatusRunning: "İcrada",
+      progressStatusCompleted: "Tamamlandı",
+      progressStatusFailed: "Xəta",
+      progressTitleRunning: "Araşdırma aparılır.",
+      progressTitleCompleted: "Araşdırma tamamlandı.",
+      progressTitleFailed: "Araşdırma dayandırıldı.",
+      progressSubtitleRunning: "Dəlillər araşdırılır, perspektivlər müqayisə edilir və ətraflı hesabat hazırlanır.",
+      progressSubtitleCompleted: "Bütün araşdırma mərhələləri yoxlanıldı və hesabatınızda sintez olundu.",
+      progressStagesCaption: "{done} / {total} araşdırma mərhələsi tamamlandı",
+      progressSourcesCollected: "{count} mənbə toplandı",
+      progressSourcesCollecting: "Canlı mənbələr toplanır…",
+      progressShowDetails: "Araşdırma detallarını göstər",
+      progressHideDetails: "Araşdırma detallarını gizlət",
+      navNewBadge: "Yeni",
+      modelUpgradeNotice: "Diqqətinizə çatdırırıq ki, araşdırmaların keyfiyyətinin artırılması məqsədilə yaxın zamanda cari Deep Research modeli yeni və daha təkmilləşdirmiş model ilə əvəzlənəcək. Anlayışınıza görə təşəkkür edirik.",
     },
 
     // ── User Profile Menu ──────────────────────────────────────────────────
@@ -309,19 +349,30 @@ export const TRANSLATIONS = {
         personalIntelligenceOff: "Qeyri-aktivdir",
         clearContext: "Konteksti sil",
         back: "Geri",
+        strategiesTab: "Strategiyalar",
+        briefsTab: "Briflər",
+        briefPrefix: "Brif",
         emptyStrategies: "Arxiv hələ boşdur.",
+        emptyBriefs: "Saxlanılmış brif yoxdur.",
         emptyTasks: "Aktiv planlaşdırılan task yoxdur.",
+        groundedBriefHint: "Veb araşdırmalı — yalnız brif seçilə bilər",
+        groundedBriefToast: "Veb araşdırmalı strategiyanın yalnız orijinal brifi kontekst kimi seçildi.",
+        briefNoTextToast: "Bu qeyd üçün orijinal brif tapılmadı.",
       },
       contextActions: {
         ariaToolbar: "Kontekst üzrə sürətli əməliyyatlar",
         analyze: "Analiz et",
         analyzePrompt: "Bu strategiyanı ətraflı analiz et: əsas güclü və zəif tərəflərini, kritik riskləri və ən vacib inkişaf imkanlarını prioritetləşdir.",
+        briefAnalyzePrompt: "Bu brifi ətraflı analiz et: əsas güclü və zəif tərəflərini, kritik riskləri və ən vacib inkişaf imkanlarını prioritetləşdir.",
         prosAndCons: "Müsbət və mənfi tərəflərini araşdır",
         prosAndConsPrompt: "Bu strategiyanın bütün müsbət və mənfi cəhətlərini obyektiv araşdır, potensial təhlükələri və alternativ yanaşmaları qiymətləndir.",
+        briefProsAndConsPrompt: "Bu brifin əsasında bütün müsbət və mənfi cəhətləri obyektiv araşdır, potensial təhlükələri və alternativ yanaşmaları qiymətləndir.",
         roadmap: "İcra xəritəsi hazırla",
         roadmapPrompt: "Bu strategiyanın uğurla icrası üçün mərhələli fəaliyyət xəritəsi hazırla: addım-addım prioritetlər, zaman qrafiki və əsas KPI-lar daxil olsun.",
+        briefRoadmapPrompt: "Bu brif əsasında uğurlu icra üçün mərhələli fəaliyyət xəritəsi hazırla: addım-addım prioritetlər, zaman qrafiki və əsas KPI-lar daxil olsun.",
         bottlenecks: "Darboğaz və riskləri tap",
         bottlenecksPrompt: "Bu strategiyanın həyata keçirilməsində yarana biləcək əsas darboğazları, resurs çatışmazlıqlarını və uğursuzluq risklərini stress-test et.",
+        briefBottlenecksPrompt: "Bu brif üzrə həyata keçirmə zamanı yarana biləcək əsas darboğazları, resurs çatışmazlıqlarını və uğursuzluq risklərini stress-test et.",
         taskPlan: "İcra planı qur",
         taskPlanPrompt: "Bu tapşırığı uğurla və operativ icra etmək üçün addım-addım konkret plan və ən yaxşı təcrübələri təqdim et.",
         taskBlockers: "Maneə və riskləri tap",
@@ -908,9 +959,9 @@ export const TRANSLATIONS = {
       desktopStep3Desc: "Helmer ayrıca müstəqil masaüstü tətbiqi pəncərəsində açılacaqdır.",
     },
 
-    // ── Helmer 4 Release Card ──────────────────────────────────────────────
+    // ── Helmer 4.5 Release Card ──────────────────────────────────────────────
     announcement: {
-      title: "Helmer 4 istifadənizdədir",
+      title: "Helmer 4.5 istifadənizdədir",
       body: "Yüksək təhlükəsizlik standartlarına cavab verən tamamilə yenilənmiş müasir təməl arxitektura, yeni funksiyalar və daha çoxu. Ətraflı Yeniliklər bölməsində.",
       dontShow: "Bir daha göstərmə",
       cta: "Anladım",
@@ -933,23 +984,98 @@ export const TRANSLATIONS = {
       historyBadge: "Əvvəlki buraxılış",
       feedbackBtn: "Rəy bildir",
       feedbackSubject: "Helmer Rəyi və Təklifi",
+      footerNote: "Helmer mütəmadi olaraq yenilənir",
+      updatesCountLabel: "yenilik",
+      expandLabel: "Detalları göstər",
+      collapseLabel: "Yığ",
       versions: [
         {
-          version: "v4.0",
-          name: "Helmer v4.0",
-          subtitle: "Yüksək təhlükəsizlik standartlarına cavab verən yeni müasir təməl arxitektura",
+          version: "v4.5",
+          name: "Helmer 4.5",
+          subtitle: "Helmer-i ciddi məhsul səviyyəsinə gətirdik",
+          summary: "Daha sürətli cavablar, yenilənmiş interfeys və gündəlik işdə tam etibarlılıq.",
           status: "Cari versiya",
-          date: "Oktyabr 2026",
+          date: "Noyabr 2026",
           isCurrent: true,
           isUpcoming: false,
           highlights: [
-            "Yüksək təhlükəsizlik standartlarına cavab verən yeni müasir təməl arxitektura: Zero-trust modeli, ciddi tenant izolasiyası, worker thread sandbox mühiti və qorunan sistem bütövlüyü.",
-            "HelmerUp gamification biznes məşqləri: Praktiki biznes sualları və ssenariləri, cavablandırma ilə xal (XP) qazanılması, streak izlənməsi və interaktiv bacarıq inkişafı.",
-            "Ask rejimində Deep Research: Build rejiminin tam ekvivalenti olan dərin analitik araşdırma mühərriki, ultra-sürətli çıxış generasiyası və strukturlaşdırılmış bazar icmalı.",
-            "Ask daxilində tamhüquqlu fayl və sənəd generasiyası: Birbaşa sistem daxilində peşəkar Word (.docx), Excel (.xlsx), PDF və PowerPoint (.pptx) fayllarının hazırlanması və ixracı.",
-            "Build rejimində Search Grounding: Canlı veb axtarış inteqrasiyası ilə real bazar məlumatlarına, rəqib analitikasına və ən son faktlara əsaslanan dəqiq strateji çıxışlar.",
-            "Modellərin yüksək çıxış keyfiyyəti və ciddi təlimatlar: Analitik dəqiqliyi, icra detallarını və strateji dərinliyi maksimum dərəcədə artıran sərtləşdirilmiş sistem təlimatları.",
-            "Çoxmodeli kollektiv icra: Tək bir sorğu üzərində bir neçə ixtisaslaşmış intellektual modelin eyni vaxtda koordinasiyalı və sinxron çalışması.",
+            {
+              tag: "Dizayn",
+              tagType: "improvement",
+              title: "Yenilənmiş naviqasiya və Planner",
+              desc: "Daha təmiz yan panel, yenilənmiş Planner görünüşü, cilalanmış qaranlıq rejim və mobil ekranlara tam uyğunlaşdırma.",
+            },
+            {
+              tag: "Sürət",
+              tagType: "feature",
+              title: "Daha sürətli və axıcı cavablar",
+              desc: "Ask və Build rejimlərində cavabların gecikmədən, axıcı şəkildə yazılması və paralel söhbət dəstəyi.",
+            },
+            {
+              tag: "Dəqiqlik",
+              tagType: "new",
+              title: "Daha ağıllı axtarış və fokus",
+              desc: "Veb axtarışının yalnız lazım olduqda işə düşməsi, kontekst tövsiyələri və artıq bildirişlərdən təmizlənmiş iş sahəsi.",
+            },
+            {
+              tag: "Etibarlılıq",
+              tagType: "security",
+              title: "Sorunsuz giriş və hesab qorunması",
+              desc: "Google ilə daha rahat giriş, hesablararası tam məxfilik və tapşırıqların itmədən yadda saxlanması.",
+            },
+          ],
+        },
+        {
+          version: "v4.0",
+          name: "Helmer v4.0",
+          subtitle: "Müasir təməl arxitektura və yüksək təhlükəsizlik",
+          status: "Buraxılış",
+          date: "Oktyabr 2026",
+          isCurrent: false,
+          isUpcoming: false,
+          highlights: [
+            {
+              tag: "Təhlükəsizlik",
+              tagType: "security",
+              title: "Zero-trust təməl arxitektura",
+              desc: "Ciddi tenant izolasiyası, worker thread sandbox mühiti və qorunan sistem bütövlüyü.",
+            },
+            {
+              tag: "Funksiya",
+              tagType: "feature",
+              title: "HelmerUp biznes məşqləri",
+              desc: "Praktiki ssenarilər, XP xal sistemi, gündəlik streak və interaktiv bacarıq inkişafı.",
+            },
+            {
+              tag: "Yeni",
+              tagType: "new",
+              title: "Ask Deep Research",
+              desc: "Build rejiminin tam ekvivalenti olan sürətli və strukturlaşdırılmış bazar araşdırma mühərriki.",
+            },
+            {
+              tag: "Yeni",
+              tagType: "new",
+              title: "Ask daxilində sənəd ixracı",
+              desc: "Birbaşa söhbət içindən Word (.docx), Excel (.xlsx), PDF və PowerPoint (.pptx) generasiyası.",
+            },
+            {
+              tag: "Təkmilləşdirmə",
+              tagType: "improvement",
+              title: "Build-də Search Grounding",
+              desc: "Canlı veb axtarış ilə real bazar məlumatlarına və faktlara əsaslanan strategiyalar.",
+            },
+            {
+              tag: "Təkmilləşdirmə",
+              tagType: "improvement",
+              title: "Yüksək çıxış keyfiyyəti",
+              desc: "Analitik dəqiqliyi və strateji dərinliyi artıran sərtləşdirilmiş sistem təlimatları.",
+            },
+            {
+              tag: "Funksiya",
+              tagType: "feature",
+              title: "Çoxmodeli kollektiv icra",
+              desc: "Bir sorğu üzərində bir neçə ixtisaslaşmış modelin koordinasiyalı və sinxron çalışması.",
+            },
           ],
         },
         {
@@ -961,9 +1087,24 @@ export const TRANSLATIONS = {
           isCurrent: false,
           isUpcoming: false,
           highlights: [
-            "Dərin model kalibrasiyası: Epistemic humility, faktiki dəqiqlik, hallüsinasiya risklərinin minimuma endirilməsi və canlı web search grounding.",
-            "Context-Aware Azerbaijan Market Engine: Yerli istehlakçı psixologiyası, ödənişlər, B2C/B2B kanalları və bazar reallıqları üzrə adaptasiya.",
-            "İnterfeys təkmilləşdirmələri: UI/UX cilalanması, sistem sabitliyi və qarşılıqlı əlaqə xətalarının aradan qaldırılması.",
+            {
+              tag: "Təkmilləşdirmə",
+              tagType: "improvement",
+              title: "Dərin model kalibrasiyası",
+              desc: "Faktiki dəqiqlik, hallüsinasiya risklərinin azaldılması və canlı web search grounding.",
+            },
+            {
+              tag: "Funksiya",
+              tagType: "feature",
+              title: "Azerbaijan Market Engine",
+              desc: "Yerli istehlakçı psixologiyası, ödənişlər və B2C/B2B bazar reallıqları üzrə adaptasiya.",
+            },
+            {
+              tag: "UI/UX",
+              tagType: "improvement",
+              title: "İnterfeys təkmilləşdirmələri",
+              desc: "UI/UX cilalanması, sistem sabitliyi və qarşılıqlı əlaqə xətalarının aradan qaldırılması.",
+            },
           ],
         },
         {
@@ -974,7 +1115,12 @@ export const TRANSLATIONS = {
           date: "Avqust 2026",
           isCurrent: false,
           highlights: [
-            "Avtonom iş axınları: Çoxmərhələli iş axınları və dərindən strukturlaşdırılmış icra planlaması.",
+            {
+              tag: "Funksiya",
+              tagType: "feature",
+              title: "Avtonom iş axınları",
+              desc: "Çoxmərhələli iş axınları və dərindən strukturlaşdırılmış icra planlaması.",
+            },
           ],
         },
         {
@@ -985,7 +1131,12 @@ export const TRANSLATIONS = {
           date: "Noyabr 2025",
           isCurrent: false,
           highlights: [
-            "Avtonom iş rejiminə keçid və dinamik strategiya generasiyası.",
+            {
+              tag: "Funksiya",
+              tagType: "feature",
+              title: "Dinamik strategiya generasiyası",
+              desc: "Avtonom iş rejiminə keçid və dinamik strategiya generasiyası.",
+            },
           ],
         },
         {
@@ -996,7 +1147,12 @@ export const TRANSLATIONS = {
           date: "Dekabr 2024",
           isCurrent: false,
           highlights: [
-            "İlkin təməl arxitektura və platformanın ilkin MVP buraxılışı.",
+            {
+              tag: "Yeni",
+              tagType: "new",
+              title: "İlkin MVP buraxılışı",
+              desc: "İlkin təməl arxitektura və platformanın ilk istifadəyə verilməsi.",
+            },
           ],
         },
       ],
@@ -1012,26 +1168,26 @@ export const TRANSLATIONS = {
       ariaRegion: "Başlanğıc bələdçisi kartları",
       buildCardAria: "Build rejimi başlanğıc bələdçisini aç",
       askCardAria: "Ask rejimi başlanğıc bələdçisini aç",
-      modalTitleBuild: "Build Rejimi: Necə başlamalı?",
-      modalTitleAsk: "Ask Rejimi: Necə başlamalı?",
-      tabBuild: "Build rejimi",
-      tabAsk: "Ask rejimi",
-      principleHeading: "İş prinsipi",
-      buildPrinciple: "Helmer sizin biznes ideyanızı, startap layihənizi və ya inkişaf hədəfinizi dərin bazar analizi, rəqabət üstünlükləri, maliyyə və marketinq addımları ilə zənginləşdirilmiş icra oluna bilən tam strategiyaya çevirir. Yaradılan strategiyanı Word (.docx), Excel (.xlsx), PowerPoint (.pptx) və PDF sənədləri kimi ixrac edə və ya addımları birbaşa Planner lövhəsinə tapşırıq olaraq əlavə edə bilərsiniz.",
-      askPrinciple: "Ask rejimi sizin 7/24 fəaliyyət göstərən strateji biznes məsləhətçinizdir. Canlı Google axtarışı (Grounding) ilə internetdən ən son faktiki məlumatları toplayır, sənədlərinizi və şəkillərinizi (PDF, Excel, Word, şəkillər) təhlil edir, arxivinizdəki strategiyalar və ya Planner tapşırıqları kontekstində dəqiq, əsaslandırılmış cavablar təqdim edir.",
-      stepsHeading: "3 sadə addımla başla",
-      buildStep1Title: "1. İdeyanı və ya məqsədini yaz",
-      buildStep1Desc: "Nə etmək istədiyini 1-2 cümlə ilə qeyd et (məs: «Bakıda B2B qəhvə çatdırılması xidməti açmaq istəyirəm») və ya '+' düyməsi ilə hazır şablon seç.",
-      buildStep2Title: "2. Dəqiqləşdirici sualları cavabla",
-      buildStep2Desc: "Helmer ehtiyac olduqda büdcə, hədəf kütlə və coğrafiya haqqında qısa suallar verərək strategiyanı dəqiqləşdirəcək.",
-      buildStep3Title: "3. Strategiyanı əldə et və icra et",
-      buildStep3Desc: "Bir neçə dəqiqəyə bazar təhlili, SWOT və fəaliyyət planın hazır olacaq. Sənədləri yüklə və ya Planner-də icraya başla.",
-      askStep1Title: "1. Sualını ver və ya fayl əlavə et",
-      askStep1Desc: "Biznes, maliyyə, marketinq və ya əməliyyatla bağlı istənilən sualı yaz və ya sənəd/cədvəl yükləyərək təhlil istə.",
-      askStep2Title: "2. Kontekst əlaqələndir ('+' menyusu)",
-      askStep2Desc: "Daha hədəfli cavab üçün arxivdəki strategiyanı və ya Planner tapşırığını seçərək sualını həmin kontekstə bağla.",
-      askStep3Title: "3. Düşünmə səviyyəsini seç",
-      askStep3Desc: "Mürəkkəb strateji qərarlar və dərin təhlil üçün 'High' düşünmə səviyyəsini aktivləşdirərək əsaslandırılmış arqumentlər əldə et.",
+      modalTitleBuild: "Build rejimi",
+      modalTitleAsk: "Ask rejimi",
+      tabBuild: "Build",
+      tabAsk: "Ask",
+      principleHeading: "Əsas imkanlar",
+      buildPrinciple: "Biznes məqsədinizi strukturlaşdırılmış bazar analizi, rəqabət mövqeyi və icra yol xəritəsinə çevirir. Hazır strategiyanı Word, Excel, PowerPoint və ya PDF kimi ixrac edə, addımları isə Planner-ə göndərə bilərsiniz.",
+      askPrinciple: "Canlı Google axtarışı, sənəd təhlili (PDF, Excel, Word, şəkil) və saxlanılmış strategiya/Planner konteksti ilə ani strateji məsləhət verir.",
+      stepsHeading: "İş axını",
+      buildStep1Title: "Məqsədi daxil edin",
+      buildStep1Desc: "Məhsul, bazar və ya hədəfi 1–2 cümlə ilə yazın.",
+      buildStep2Title: "Parametrləri dəqiqləşdirin",
+      buildStep2Desc: "Lazım gəldikdə büdcə, auditoriya və coğrafiya üzrə qısa sualları cavablayın.",
+      buildStep3Title: "İxrac və icra",
+      buildStep3Desc: "Yol xəritəsini sənəd kimi yükləyin və ya Planner lövhəsində izləyin.",
+      askStep1Title: "Sual verin və ya fayl əlavə edin",
+      askStep1Desc: "İstənilən biznes sualını yazın və ya analiz üçün sənəd yükləyin.",
+      askStep2Title: "Kontekst və plaginlər bağlayın",
+      askStep2Desc: "Arxiv strategiyasını, Planner tapşırığını və ya '@' ilə plagini seçin.",
+      askStep3Title: "Düşünmə səviyyəsini seçin",
+      askStep3Desc: "Mürəkkəb qərarlar üçün dərin təhlil (High) rejimini aktivləşdirin.",
       examplesHeading: "Nümunə sorğular",
       buildExample1: "B2B SaaS məhsulu üçün 6 aylıq bazara çıxış (Go-to-market) strategiyası",
       buildExample2: "Bakıda premium qəhvə çatdırılması startapı üçün icra planı və rəqib analizi",
@@ -1067,11 +1223,13 @@ export const TRANSLATIONS = {
       askChat: "Chat",
       archive: "Archive",
       planner: "Planner",
+      deepResearch: "Deep Research",
       up: "Helmer UP",
       comingSoon: "Coming soon",
       limits: "Usage",
       installApp: "Install App",
       whatsNew: "What's new",
+      about: "About",
       settings: "Settings",
       search: "Search",
       searchChats: "Search",
@@ -1080,6 +1238,7 @@ export const TRANSLATIONS = {
       newChat: "New Chat",
       recentWork: "Recent Work",
       chatHistory: "Chat History",
+      more: "More",
       recentWorkEmptyTitle: "No strategies yet",
       recentWorkEmptySubtitle: "Your saved strategies and roadmaps will appear here.",
       recentChatsEmptyTitle: "No conversations yet",
@@ -1103,6 +1262,43 @@ export const TRANSLATIONS = {
       themeToggleLight: "Switch to Light Mode",
       accountSettings: "Account Settings",
       openAccountSettings: "Open account settings",
+    },
+
+    // ── Deep Research Page ─────────────────────────────────────────────────
+    deepResearch: {
+      badge: "Deep Research",
+      welcomeTitle: "What should we research in depth today?",
+      welcomeSubtitle: "Generate source-backed market dynamics, competitor intelligence, and structured analytical briefs.",
+      placeholder: "Describe the topic or question you want researched in depth...",
+      newResearch: "New research",
+      exitThread: "Back",
+      historyTitle: "History",
+      historyShowAll: "Show all",
+      historyShowLess: "Top 3",
+      historyEmpty: "No research history yet.",
+      statusCompleted: "Completed",
+      statusRunning: "In progress",
+      statusFailed: "Failed",
+      guestRequiredNotice: "Sign in or create an account to run Deep Research.",
+      sendLabel: "Start research",
+      customizationsTitle: "Customizations",
+      googleSearchLabel: "Google Search",
+      googleSearchDesc: "Search live web sources",
+      progressStatusRunning: "In progress",
+      progressStatusCompleted: "Complete",
+      progressStatusFailed: "Failed",
+      progressTitleRunning: "Research in progress.",
+      progressTitleCompleted: "Research complete.",
+      progressTitleFailed: "Research interrupted.",
+      progressSubtitleRunning: "Exploring evidence, comparing perspectives, and building a comprehensive report.",
+      progressSubtitleCompleted: "All research stages verified and synthesized into your report.",
+      progressStagesCaption: "{done} of {total} research stages completed",
+      progressSourcesCollected: "{count} sources collected",
+      progressSourcesCollecting: "Collecting live sources…",
+      progressShowDetails: "Show research details",
+      progressHideDetails: "Hide research details",
+      navNewBadge: "New",
+      modelUpgradeNotice: "Please note that to further improve research quality, the current Deep Research model will soon be replaced with a new, enhanced model. Thank you for your understanding.",
     },
 
     // ── User Profile Menu ──────────────────────────────────────────────────
@@ -1340,19 +1536,30 @@ export const TRANSLATIONS = {
         personalIntelligenceOff: "Disabled",
         clearContext: "Clear context",
         back: "Back",
+        strategiesTab: "Strategies",
+        briefsTab: "Briefs",
+        briefPrefix: "Brief",
         emptyStrategies: "Archive is currently empty.",
+        emptyBriefs: "No saved briefs available.",
         emptyTasks: "No active tasks in Planner.",
+        groundedBriefHint: "Web researched — original brief only",
+        groundedBriefToast: "Selected original brief only because this strategy used web research.",
+        briefNoTextToast: "Original brief is not available for this item.",
       },
       contextActions: {
         ariaToolbar: "Context quick actions",
         analyze: "Analyze",
         analyzePrompt: "Analyze this strategy in detail: identify core strengths, weaknesses, critical risks, and highest-impact growth opportunities.",
+        briefAnalyzePrompt: "Analyze this brief in detail: identify core strengths, weaknesses, critical risks, and highest-impact opportunities.",
         prosAndCons: "Explore pros & cons",
         prosAndConsPrompt: "Critically evaluate the pros and cons of this strategy, highlighting potential pitfalls, trade-offs, and alternative approaches.",
+        briefProsAndConsPrompt: "Critically evaluate the pros and cons based on this brief, highlighting potential pitfalls, trade-offs, and alternative approaches.",
         roadmap: "Build execution roadmap",
         roadmapPrompt: "Create a step-by-step execution roadmap for this strategy: include phased milestones, timeline, and key performance indicators.",
+        briefRoadmapPrompt: "Create a step-by-step execution roadmap based on this brief: include phased milestones, timeline, and key performance indicators.",
         bottlenecks: "Find bottlenecks & risks",
         bottlenecksPrompt: "Stress-test this strategy to uncover potential execution bottlenecks, resource constraints, and strategic risks.",
+        briefBottlenecksPrompt: "Stress-test this brief to uncover potential execution bottlenecks, resource constraints, and key risks.",
         taskPlan: "Create action plan",
         taskPlanPrompt: "Provide a concrete step-by-step action plan and best practices to execute this task efficiently.",
         taskBlockers: "Identify blockers & risks",
@@ -1939,9 +2146,9 @@ export const TRANSLATIONS = {
       desktopStep3Desc: "Helmer will open in its own distraction-free app window.",
     },
 
-    // ── Helmer 4 Release Card ──────────────────────────────────────────────
+    // ── Helmer 4.5 Release Card ──────────────────────────────────────────────
     announcement: {
-      title: "Helmer 4 is now available",
+      title: "Helmer 4.5 is now available",
       body: "Completely revamped modern foundational architecture meeting high security standards, new features, and much more. Details in the What's new section.",
       dontShow: "Don't show again",
       cta: "Got it",
@@ -1964,23 +2171,98 @@ export const TRANSLATIONS = {
       historyBadge: "Previous Release",
       feedbackBtn: "Send Feedback",
       feedbackSubject: "Helmer Feedback & Suggestions",
+      footerNote: "Helmer ships continuous improvements",
+      updatesCountLabel: "updates",
+      expandLabel: "Show details",
+      collapseLabel: "Collapse",
       versions: [
+        {
+          version: "v4.5",
+          name: "Helmer 4.5",
+          subtitle: "Bringing Helmer to a serious product standard",
+          summary: "Faster responses, a refreshed interface, and rock-solid reliability in everyday work.",
+          status: "Current Version",
+          date: "November 2026",
+          isCurrent: true,
+          isUpcoming: false,
+          highlights: [
+            {
+              tag: "Design",
+              tagType: "improvement",
+              title: "Refreshed navigation and Planner",
+              desc: "Cleaner sidebar, redesigned Planner view, polished dark mode, and smoother mobile screens.",
+            },
+            {
+              tag: "Speed",
+              tagType: "feature",
+              title: "Faster, smoother responses",
+              desc: "Near-instant response start, fluid streaming in Ask and Build, and parallel chat support.",
+            },
+            {
+              tag: "Accuracy",
+              tagType: "new",
+              title: "Smarter search and focus",
+              desc: "Web search triggers only when needed, paired with context suggestions and a clutter-free workspace.",
+            },
+            {
+              tag: "Reliability",
+              tagType: "security",
+              title: "Seamless sign-in and account safety",
+              desc: "Smoother Google sign-in, strict account privacy, and reliable task saving without lost edits.",
+            },
+          ],
+        },
         {
           version: "v4.0",
           name: "Helmer v4.0",
           subtitle: "Modern foundational architecture meeting high security standards",
-          status: "Current Version",
+          status: "Release",
           date: "October 2026",
-          isCurrent: true,
+          isCurrent: false,
           isUpcoming: false,
           highlights: [
-            "Modern foundational architecture meeting high security standards: Zero-trust architecture, strict tenant isolation, worker thread sandboxing, and immutable system integrity.",
-            "HelmerUp gamified business workouts: Practical business challenges and scenarios, score & points (XP) rewards upon answering, daily streak tracking, and interactive skill building.",
-            "Ask Deep Research: Full equivalent of Build mode deep research engine delivering ultra-fast output and comprehensive market intelligence.",
-            "Direct document generation in Ask: High-fidelity creation and export of Word (.docx), Excel (.xlsx), PDF, and PowerPoint (.pptx) documents directly inside Ask mode.",
-            "Search Grounding in Build mode: Real-time web search integration grounding strategies in live market data, competitive intelligence, and verified facts.",
-            "Enhanced model output quality & strict instruction tuning: Rigorous system prompts and calibration maximizing analytical depth, factual rigor, and actionable granularity.",
-            "Multi-model collaborative execution: Seamless orchestration where multiple specialized intelligence models collaborate concurrently on a single query.",
+            {
+              tag: "Security",
+              tagType: "security",
+              title: "Zero-trust foundational architecture",
+              desc: "Strict tenant isolation, worker thread sandboxing, and immutable system integrity.",
+            },
+            {
+              tag: "Feature",
+              tagType: "feature",
+              title: "HelmerUp business workouts",
+              desc: "Practical business scenarios, XP rewards, daily streaks, and interactive skill building.",
+            },
+            {
+              tag: "New",
+              tagType: "new",
+              title: "Ask Deep Research",
+              desc: "Full equivalent of Build mode deep research delivering ultra-fast market intelligence.",
+            },
+            {
+              tag: "New",
+              tagType: "new",
+              title: "Direct document export in Ask",
+              desc: "Create and export Word (.docx), Excel (.xlsx), PDF, and PowerPoint (.pptx) files directly in chat.",
+            },
+            {
+              tag: "Improvement",
+              tagType: "improvement",
+              title: "Search Grounding in Build mode",
+              desc: "Real-time web search grounding strategies in live market data and verified facts.",
+            },
+            {
+              tag: "Improvement",
+              tagType: "improvement",
+              title: "Enhanced model output quality",
+              desc: "Rigorous instruction tuning maximizing analytical depth and actionable clarity.",
+            },
+            {
+              tag: "Feature",
+              tagType: "feature",
+              title: "Multi-model collaborative execution",
+              desc: "Coordinated orchestration where specialized models collaborate concurrently on one query.",
+            },
           ],
         },
         {
@@ -1992,9 +2274,24 @@ export const TRANSLATIONS = {
           isCurrent: false,
           isUpcoming: false,
           highlights: [
-            "Deep model calibration: Epistemic humility, factual accuracy, minimized hallucination risk, and grounded live web search retrieval.",
-            "Context-Aware Azerbaijan Market Engine: Local consumer psychology, payment rails, B2C/B2B channels, and market realities.",
-            "Interface enhancements: UI/UX refinement, system stabilization, and interaction polish.",
+            {
+              tag: "Improvement",
+              tagType: "improvement",
+              title: "Deep model calibration",
+              desc: "Epistemic humility, factual accuracy, reduced hallucination risk, and live web grounding.",
+            },
+            {
+              tag: "Feature",
+              tagType: "feature",
+              title: "Azerbaijan Market Engine",
+              desc: "Adapted for local consumer psychology, payment rails, and B2C/B2B market realities.",
+            },
+            {
+              tag: "UI/UX",
+              tagType: "improvement",
+              title: "Interface enhancements",
+              desc: "UI/UX refinement, system stabilization, and interaction polish.",
+            },
           ],
         },
         {
@@ -2005,7 +2302,12 @@ export const TRANSLATIONS = {
           date: "August 2026",
           isCurrent: false,
           highlights: [
-            "Autonomous workflows: Multi-step workflows and deeply structured execution planning.",
+            {
+              tag: "Feature",
+              tagType: "feature",
+              title: "Autonomous workflows",
+              desc: "Multi-step workflows and deeply structured execution planning.",
+            },
           ],
         },
         {
@@ -2016,7 +2318,12 @@ export const TRANSLATIONS = {
           date: "November 2025",
           isCurrent: false,
           highlights: [
-            "Transition to autonomous execution mode and dynamic strategy generation.",
+            {
+              tag: "Feature",
+              tagType: "feature",
+              title: "Dynamic strategy generation",
+              desc: "Transition to autonomous execution mode and dynamic strategy generation.",
+            },
           ],
         },
         {
@@ -2027,7 +2334,12 @@ export const TRANSLATIONS = {
           date: "December 2024",
           isCurrent: false,
           highlights: [
-            "Foundational architecture and initial MVP platform launch.",
+            {
+              tag: "New",
+              tagType: "new",
+              title: "Initial MVP launch",
+              desc: "Foundational architecture and initial MVP platform launch.",
+            },
           ],
         },
       ],
@@ -2043,27 +2355,27 @@ export const TRANSLATIONS = {
       ariaRegion: "Getting started guide cards",
       buildCardAria: "Open Build mode getting started guide",
       askCardAria: "Open Ask mode getting started guide",
-      modalTitleBuild: "Build Mode: How to get started?",
-      modalTitleAsk: "Ask Mode: How to get started?",
-      tabBuild: "Build mode",
-      tabAsk: "Ask mode",
-      principleHeading: "Working principle",
-      buildPrinciple: "Helmer transforms your business idea, startup, or market objective into an end-to-end executable roadmap enriched with competitor intelligence, SWOT, Unique Value Proposition (UVP), and financial projections. You can export the generated strategy directly to Word (.docx), Excel (.xlsx), PowerPoint (.pptx), PDF, or push action items into your Planner board.",
-      askPrinciple: "Ask mode is your 24/7 strategic business consultant. Powered by live Google Search Grounding, it retrieves real-time facts from the web, analyzes uploaded documents and spreadsheets (PDF, Excel, Word, images), and answers questions in the direct context of your saved strategies or Planner tasks.",
-      stepsHeading: "Get started in 3 simple steps",
-      buildStep1Title: "1. Describe your goal or idea",
-      buildStep1Desc: "Outline your project in 1-2 sentences (e.g. «I want to launch a B2B coffee delivery service») or select a ready-made template via the '+' menu.",
-      buildStep2Title: "2. Answer clarifying questions",
-      buildStep2Desc: "If necessary, Helmer asks targeted follow-ups about target audience, budget, or geography to refine the strategic direction.",
-      buildStep3Title: "3. Review & execute your strategy",
-      buildStep3Desc: "Within moments, your market analysis, SWOT, and action roadmap are ready. Export files or begin execution in Planner.",
-      askStep1Title: "1. Ask a question or attach files",
-      askStep1Desc: "Submit any question on business, marketing, finance, or operations, or upload documents and spreadsheets for comprehensive analysis.",
-      askStep2Title: "2. Link context ('+' menu)",
-      askStep2Desc: "For pinpoint accuracy, attach an existing strategy or Planner task so answers build on your actual business history.",
-      askStep3Title: "3. Choose thinking depth",
-      askStep3Desc: "Enable 'High' thinking for complex strategic dilemmas, multi-angle trade-offs, and deep analytical reasoning.",
-      examplesHeading: "Starter examples",
+      modalTitleBuild: "Build mode",
+      modalTitleAsk: "Ask mode",
+      tabBuild: "Build",
+      tabAsk: "Ask",
+      principleHeading: "Overview",
+      buildPrinciple: "Turns your business objective into structured market analysis, competitive positioning, and an execution roadmap. Export the finished strategy to Word, Excel, PowerPoint, or PDF, or send tasks directly to Planner.",
+      askPrinciple: "Delivers real-time strategic guidance powered by live Google Search, document analysis (PDF, Excel, Word, images), and your saved strategies or Planner context.",
+      stepsHeading: "Workflow",
+      buildStep1Title: "Define the goal",
+      buildStep1Desc: "Describe your product, market, or target in 1–2 sentences.",
+      buildStep2Title: "Refine parameters",
+      buildStep2Desc: "Answer brief follow-ups on audience, budget, and geography when prompted.",
+      buildStep3Title: "Export & execute",
+      buildStep3Desc: "Download formatted deliverables or track action items in Planner.",
+      askStep1Title: "Ask or attach files",
+      askStep1Desc: "Submit any business question or upload documents for review.",
+      askStep2Title: "Link context & plugins",
+      askStep2Desc: "Attach a saved strategy, Planner task, or mention a plugin with '@'.",
+      askStep3Title: "Select reasoning depth",
+      askStep3Desc: "Switch to High thinking for multi-angle strategic trade-offs.",
+      examplesHeading: "Examples",
       buildExample1: "6-month go-to-market strategy for a B2B SaaS product",
       buildExample2: "Execution roadmap & competitor analysis for a premium coffee delivery startup",
       buildExample3: "Omnichannel marketing strategy to double retail clothing sales",
@@ -2097,7 +2409,7 @@ export const LEGAL_DOCS_I18N = {
           <tbody>
             <tr>
               <td><strong>Qüvvəyə minmə tarixi</strong></td>
-              <td>3 oktyabr 2026</td>
+              <td>13 noyabr 2026</td>
             </tr>
             <tr>
               <td><strong>Xidmət operatoru</strong></td>
@@ -2144,7 +2456,7 @@ export const LEGAL_DOCS_I18N = {
           <h3>Maddə 4. Əqli Mülkiyyət, Məzmun və Fərdiləşdirmə / Model İnkişafı Asılılığı</h3>
           <p>4.1. <strong>İstifadəçi Məzmunu:</strong> İstifadəçi tərəfindən sistemə daxil edilən fərdi biznes təsvirləri, briflər, təhlil sənədləri və digər materiallar (“İstifadəçi Məzmunu”) üzərindəki hüquqlar tam olaraq istifadəçiyə məxsus olaraq qalır. İstifadəçi bu materialları sistemə daxil etməklə Innova Group Azerbaijan-a yalnız Xidmətin texniki icrasının və funksiyalarının təmin edilməsi üçün zəruri olan həcmdə məhdud emal icazəsi verir.</p>
           <p>4.2. <strong>Modellərin Təkmilləşdirilməsi Funksionallığı (Opt-In):</strong> Yeni yaradılan hesablarda fərdiləşdirilmiş xidmət rejimi və modellərin təkmilləşdirilməsi funksionallığı ilkin olaraq qeyri-aktiv (deaktiv) vəziyyətdə təqdim olunur. İstifadəçi şəxsi profil parametrləri bölməsindən bu funksionallıqları öz açıq iradəsi ilə aktivləşdirmək (opt-in) və ya istədiyi vaxt sərbəst şəkildə deaktiv etmək (opt-out) hüququna malikdir.</p>
-          <p>4.3. <strong>Birtərəfli Asılılıq Şərti:</strong> Modellərin təkmilləşdirilməsi funksionallığını aktivləşdirmək üçün fərdiləşdirilmiş xidmət rejimi (yaddaş konteksti) aktiv olmalıdır. İstifadəçi fərdiləşdirilmiş xidmət rejimini deaktiv etdikdə modellərin təkmilləşdirilməsi funksionallığı da sistem tərəfindən avtomatik və dərhal dayandırılır. Bununla yanaşı, istifadəçi fərdiləşdirilmiş xidmət rejimini açıq saxlamaqla yalnız modellərin təkmilləşdirilməsi funksionallığını müstəqil şəkildə deaktiv edə bilər; bu halda yeni sorğuların məzmunu model təkmilləşdirilməsinə cəlb olunmur və yalnız zəruri əməliyyat qeydləri saxlanılır.</p>
+          <p>4.3. <strong>Avtomatik Kontekst və Modelin Təkmilləşdirilməsi:</strong> Modellərin təkmilləşdirilməsi funksionallığını aktivləşdirmək üçün fərdiləşdirilmiş xidmət rejimi (yaddaş konteksti) aktiv olmalıdır. İstifadəçi fərdiləşdirilmiş xidmət rejimini deaktiv etdikdə modellərin təkmilləşdirilməsi funksionallığı da sistem tərəfindən avtomatik və dərhal dayandırılır. Modelin təkmilləşdirilməsi söndürüldükdə əvvəlki söhbətlərdən və strategiyalardan avtomatik kontekst seçimi dayanır. Bu halda yeni sorğuların məzmunu model təkmilləşdirilməsinə cəlb olunmur və yalnız zəruri əməliyyat qeydləri saxlanılır.</p>
           <p>4.4. <strong>Generasiya Edilən Çıxışlar:</strong> Qanunvericiliyin və tərəfdaş provayderlərin icazə verdiyi hüdudlarda istifadəçi öz sorğuları nəticəsində formalaşmış analitik çıxışlardan kommersiya və qeyri-kommersiya məqsədləri üçün sərbəst istifadə edə bilər. Alqoritmik sistemlərin ümumi təbiətinə müvafiq olaraq, oxşar sorğu daxil edən digər şəxslər üçün bənzər nəticələrin hasil edilməsi mümkündür və bu hal çıxışların unikallığına dair iddia irəli sürmək hüququ yaratmır.</p>
         </div>
 
@@ -2214,7 +2526,7 @@ export const LEGAL_DOCS_I18N = {
             </tr>
             <tr>
               <td><strong>Qüvvəyə minmə tarixi</strong></td>
-              <td>3 oktyabr 2026</td>
+              <td>13 noyabr 2026</td>
             </tr>
             <tr>
               <td><strong>Xidmət operatoru</strong></td>
@@ -2263,11 +2575,11 @@ export const LEGAL_DOCS_I18N = {
         </div>
 
         <div class="legal-doc-section">
-          <h3>Maddə 3. Fərdiləşdirilmiş Rejim, Modellərin Təkmilləşdirilməsi və Birtərəfli Asılılıq Mexanizmi</h3>
+          <h3>Maddə 3. Fərdiləşdirilmiş Rejim, Modellərin Təkmilləşdirilməsi və Avtomatik Kontekst</h3>
           <p>Platformada məlumatların istifadə tərzinə nəzarət edən aşağıdakı mexanizmlər tətbiq olunur:</p>
           <p><strong>3.1. Fərdiləşdirilmiş Təcrübə Rejimi:</strong> Platforma cavabların istifadəçinin fərdi biznes strukturuna, üslubuna və layihə kontekstinə uyğunlaşdırılması məqsədilə konfiqurasiya edilə bilən fərdiləşdirilmiş yaddaş rejimini təqdim edir.</p>
           <p><strong>3.2. Modellərin Təkmilləşdirilməsi Funksionallığı (Opt-In):</strong> Yeni yaradılan istifadəçi hesablarında həm fərdiləşdirilmiş təcrübə rejimi, həm də modellərin təkmilləşdirilməsi funksionallığı ilkin olaraq qeyri-aktiv (deaktiv) vəziyyətdə təqdim olunur. İstifadəçi şəxsi profil parametrləri bölməsindən bu funksionallıqları açıq razılıqla aktivləşdirmək (opt-in) və ya istədiyi vaxt sərbəst şəkildə deaktiv etmək (opt-out) hüququna malikdir.</p>
-          <p><strong>3.3. Birtərəfli Asılılıq və Avtomatik Deaktivasiya Qaydası:</strong> Modellərin təkmilləşdirilməsi funksionallığını aktivləşdirmək üçün fərdiləşdirilmiş təcrübə rejimi açıq olmalıdır. İstifadəçi fərdiləşdirilmiş təcrübə rejimini deaktiv etdikdə modellərin təkmilləşdirilməsi funksionallığı da sistem tərəfindən dərhal və avtomatik qaydada dayandırılır. Bununla yanaşı, istifadəçi fərdiləşdirilmiş təcrübə rejimini aktiv saxlayaraq yalnız modellərin təkmilləşdirilməsi funksionallığını müstəqil şəkildə söndürə bilər; bu halda yeni sorğuların və cavabların məzmunu model təkmilləşdirilməsinə daxil edilmir, mövcud təlim namizədləri silinir və yalnız zəruri əməliyyat məlumatları saxlanılır.</p>
+          <p><strong>3.3. Avtomatik Kontekst və Deaktivasiya Qaydası:</strong> Modellərin təkmilləşdirilməsi funksionallığını aktivləşdirmək üçün fərdiləşdirilmiş təcrübə rejimi açıq olmalıdır. İstifadəçi fərdiləşdirilmiş təcrübə rejimini deaktiv etdikdə modellərin təkmilləşdirilməsi funksionallığı da sistem tərəfindən dərhal və avtomatik qaydada dayandırılır. Modelin təkmilləşdirilməsi söndürüldükdə əvvəlki söhbətlərdən və strategiyalardan avtomatik kontekst seçimi dayanır. Bu halda yeni sorğuların və cavabların məzmunu model təkmilləşdirilməsinə daxil edilmir, mövcud təlim namizədləri silinir və yalnız zəruri əməliyyat məlumatları saxlanılır.</p>
           <p><strong>3.4. Anonimləşdirmə Tədbirləri:</strong> Modellərin təkmilləşdirilməsi prosesinə yönləndirilən məlumatların şəxsi göstəricilərdən təmizlənməsi (sanitization / de-identification) məqsədilə avtomatlaşdırılmış süzgəclər tətbiq olunur; birbaşa identifikasiya detalları kənarlaşdırılır və məlumatlar istifadəçi profilindən ayrılmış şəkildə emal edilir. Bununla belə, sərbəst daxil edilən mətnlərin daxili xüsusiyyətlərinə görə bütün fərdi detalların kənarlaşdırılmasına mütləq zəmanət verilə bilməz və istifadəçilərə sistemə həssas məlumatları daxil etməmək tövsiyə olunur.</p>
           <p><strong>3.5. İmtinanın Texniki Sərhədi:</strong> Funksionallıq deaktiv edildikdən sonra yeni daxil edilən sorğuların modellərin təkmilləşdirilməsi məqsədilə toplanması dərhal dayandırılır, davam edən icralar dayandırılır və mövcud təlim namizədləri eksport siyahısından çıxarılır.</p>
         </div>
@@ -2356,7 +2668,7 @@ export const LEGAL_DOCS_I18N = {
           <tbody>
             <tr>
               <td><strong>Effective Date</strong></td>
-              <td>October 3, 2026</td>
+              <td>November 13, 2026</td>
             </tr>
             <tr>
               <td><strong>Service Operator</strong></td>
@@ -2403,7 +2715,7 @@ export const LEGAL_DOCS_I18N = {
           <h3>Article 4. Intellectual Property, Content, and Personalization / Model Improvement Dependency</h3>
           <p>4.1. <strong>User Content:</strong> Rights to individual business descriptions, briefs, analysis documents, and other materials submitted by the user to the system (“User Content”) remain fully owned by the user. By submitting these materials to the system, the user grants Innova Group Azerbaijan a limited processing license solely to the extent necessary to ensure the technical execution and functions of the Service.</p>
           <p>4.2. <strong>Model Improvement Functionality (Opt-In):</strong> For newly created accounts, both the personalized service mode and the model improvement functionality are disabled (inactive) by default. The user has the right to explicitly enable (opt in) or freely deactivate (opt out) these functionalities at any time from their personal profile settings.</p>
-          <p>4.3. <strong>One-Way Dependency Condition:</strong> Personalized service mode (memory context) must be active in order to enable the model improvement functionality. When the personalized service mode is deactivated by the user, the model improvement functionality is also automatically and immediately discontinued by the system. Conversely, the user may independently deactivate the model improvement functionality while keeping personalized service mode active; in that case, new interaction content is excluded from model improvement and only necessary operational records are retained.</p>
+          <p>4.3. <strong>Automatic Context and Model Improvement:</strong> Personalized service mode (memory context) must be active in order to enable the model improvement functionality. When the personalized service mode is deactivated by the user, the model improvement functionality is also automatically and immediately discontinued by the system. Turning off model improvement also disables automatic context retrieval from earlier chats and strategies. In that case, new interaction content is excluded from model improvement and only necessary operational records are retained.</p>
           <p>4.4. <strong>Generated Outputs:</strong> Within the limits permitted by applicable law and partner providers, the user may freely use analytical outputs generated as a result of their queries for commercial and non-commercial purposes. In accordance with the general nature of algorithmic systems, similar results may be generated for other individuals submitting similar queries, and this circumstance does not grant the right to assert claims regarding the uniqueness of the outputs.</p>
         </div>
 
@@ -2477,7 +2789,7 @@ export const LEGAL_DOCS_I18N = {
             </tr>
             <tr>
               <td><strong>Effective Date</strong></td>
-              <td>October 3, 2026</td>
+              <td>November 13, 2026</td>
             </tr>
             <tr>
               <td><strong>Service Operator</strong></td>
@@ -2526,11 +2838,11 @@ export const LEGAL_DOCS_I18N = {
         </div>
 
         <div class="legal-doc-section">
-          <h3>Article 3. Personalized Mode, Model Improvement, and One-Way Dependency Mechanism</h3>
+          <h3>Article 3. Personalized Mode, Model Improvement, and Automatic Context</h3>
           <p>The following mechanisms governing how data is used are implemented on the Platform:</p>
           <p><strong>3.1. Personalized Experience Mode:</strong> The Platform offers a configurable personalized memory mode to adapt responses to the user's individual business structure, style, and project context.</p>
           <p><strong>3.2. Model Improvement Functionality (Opt-In):</strong> For newly created user accounts, both the personalized experience mode and the model improvement functionality are disabled (inactive) by default. The user has the right to explicitly enable (opt in) or freely deactivate (opt out) these functionalities at any time via personal profile settings.</p>
-          <p><strong>3.3. One-Way Dependency and Automatic Deactivation Rule:</strong> The personalized experience mode must be active in order to enable the model improvement functionality. When the user deactivates the personalized experience mode from profile settings, the model improvement functionality is also immediately and automatically stopped by the system. Conversely, the user may independently deactivate the model improvement functionality while keeping the personalized experience mode active; in that case, newly submitted queries and outputs are excluded from model improvement, existing training candidates are purged, and only necessary operational records are retained.</p>
+          <p><strong>3.3. Automatic Context and Deactivation:</strong> The personalized experience mode must be active in order to enable the model improvement functionality. When the user deactivates the personalized experience mode from profile settings, the model improvement functionality is also immediately and automatically stopped by the system. Turning off model improvement also disables automatic context retrieval from earlier chats and strategies. In that case, newly submitted queries and outputs are excluded from model improvement, existing training candidates are purged, and only necessary operational records are retained.</p>
           <p><strong>3.4. Anonymization Measures:</strong> Automated filters are applied for sanitizing/de-identifying data transmitted to the model improvement process; direct identification details are removed and data is processed detached from the user profile. Nonetheless, due to the inherent nuances of free-form text input, absolute removal of all personal details cannot be unconditionally guaranteed, and users are strongly advised not to enter sensitive data into the system.</p>
           <p><strong>3.5. Technical Boundary of Opt-Out:</strong> Upon deactivating the functionality, collection of newly submitted queries for model improvement purposes ceases immediately, in-flight executions are halted, and existing training candidates are removed from export eligibility.</p>
         </div>

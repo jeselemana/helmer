@@ -131,7 +131,7 @@ test("Fix 6: DistributedResearchService cancelJob prevents cross-tenant cancella
     jobStore: {
       read: async (key) => {
         if (key === "research:job_123") {
-          return { id: "job_123", ownerId: "usr_victim", chatId: 'fixture-chat', status: 'running' };
+          return { id: "job_123", ownerId: "usr_victim", chatId: 'fixture-chat', status: 'running', createdAt: new Date().toISOString() };
         }
         return null;
       },
@@ -302,6 +302,7 @@ test("Fix 9: DistributedResearchService getJob uses getById and preserves active
         ownerId: "11111111-1111-1111-1111-111111111111",
         chatId: "22222222-2222-2222-2222-222222222222",
         status: "completed",
+        createdAt: new Date().toISOString(),
         content: "research result",
       }),
       mutate: async () => ({ value: {}, result: {} }),

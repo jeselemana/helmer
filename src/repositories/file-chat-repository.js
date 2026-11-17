@@ -9,12 +9,14 @@ import {
   writeChatObject,
   deleteChatObject,
   listTenantObjects,
+  readTenantObject,
+  writeTenantObject,
 } from "../http/r2-storage.js";
 import { TenantLockManager } from "./tenant-lock.js";
 import { storageCorruption, writeJsonAtomically } from "./atomic-json-store.js";
 import { invalidateUserContextCache } from "../services/ai/personal-context.js";
 
-import { pruneExpiredGroundedResults } from "../services/ai/grounded-chat-retention.js";
+import { isWithinGroundedRetention, pruneExpiredGroundedResults } from "../services/ai/grounded-chat-retention.js";
 
 export class FileChatRepository {
   /**
@@ -26,10 +28,18 @@ export class FileChatRepository {
     this.filePath = filePath;
     this.redis = redis;
     this.cloud = options.cloud ?? isR2Configured();
+    this.hasCustomCloudReads = Boolean(options.readCloud);
+    this.hasCustomCloudWrites = Boolean(options.writeCloud);
     this.readCloud = options.readCloud || readChatObject;
     this.writeCloud = options.writeCloud || writeChatObject;
     this.deleteCloud = options.deleteCloud || deleteChatObject;
     this.listCloudShards = options.listCloudShards || (() => listTenantObjects("chats-v1/"));
+    this.readChatOwnerIndex = options.readChatOwnerIndex || (!this.hasCustomCloudReads
+      ? (chatId) => readTenantObject(`chat-owners-v1/${chatId}.json`, { force: true })
+      : null);
+    this.writeChatOwnerIndex = options.writeChatOwnerIndex || (!this.hasCustomCloudWrites
+      ? (chatId, record, etag = null) => writeTenantObject(`chat-owners-v1/${chatId}.json`, record, etag)
+      : null);
     this.artifactRepository = null;
 
     // Resolve directories and legacy file paths
@@ -43,6 +53,7 @@ export class FileChatRepository {
         : path.join(process.cwd(), "data", "chats");
     }
     this.baseDir = this.chatsDir;
+    this.chatOwnersDir = path.join(this.chatsDir, ".chat-owners");
 
     const baseLockDir = this.chatsDir
       ? path.dirname(this.chatsDir)
@@ -225,7 +236,7 @@ export class FileChatRepository {
             console.error(`Failed to migrate shard to R2 for tenant ${tenantKey}:`, err?.message || err);
             break;
           }
-          const fresh = await this.readCloud(tenantKey).catch(() => null);
+          const fresh = await this.readCloud(tenantKey, { force: true }).catch(() => null);
           const freshRecord = fresh?.record;
           if (!fresh || fresh.tombstone || (freshRecord && typeof freshRecord === "object" && !Array.isArray(freshRecord) && freshRecord._tombstone)) {
             tombstoned = Boolean(fresh?.tombstone || freshRecord?._tombstone);
@@ -260,6 +271,25 @@ export class FileChatRepository {
 
       if (this.redis?.isReady) {
         await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(merged)).catch(() => {});
+      }
+      const pendingIndex = [];
+      for (const migratedRecord of merged) {
+        if (!migratedRecord?.id || !/^[0-9a-f-]{36}$/i.test(migratedRecord.id)) continue;
+        if (finalAdded === 0) {
+          try {
+            const localIdx = JSON.parse(await fs.readFile(this.chatOwnerFilePath(migratedRecord.id), "utf8"));
+            if (localIdx?.ownerHash === tenantKey) continue;
+          } catch {}
+        }
+        pendingIndex.push(migratedRecord.id);
+      }
+      const INDEX_BATCH_SIZE = 20;
+      for (let i = 0; i < pendingIndex.length; i += INDEX_BATCH_SIZE) {
+        await Promise.all(
+          pendingIndex.slice(i, i + INDEX_BATCH_SIZE).map((chatId) =>
+            this.reserveChatOwnerIndex(chatId, ownerId, { overwrite: true }).catch(() => {}),
+          ),
+        );
       }
     }
 
@@ -314,7 +344,7 @@ export class FileChatRepository {
     // A later authorization must not join a snapshot already received from R2.
     let pending = this.inFlightTenantReads.get(tenantKey);
     if (!pending) {
-      pending = Promise.resolve().then(() => this.readCloud(tenantKey, { clone: false }));
+      pending = Promise.resolve().then(() => this.readCloud(tenantKey, { force: true, clone: false }));
       this.inFlightTenantReads.set(tenantKey, pending);
       const clear = () => { if (this.inFlightTenantReads.get(tenantKey) === pending) this.inFlightTenantReads.delete(tenantKey); };
       pending.then(clear, clear);
@@ -431,7 +461,7 @@ export class FileChatRepository {
    * @param {(records: any[]) => { updated?: any[], result?: any } | { records?: any[], result?: any } | any} mutator
    * @returns {Promise<any>}
    */
-  async mutateTenant(ownerId, mutator) {
+  async mutateTenant(ownerId, mutator, { retentionTime = Date.now() } = {}) {
     await this.ensureMigrated();
 
     return this.runInTenantLock(ownerId, async (tenantKey) => {
@@ -457,8 +487,20 @@ export class FileChatRepository {
         const returnValue = mutatorOutput?.result !== undefined ? mutatorOutput.result : mutatorOutput;
 
         if (mutatorOutput?.unchanged === true) return returnValue;
+        if (this.cleanupQueue) {
+          for (const chat of records) {
+            if (chat.ownerId !== ownerId) continue;
+            for (const message of chat.messages || []) {
+              if (message.type !== "research" || !message.jobId ||
+                  isWithinGroundedRetention(message.createdAt || chat.createdAt, retentionTime)) continue;
+              const jobId = message.jobId;
+              const artifacts = (message.artifacts || []).map(({ id }) => ({ id }));
+              await this.cleanupQueue.enqueue(ownerId, `research-expiry:${jobId}`, "expired-research", { chatId: chat.id, jobId, artifacts });
+            }
+          }
+        }
         for (const chat of nextRecords) {
-          if (chat.ownerId === ownerId && pruneExpiredGroundedResults(chat)) chat.revision = (chat.revision || 1) + 1;
+          if (chat.ownerId === ownerId && pruneExpiredGroundedResults(chat, retentionTime)) chat.revision = (chat.revision || 1) + 1;
         }
 
         // Perform R2 conditional PUT with OCC ETag
@@ -510,6 +552,11 @@ export class FileChatRepository {
       if (pruneExpiredGroundedResults(view) > 0) {
         needsPhysicalPrune = true;
       }
+      if (view.messages?.some(message => message.type === "research" && message.verifiedResearchSources !== true)) {
+        view.messages = view.messages.map(message => message.type === "research" && message.verifiedResearchSources !== true
+          ? { ...message, sources: [], groundingMetadata: null }
+          : message);
+      }
       return view;
     });
     if (needsPhysicalPrune) {
@@ -530,7 +577,7 @@ export class FileChatRepository {
         }
       }
       return { unchanged: removed === 0, updated: records, result: removed };
-    });
+    }, { retentionTime: now });
   }
 
   async pruneInactiveGroundedData(now = Date.now()) {
@@ -568,7 +615,7 @@ export class FileChatRepository {
           const stripped = rawKey.replace(/^data\//, "").replace(/^chats-v1\//, "").replace(/\.json$/, "");
           if (!stripped) continue;
           try {
-            const snap = await this.readCloud(stripped);
+            const snap = await this.readCloud(stripped, { force: true });
             const cloudRecords = snap?.record;
             if (!Array.isArray(cloudRecords)) continue;
             let expiredCount = 0;
@@ -688,6 +735,9 @@ export class FileChatRepository {
         updated: tenantRecords,
         result: true,
       }));
+      for (const rec of tenantRecords) {
+        await this.reserveChatOwnerIndex(rec.id, ownerId, { overwrite: true }).catch(() => {});
+      }
     }
   }
 
@@ -702,11 +752,20 @@ export class FileChatRepository {
     return records
       .filter((record) => record.ownerId === ownerId)
       .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
-      .map(({ messages, ...record }) => ({
-        ...structuredClone(record),
-        messageCount: (messages || []).length,
-        lastMessage: messages?.at(-1)?.content?.slice(0, 100) || "",
-      }));
+      .map(({ messages, ...record }) => {
+        const msgs = Array.isArray(messages) ? messages : [];
+        const isResearch = msgs.some((m) => m && (m.type === "research" || m.jobId));
+        const isResearchOnly = isResearch && !msgs.some((m) => m && m.role === "assistant" && m.type !== "research" && !m.jobId);
+        const latestResearch = isResearch ? msgs.slice().reverse().find((m) => m && (m.type === "research" || m.jobId)) : null;
+        return {
+          ...structuredClone(record),
+          messageCount: msgs.length,
+          lastMessage: msgs.at(-1)?.content?.slice(0, 100) || "",
+          isResearch,
+          isResearchOnly,
+          researchStatus: latestResearch?.status || null,
+        };
+      });
   }
 
   /**
@@ -722,10 +781,143 @@ export class FileChatRepository {
     return found ? structuredClone(found) : null;
   }
 
+  chatOwnerRedisKey(chatId) {
+    return `marketify:chat-owner:${chatId}`;
+  }
+
+  chatOwnerFilePath(chatId) {
+    if (!/^[0-9a-f-]{36}$/i.test(String(chatId || ""))) {
+      throw new Error("Invalid chat ID for owner index");
+    }
+    return path.join(this.chatOwnersDir, `${String(chatId).toLowerCase()}.json`);
+  }
+
+  /**
+   * Atomically reserve an O(1) chat ownership index entry so cross-tenant
+   * collision checks never scan unrelated tenant shards.
+   * @param {string} chatId
+   * @param {string} ownerId
+   * @param {{ overwrite?: boolean }} [options]
+   * @returns {Promise<boolean>}
+   */
+  async reserveChatOwnerIndex(chatId, ownerId, { overwrite = false } = {}) {
+    if (!chatId || !/^[0-9a-f-]{36}$/i.test(chatId) || !ownerId) return true;
+    const ownerHash = this.tenantKey(ownerId);
+    const isCloud = this.cloud ?? isR2Configured();
+
+    if (isCloud && typeof this.writeChatOwnerIndex === "function") {
+      if (overwrite && typeof this.readChatOwnerIndex === "function") {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const existing = await this.readChatOwnerIndex(chatId).catch(() => null);
+          if (existing?.record?.ownerHash === ownerHash) break;
+          const written = await this.writeChatOwnerIndex(chatId, { ownerHash }, existing?.etag || null).catch(() => false);
+          if (written) break;
+        }
+      } else {
+        const written = await this.writeChatOwnerIndex(chatId, { ownerHash }, null).catch(() => false);
+        if (!written && typeof this.readChatOwnerIndex === "function") {
+          const existing = await this.readChatOwnerIndex(chatId).catch(() => null);
+          if (existing?.record?.ownerHash && existing.record.ownerHash !== ownerHash) {
+            return false;
+          }
+        }
+      }
+    }
+
+    if (this.redis?.isReady && typeof this.redis.set === "function") {
+      try {
+        if (overwrite) {
+          await this.redis.set(this.chatOwnerRedisKey(chatId), ownerHash);
+        } else {
+          const ok = await this.redis.set(this.chatOwnerRedisKey(chatId), ownerHash, { NX: true });
+          if (!ok && typeof this.redis.get === "function") {
+            const existingOwner = await this.redis.get(this.chatOwnerRedisKey(chatId));
+            if (existingOwner && existingOwner !== ownerHash) {
+              return false;
+            }
+          }
+        }
+      } catch {
+        // Fall back cleanly on transient Redis error
+      }
+    }
+
+    await fs.mkdir(this.chatOwnersDir, { recursive: true });
+    const indexPath = this.chatOwnerFilePath(chatId);
+    if (overwrite) {
+      await writeJsonAtomically(indexPath, { ownerHash });
+      return true;
+    }
+    try {
+      await fs.writeFile(indexPath, `${JSON.stringify({ ownerHash })}\n`, { flag: "wx", encoding: "utf8", mode: 0o600 });
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      try {
+        const existing = JSON.parse(await fs.readFile(indexPath, "utf8"));
+        if (existing?.ownerHash && existing.ownerHash !== ownerHash) {
+          return false;
+        }
+      } catch {
+        await writeJsonAtomically(indexPath, { ownerHash });
+      }
+    }
+    return true;
+  }
+
+  /**
+   * O(1) cross-shard UUID collision check via dedicated chat-owner index.
+   * Never scans unrelated tenant shards via redis.keys() or R2 ListObjects.
+   * @param {string} validId
+   * @param {string} excludeOwnerId
+   * @returns {Promise<boolean>}
+   */
+  async hasChatIdInOtherShards(validId, excludeOwnerId) {
+    if (!validId || !/^[0-9a-f-]{36}$/i.test(validId)) return false;
+    await this.ensure();
+    const excludeTenantKey = excludeOwnerId ? this.tenantKey(excludeOwnerId) : null;
+
+    try {
+      const raw = await fs.readFile(this.chatOwnerFilePath(validId), "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed?.ownerHash && (!excludeTenantKey || parsed.ownerHash !== excludeTenantKey)) {
+        return true;
+      }
+    } catch {
+      // Index entry absent locally
+    }
+
+    if (this.redis?.isReady && typeof this.redis.get === "function") {
+      try {
+        const indexedOwner = await this.redis.get(this.chatOwnerRedisKey(validId));
+        if (typeof indexedOwner === "string" && indexedOwner.length > 0) {
+          if (!excludeTenantKey || indexedOwner !== excludeTenantKey) {
+            return true;
+          }
+        }
+      } catch {
+        // Ignore transient Redis error
+      }
+    }
+
+    if ((this.cloud ?? isR2Configured()) && typeof this.readChatOwnerIndex === "function") {
+      try {
+        const snap = await this.readChatOwnerIndex(validId);
+        const ownerHash = snap?.record?.ownerHash;
+        if (ownerHash && (!excludeTenantKey || ownerHash !== excludeTenantKey)) {
+          return true;
+        }
+      } catch {
+        // Ignore transient R2 index error
+      }
+    }
+
+    return false;
+  }
+
   /**
    * Save or update a chat for a tenant.
    */
-  async saveChat({ id, ownerId, title, messages, appendMessages, strategyId, taskId, mustExist = false, expectedRevision = null }) {
+  async saveChat({ id, ownerId, title, messages, appendMessages, strategyId, briefId, taskId, mustExist = false, expectedRevision = null }) {
     if (!ownerId) throw new Error("ownerId is required to save chat");
     await this.ensureMigrated();
 
@@ -752,6 +944,7 @@ export class FileChatRepository {
           title: title || records[existingIndex].title,
           messages: finalMessages !== undefined ? finalMessages : records[existingIndex].messages,
           strategyId: strategyId !== undefined ? strategyId : records[existingIndex].strategyId,
+          briefId: briefId !== undefined ? briefId : (records[existingIndex].briefId ?? null),
           taskId: taskId !== undefined ? taskId : records[existingIndex].taskId,
           updatedAt: now,
         };
@@ -760,18 +953,15 @@ export class FileChatRepository {
       }
 
       const validId = id && /^[0-9a-f-]{36}$/i.test(id) ? id : null;
-      let isIdTaken = false;
-      if (validId) {
-        if (records.some((r) => r.id === validId)) {
-          isIdTaken = true;
-        } else {
-          const all = await this.readAll();
-          if (all.some((r) => r.id === validId)) {
-            isIdTaken = true;
-          }
-        }
+      let chatId = null;
+      if (validId && !records.some((r) => r.id === validId) && !(await this.hasChatIdInOtherShards(validId, ownerId))) {
+        const reserved = await this.reserveChatOwnerIndex(validId, ownerId);
+        if (reserved) chatId = validId;
       }
-      const chatId = validId && !isIdTaken ? validId : randomUUID();
+      if (!chatId) {
+        chatId = randomUUID();
+        await this.reserveChatOwnerIndex(chatId, ownerId);
+      }
       const initialMessages = Array.isArray(appendMessages) ? appendMessages : (messages || []);
       const firstUserMsg = initialMessages.find((m) => m.role === "user")?.content || "";
       const cleanTitle = title || (firstUserMsg.length > 50 ? `${firstUserMsg.slice(0, 48)}…` : firstUserMsg) || "Yeni söhbət";
@@ -782,6 +972,7 @@ export class FileChatRepository {
         title: cleanTitle,
         messages: initialMessages,
         strategyId: strategyId || null,
+        briefId: briefId || null,
         taskId: taskId || null,
         createdAt: now,
         updatedAt: now,
@@ -972,6 +1163,10 @@ export class FileChatRepository {
         }
       }
 
+      for (const migratedRecord of guestRecords) {
+        await this.reserveChatOwnerIndex(migratedRecord.id, ownerId, { overwrite: true }).catch(() => {});
+      }
+
       return claimedCount;
     });
   }
@@ -999,6 +1194,9 @@ export class FileChatRepository {
             await this.artifactRepository.deleteChatArtifacts(chat);
           }
         }
+      }
+      if (typeof this.cleanupQueue?.enqueue === "function") {
+        await this.cleanupQueue.enqueue(ownerId, ownerId, "owner");
       }
 
       const tombstoneRecord = {

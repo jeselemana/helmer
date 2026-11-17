@@ -52,28 +52,28 @@ export async function acquireIdempotencyLock({ ownerId, idempotencyKey, operatio
     if (cloud) {
       // Store both lease state and replay result in ONE object so single-object R2 ETag CAS is atomic.
       const key = `strategy-locks-v1/${safeId}.json`;
-      const current = await cloud.read(key);
+      const current = await cloud.read(key, { force: true });
       if (current.record?.token && current.record.expiresAt > Date.now()) return null;
       const existingResult = current.record?.result?.expiresAt > Date.now() ? current.record.result : undefined;
       if (!await cloud.write(key, { token, expiresAt: Date.now() + timeoutMs, ...(existingResult ? { result: existingResult } : {}) }, current.etag)) {
         return null;
       }
       renewBackend = async () => {
-        const fresh = await cloud.read(key);
+        const fresh = await cloud.read(key, { force: true });
         if (fresh.record?.token !== token || fresh.record.expiresAt <= Date.now()) return false;
         const freshResult = fresh.record?.result?.expiresAt > Date.now() ? fresh.record.result : undefined;
         return cloud.write(key, { token, expiresAt: Date.now() + timeoutMs, ...(freshResult ? { result: freshResult } : {}) }, fresh.etag);
       };
       releaseBackend = async () => {
-        const fresh = await cloud.read(key);
+        const fresh = await cloud.read(key, { force: true });
         if (fresh.record?.token === token) {
           const freshResult = fresh.record?.result?.expiresAt > Date.now() ? fresh.record.result : undefined;
           await cloud.write(key, { token: null, expiresAt: 0, ...(freshResult ? { result: freshResult } : {}) }, fresh.etag);
         }
       };
-      readResult = async () => (await cloud.read(key)).record?.result || null;
+      readResult = async () => (await cloud.read(key, { force: true })).record?.result || null;
       saveResult = async value => {
-        const fresh = await cloud.read(key);
+        const fresh = await cloud.read(key, { force: true });
         if (fresh.record?.token !== token || fresh.record.expiresAt <= Date.now()) {
           loseLease();
           controller.signal.throwIfAborted();

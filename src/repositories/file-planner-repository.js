@@ -328,7 +328,7 @@ export class FilePlannerRepository {
   async readCloudSnapshot(tenantKey, { clone = true } = {}) {
     let pending = this.inFlightTenantReads.get(tenantKey);
     if (!pending) {
-      pending = Promise.resolve().then(() => this.readCloud(tenantKey, { clone: false }));
+      pending = Promise.resolve().then(() => this.readCloud(tenantKey, { force: true, clone: false }));
       this.inFlightTenantReads.set(tenantKey, pending);
       const clear = () => { if (this.inFlightTenantReads.get(tenantKey) === pending) this.inFlightTenantReads.delete(tenantKey); };
       pending.then(clear, clear);

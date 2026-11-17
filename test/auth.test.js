@@ -23,10 +23,11 @@ import { FileUserRepository } from "../src/repositories/file-user-repository.js"
 test("auth normalization, validation, and Argon2id hashing", async () => {
   assert.equal(normalizeUsername("  Market.Lead_1 "), "market.lead_1");
   assert.equal(normalizeEmail("  USER@Example.COM "), "user@example.com");
-  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: "ok_user", email: "a@b.co", password: "strongpass1" }).success, true);
-  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: "admin", email: "a@b.co", password: "strongpass1" }).success, false);
-  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: ".leading", email: "a@b.co", password: "strongpass1" }).success, false);
-  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: "double..dot", email: "a@b.co", password: "strongpass1" }).success, false);
+  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: "ok_user", email: "a@b.co", password: "strongpass1", ageConfirmed: true }).success, true);
+  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: "ok_user", email: "a@b.co", password: "strongpass1" }).success, false);
+  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: "admin", email: "a@b.co", password: "strongpass1", ageConfirmed: true }).success, false);
+  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: ".leading", email: "a@b.co", password: "strongpass1", ageConfirmed: true }).success, false);
+  assert.equal(SignupSchema.safeParse({ fullName: "Test User", username: "double..dot", email: "a@b.co", password: "strongpass1", ageConfirmed: true }).success, false);
   const hash = await hashPassword("strongpass1");
   assert.match(hash, /^\$argon2id\$/);
   assert.equal(await verifyPassword(hash, "strongpass1"), true);
@@ -131,7 +132,7 @@ test("signup, session, login, reset, and single-use reset token work end to end"
   const signup = await fetch(`${base}/api/auth/signup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fullName: "Market Lead", username: "market.lead", email: "lead@example.com", password: "strongpass1" }),
+    body: JSON.stringify({ fullName: "Market Lead", username: "market.lead", email: "lead@example.com", password: "strongpass1", ageConfirmed: true }),
   });
   assert.equal(signup.status, 201);
   const created = await signup.json();
@@ -200,7 +201,7 @@ test("signup, session, login, reset, and single-use reset token work end to end"
   const duplicateSignup = await fetch(`${base}/api/auth/signup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fullName: "Other", username: "MARKET.LEAD", email: "other@example.com", password: "strongpass1" }),
+    body: JSON.stringify({ fullName: "Other", username: "MARKET.LEAD", email: "other@example.com", password: "strongpass1", ageConfirmed: true }),
   });
   assert.equal(duplicateSignup.status, 409);
 
@@ -293,6 +294,9 @@ test("signup, session, login, reset, and single-use reset token work end to end"
   });
   assert.equal(forgot.status, 200);
   assert.equal((await forgot.json()).message, unknownForgotBody.message);
+  for (let attempt = 0; attempt < 200 && sent.length === 0; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.equal(sent.length, 1);
   const token = new URL(sent[0].resetUrl).searchParams.get("token");
   assert.ok(token);
@@ -623,6 +627,8 @@ test("Google OAuth 2.0 / OIDC PKCE (S256), state binding, token validation, and 
 
   // 6. Verify POST /api/auth/logout-all revokes other sessions while keeping current session active
   const secondSessionId = hashOpaqueToken("second_device_raw_token_1234567890");
+  const currentSessionId = hashOpaqueToken(sessionCookie.slice("helmer_session=".length));
+  const previousAuthVersion = (await users.findById(patchedUser.id)).authVersion;
   await store.createSession(secondSessionId, patchedUser.id, 3600, { authVersion: 1 });
   assert.ok(await store.getSession(secondSessionId));
 
@@ -633,6 +639,8 @@ test("Google OAuth 2.0 / OIDC PKCE (S256), state binding, token validation, and 
   });
   assert.equal(logoutAllRes.status, 200);
   assert.equal(await store.getSession(secondSessionId), null, "Other device session must be revoked");
+  assert.equal((await users.findById(patchedUser.id)).authVersion, previousAuthVersion + 1);
+  assert.equal((await store.getSession(currentSessionId)).authVersion, previousAuthVersion + 1);
   const currentStillActive = await fetch(`${base}/api/auth/profile`, {
     headers: { Cookie: sessionCookie },
   });

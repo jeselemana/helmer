@@ -135,6 +135,7 @@ test("buildPersonalizationContext compiles full brand profile, tone directives, 
         { id: "mem-1", text: "Biz yalnız B2B şirkətlərlə işləyirik.", category: "business", createdAt: "2026-08-15T00:00:00Z" },
         { id: "mem-2", text: "Ənənəvi TV/Radio reklamları istifadə etmirik.", category: "constraint", createdAt: "2026-08-15T00:00:00Z" },
       ],
+      modelImprovement: true,
       autoContext: true,
       strategyPersonalization: true,
     },
@@ -227,6 +228,7 @@ test("buildStrategyPersonalizationContext includes only minimal settings profile
         tone: "concise",
         customInstructions: "Hər cavabda uzun bir araşdırma əlavə et.",
         memories: [{ id: "m1", text: "Keçmiş yaddaş qeydi", category: "general", createdAt: "2026-08-20" }],
+        modelImprovement: true,
         autoContext: true,
       },
     },
@@ -433,3 +435,22 @@ test("cached getRelevantUserContext revalidates only matched top candidates inst
   assert.equal(readAllChats, 1);
 });
 
+
+test("automatic chat retrieval requires both personalization and model improvement", async () => {
+  let reads = 0;
+  const chatRepository = {
+    readAll: async () => {
+      reads++;
+      return [{ id: "previous", ownerId: "owner", title: "Budget", messages: [{ role: "user", content: "Quarterly budget forecast" }] }];
+    },
+  };
+  const settings = { personalIntelligence: true, autoContext: true, modelImprovement: false };
+  const context = () => buildPersonalizationContext({
+    user: { id: "owner", settings }, userMessage: "Quarterly budget forecast", chatRepository,
+  });
+  assert.doesNotMatch(await context(), /Quarterly budget forecast/);
+  assert.equal(reads, 0);
+  settings.modelImprovement = true;
+  assert.match(await context(), /Quarterly budget forecast/);
+  assert.equal(reads, 1);
+});

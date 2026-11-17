@@ -10,19 +10,34 @@ export function guestVisible(record, ownerId, now = Date.now()) {
 export function guestQuota(records, ownerId, limit, additions) {
   if (ownerId?.startsWith('guest_') && records.filter(record => !record.deleted && guestVisible(record, ownerId)).length + additions > limit) throw Object.assign(new Error('Guest resource limit'), { status: 429, statusCode: 429, code: 'GUEST_STORAGE_LIMIT' });
 }
+export function normalizeTenantKeyFromObjectKey(key, prefix) {
+  if (typeof key !== 'string' || key.endsWith('.tmp')) return '';
+  let tenantKey = key.replace(/^data\//, '');
+  if (tenantKey.startsWith(`${prefix}/`)) {
+    tenantKey = tenantKey.slice(`${prefix}/`.length);
+  }
+  return tenantKey.replace(/\.json$/i, '');
+}
 export class GuestRetention {
-  constructor(repositories) { this.repositories = repositories; this.running = false; }
+  constructor(repositories, { isCloud = isR2Configured, listObjects = listTenantObjects, readObject = readTenantObject } = {}) {
+    this.repositories = repositories;
+    this.isCloud = isCloud;
+    this.listObjects = listObjects;
+    this.readObject = readObject;
+    this.running = false;
+  }
   async prune() {
     if (this.running) return; this.running = true;
     try {
       for (const { repo, prefix, directory, chats = false } of this.repositories) {
         const shards = [];
         const dir = directory || repo.chatsDir || repo.strategiesDir || repo.plannerDir || repo.baseDir;
-        if (isR2Configured()) {
-          const tenantKeys = await listTenantObjects(`${prefix}/`).catch(() => []);
+        if (this.isCloud()) {
+          const tenantKeys = await this.listObjects(`${prefix}/`).catch(() => []);
           for (const key of tenantKeys) {
-            const tenantKey = key.startsWith(`${prefix}/`) ? key.slice(`${prefix}/`.length) : key;
-            const res = await readTenantObject(prefix, tenantKey).catch(() => null);
+            const tenantKey = normalizeTenantKeyFromObjectKey(key, prefix);
+            if (!tenantKey) continue;
+            const res = await this.readObject(prefix, tenantKey, { force: true }).catch(() => null);
             if (res?.record) shards.push(res.record);
           }
         } else if (dir) {

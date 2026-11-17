@@ -407,7 +407,7 @@ test('FileUserRepository.findById isolates a single registered user, invalidates
   const rawStoreView = await cloudRepo.readStore({ force: true, clone: false, raw: true });
   assert.equal(cloudRepo.extractUserById(rawStoreView, userA.id).fullName, 'User A Updated');
   assert.deepEqual(cloudCalls, [
-    { force: false, clone: false },
+    { force: true, clone: false },
     { force: true, clone: false },
   ]);
 });

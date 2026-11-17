@@ -91,7 +91,7 @@ test("14-day account deletion: schedule, cancel, and auto-purge with cascading c
     status: "pending_deletion",
     deletionRequestedAt: pastDate,
     scheduledDeletionAt: pastScheduled,
-  });
+  }, { allowSystemFields: true });
 
   // 6. Run purge on expired accounts
   const purgedCount2 = await userRepo.purgeExpiredAccounts({

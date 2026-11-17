@@ -582,19 +582,31 @@ export function createPdfPrintDocument(strategy, lang = null) {
 </html>`;
 }
 
+function populateIsolatedDocument(targetDoc, htmlContent) {
+  const parsed = new DOMParser().parseFromString(htmlContent, "text/html");
+  if (parsed?.documentElement && targetDoc) {
+    const imported = targetDoc.importNode(parsed.documentElement, true);
+    if (targetDoc.documentElement) {
+      targetDoc.replaceChild(imported, targetDoc.documentElement);
+    } else {
+      targetDoc.appendChild(imported);
+    }
+  }
+}
+
 export function exportStrategyToPDF(strategy, lang = null) {
   const content = createPdfPrintDocument(strategy, lang);
   const printWindow = window.open("", "_blank");
   if (printWindow) {
-    printWindow.document.open();
-    printWindow.document.write(content);
-    printWindow.document.close();
+    try { printWindow.opener = null; } catch {}
+    populateIsolatedDocument(printWindow.document, content);
     printWindow.focus();
     setTimeout(() => {
       printWindow.print();
     }, 350);
   } else {
     const iframe = document.createElement("iframe");
+    iframe.setAttribute("sandbox", "allow-same-origin allow-modals");
     iframe.style.position = "fixed";
     iframe.style.right = "0";
     iframe.style.bottom = "0";
@@ -604,9 +616,7 @@ export function exportStrategyToPDF(strategy, lang = null) {
     document.body.appendChild(iframe);
 
     const doc = iframe.contentWindow.document;
-    doc.open();
-    doc.write(content);
-    doc.close();
+    populateIsolatedDocument(doc, content);
 
     iframe.contentWindow.focus();
     setTimeout(() => {

@@ -1,4 +1,4 @@
-import { assertExecutionAuthorized, createExecutionController } from '../services/security/execution-control.js';
+import { assertExecutionActive, assertExecutionAuthorized, createExecutionController } from '../services/security/execution-control.js';
 import { executionContext } from '../services/security/privacy-policy.js';
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -38,6 +38,9 @@ import {
 import { aiConfig } from "../services/ai/config.js";
 import { logWithoutBlocking } from "../services/learning/learning-loop-service.js";
 import { isModelImprovementEnabled } from "./auth-middleware.js";
+
+const MAX_BUILD_STREAM_BUFFER_BYTES = 2 * 1024 * 1024;
+const BUILD_STREAM_DRAIN_TIMEOUT_MS = 15000;
 
 const DANGEROUS_PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
@@ -468,7 +471,8 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       }
       return { buildDecision: decision, effectiveBuildMode };
     } catch (error) {
-      if (signal?.aborted || error?.name === "AbortError") throw error;
+      assertExecutionActive(error, signal);
+      if (error?.isSafetyBlock || ["AI_SAFETY_BLOCKED", "AI_CONTENT_BLOCKED"].includes(error?.code)) throw error;
       console.warn("[Build decision] Pre-flight routing failed; using deterministic Hydrogen fallback", {
         code: error?.code || "DECISION_ERROR",
       });
@@ -944,7 +948,9 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
         ? await repository.readTenant(ownerId)
         : await repository.readAll(ownerId);
 
-      const existingSaved = tenantRecords.find((r) => r.clientSaveId === payload.idempotencyKey);
+      const existingSaved = tenantRecords.find(
+        (r) => r.clientSaveId === payload.idempotencyKey && r.saveOrigin !== "manual"
+      );
       if (existingSaved) {
         if (isExpiredGroundedStrategyRecord(existingSaved)) {
           return null;
@@ -953,6 +959,23 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           const matchesCanonical = existingSaved.payloadFingerprint === fingerprint;
           const matchesLegacy = existingSaved.payloadFingerprint === computeLegacyPayloadFingerprint("generate", payload);
           if (!matchesCanonical && !matchesLegacy) {
+            const conflictErr = new Error("Eyni idempotency açarı fərqli parametrlərlə istifadə edilib.");
+            conflictErr.code = "IDEMPOTENCY_CONFLICT";
+            conflictErr.status = 409;
+            throw conflictErr;
+          }
+        } else {
+          const savedBrief = typeof existingSaved.brief === "string" ? existingSaved.brief.trim() : "";
+          const reqBrief = typeof payload.brief === "string" ? payload.brief.trim() : "";
+          const savedAnswers = JSON.stringify(canonicalize(existingSaved.clarification?.answers || []));
+          const reqAnswers = JSON.stringify(canonicalize(payload.answers || []));
+          const savedBuildMode = existingSaved.strategy?.orchestration?.buildMode;
+          const reqBuildMode = payload.buildMode;
+          if (
+            savedBrief !== reqBrief ||
+            savedAnswers !== reqAnswers ||
+            (savedBuildMode && reqBuildMode && savedBuildMode !== reqBuildMode)
+          ) {
             const conflictErr = new Error("Eyni idempotency açarı fərqli parametrlərlə istifadə edilib.");
             conflictErr.code = "IDEMPOTENCY_CONFLICT";
             conflictErr.status = 409;
@@ -1121,7 +1144,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             await repository.rememberProvenance(ownerId, strategy, {
               clientSaveId: payload.idempotencyKey,
               forceGrounded: true,
-            }).catch(() => {});
+            });
           } else {
             rememberGroundedStrategyProvenance(ownerId, strategy, {
               clientSaveId: payload.idempotencyKey,
@@ -1144,6 +1167,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           savedRecord = await repository.create(
             {
               clientSaveId: payload.idempotencyKey,
+              saveOrigin: "generate",
               payloadFingerprint: fingerprint,
               brief: payload.brief,
               answers: payload.answers,
@@ -1173,7 +1197,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
               id: savedRecord.id,
               clientSaveId: savedRecord.clientSaveId || payload.idempotencyKey,
               forceGrounded: true,
-            }).catch(() => {});
+            });
           } else {
             rememberGroundedStrategyProvenance(ownerId, savedRecord, {
               id: savedRecord.id,
@@ -1228,17 +1252,23 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       const payload = parse(GenerateRequestSchema, req.body);
       const subscriberId = randomUUID();
       let entry = null, disconnected = false;
-      const onClose = () => {
+      const cleanupSubscriber = () => {
         disconnected = true;
         entry?.subscribers.delete(subscriberId);
         if (entry?.subscribers.size === 0) entry.masterAbortController.abort();
       };
-      req.on?.("close", onClose);
-      res.on?.("close", onClose);
+      const onReqClose = () => {
+        if (!req.complete && !res.writableEnded) cleanupSubscriber();
+      };
+      const onResClose = () => {
+        if (!res.writableEnded) cleanupSubscriber();
+      };
+      req.on?.("close", onReqClose);
+      res.on?.("close", onResClose);
       try {
         const tracked = await getOrCreateGeneration({
           payload, ownerId: req.ownerId, user: req.user, req, subscriberId,
-          onEntry: value => { entry = value; if (disconnected) onClose(); },
+          onEntry: value => { entry = value; if (disconnected) cleanupSubscriber(); },
         });
         if (!disconnected && !res.writableEnded && !res.destroyed) {
           const savedRecord = tracked.savedRecord || null;
@@ -1260,9 +1290,9 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           });
         }
       } finally {
-        req.off?.("close", onClose);
-        res.off?.("close", onClose);
-        onClose();
+        req.off?.("close", onReqClose);
+        res.off?.("close", onResClose);
+        cleanupSubscriber();
       }
     }),
   );
@@ -1274,10 +1304,22 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       const subscriberId = randomUUID();
       let generationEntry = null;
       let disconnected = false;
+      let drainDeadline;
+      const onDrain = () => {
+        clearTimeout(drainDeadline);
+        drainDeadline = undefined;
+      };
+      const disposeDrain = () => {
+        onDrain();
+        res.off("drain", onDrain);
+        res.off("finish", disposeDrain);
+        res.off("close", disposeDrain);
+      };
 
       const onClose = () => {
         if (req.complete && !res.destroyed && !res.closed) return;
         disconnected = true;
+        onDrain();
         if (generationEntry) {
           generationEntry.subscribers?.delete(subscriberId);
           generationEntry.onChunkListeners?.delete(subscriberId);
@@ -1291,21 +1333,38 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       if (typeof res?.on === "function") res.on("close", onClose);
 
       res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Cache-Control", "private, no-store, no-transform");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("X-Accel-Buffering", "no");
       res.flushHeaders?.();
 
+      const closeSlowStream = () => {
+        res.destroy();
+        onClose();
+      };
+      const writeFrame = (frame) => {
+        if (res.writableEnded || res.destroyed || disconnected) return false;
+        if (res.writableLength + Buffer.byteLength(frame) > MAX_BUILD_STREAM_BUFFER_BYTES) {
+          closeSlowStream();
+          return false;
+        }
+        if (!res.write(frame) && !drainDeadline) {
+          drainDeadline = setTimeout(closeSlowStream, BUILD_STREAM_DRAIN_TIMEOUT_MS);
+          drainDeadline.unref();
+        }
+        return true;
+      };
+      res.on("drain", onDrain);
+      res.once("finish", disposeDrain);
+      res.once("close", disposeDrain);
       const heartbeat = setInterval(() => {
-        if (!res.writableEnded && !res.destroyed) {
-          res.write(": keepalive\n\n");
+        if (!res.writableNeedDrain && writeFrame(": keepalive\n\n")) {
           if (typeof res.flush === "function") res.flush();
         }
       }, 15000);
 
       const sendEvent = (data) => {
-        if (res.writableEnded) return;
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
+        return writeFrame(`data: ${JSON.stringify(data)}\n\n`);
       };
 
       try {
@@ -1345,8 +1404,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             guestCtaNotice: req.remainingGuestBriefs !== undefined ? getGuestBuildCtaNotice(req.remainingGuestBriefs, req.headers["accept-language"]?.includes("en")) : undefined,
           }),
         });
-        res.write("data: [DONE]\n\n");
-        res.end();
+        if (writeFrame("data: [DONE]\n\n")) res.end();
       } catch (streamError) {
         if (streamError.name === "AbortError" || generationEntry?.masterAbortController?.signal?.aborted) {
           return res.end();
@@ -1369,10 +1427,10 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       const payload = parse(RefineRequestSchema, req.body);
       const effectiveKey = resolveRequestIdempotencyKey(req, payload);
       if (typeof repository.loadOwnerProvenance === "function") {
-        await repository.loadOwnerProvenance(req.ownerId).catch(() => {});
+        await repository.loadOwnerProvenance(req.ownerId);
       }
       const ownerRecordsForRefine = typeof repository.readTenant === "function"
-        ? await repository.readTenant(req.ownerId, { clone: false }).catch(() => [])
+        ? await repository.readTenant(req.ownerId, { clone: false })
         : [];
       const refineProvenance = typeof repository.resolveProvenance === "function"
         ? await repository.resolveProvenance(req.ownerId, payload.strategy, ownerRecordsForRefine)
@@ -1442,7 +1500,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     asyncRoute(async (req, res) => {
       const payload = parse(SaveStrategyRequestSchema, req.body);
       if (typeof repository.loadOwnerProvenance === "function") {
-        await repository.loadOwnerProvenance(req.ownerId).catch(() => {});
+        await repository.loadOwnerProvenance(req.ownerId);
       }
       const saveProvenance = typeof repository.resolveProvenance === "function"
         ? await repository.resolveProvenance(req.ownerId, payload)
@@ -1453,7 +1511,14 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       const authoritativeSavePayload = saveProvenance.grounded
         ? applyGroundedProvenanceToStrategy(structuredClone(payload), saveProvenance)
         : payload;
-      const record = await repository.create(authoritativeSavePayload, req.ownerId);
+      const record = await repository.create(
+        {
+          ...authoritativeSavePayload,
+          saveOrigin: "manual",
+          payloadFingerprint: null,
+        },
+        req.ownerId,
+      );
       if (!record) {
         return res.status(410).json({ error: "Strategiya saxlama müddəti bitib və ya etibarsızdır.", code: "GROUNDED_STRATEGY_EXPIRED" });
       }
@@ -1483,7 +1548,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       const { strategyId, clientSaveId, feedback, brief, title, groundingActive: clientGroundingActive } = payload;
 
       if (typeof repository.loadOwnerProvenance === "function") {
-        await repository.loadOwnerProvenance(req.ownerId).catch(() => {});
+        await repository.loadOwnerProvenance(req.ownerId);
       }
 
       let existing = null;
@@ -1563,6 +1628,14 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       const existing = await repository.getById(req.params.id, req.ownerId);
       if (!existing) return res.status(404).json({ error: "Strategiya tapılmadı.", code: "NOT_FOUND" });
 
+      if (req.securityContext) {
+        req.securityContext.assertResources = async () => {
+          if (!await repository.getById(existing.id, req.ownerId)) {
+            throw Object.assign(new Error("Execution context removed"), { code: "EXECUTION_REVOKED", status: 403 });
+          }
+        };
+      }
+
       const payload = parse(RefineRequestSchema, {
         action: clientPayload.action,
         request: clientPayload.request,
@@ -1598,7 +1671,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       }
 
       if (typeof repository.loadOwnerProvenance === "function") {
-        await repository.loadOwnerProvenance(req.ownerId).catch(() => {});
+        await repository.loadOwnerProvenance(req.ownerId);
       }
       const existingRefineProvenance = typeof repository.resolveProvenance === "function"
         ? await repository.resolveProvenance(req.ownerId, existing, [existing])
@@ -1707,6 +1780,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
   router.delete(
     "/:id",
     asyncRoute(async (req, res) => {
+      parse(EmptyBodySchema, req.body ?? {});
       if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) {
         return res.status(400).json({ error: "Strategiya ID-si düzgün deyil.", code: "VALIDATION_ERROR" });
       }
@@ -1762,11 +1836,11 @@ export function strategyErrorHandler(error, req, res, next) {
     });
   }
 
-  if (["AI_TIMEOUT", "AI_CONTENT_BLOCKED", "GROUNDING_UNAVAILABLE", "GROUNDED_STRATEGY_RESTRICTED"].includes(error.code)) {
+  if (["AI_TIMEOUT", "AI_CONTENT_BLOCKED", "AI_SAFETY_BLOCKED", "GROUNDING_UNAVAILABLE", "GROUNDED_STRATEGY_RESTRICTED"].includes(error.code)) {
     return res.status(httpStatusOf(error)).json(publicBuildFailure(error));
   }
 
-  if (/^(EXECUTION_|DAILY_BUDGET_|MODEL_PRICING_|TOOL_PRICING_)/.test(error.code || "")) {
+  if (/^(EXECUTION_|PROVENANCE_|DAILY_BUDGET_|MODEL_PRICING_|TOOL_PRICING_)/.test(error.code || "")) {
     return res.status(httpStatusOf(error)).json({
       error: "Sorğunu təhlükəsiz şəkildə tamamlamaq mümkün olmadı. Yenidən cəhd edin.", code: error.code,
     });

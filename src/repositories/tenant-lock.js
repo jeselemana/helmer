@@ -42,90 +42,94 @@ export class TenantLockManager {
   async acquire(tenantKey) {
     await fs.mkdir(this.locksDir, { recursive: true }).catch(() => {});
     const lockDir = path.join(this.locksDir, `${tenantKey}.lock`);
-    const ownerFile = path.join(lockDir, "owner.json");
     const token = randomUUID();
+    const ownerName = `owner-${token}.json`;
+    const staging = `${lockDir}.${token}.tmp`;
     const start = Date.now();
+    let handle;
+    let acquired = false;
 
-    while (true) {
-      try {
-        await fs.mkdir(lockDir);
-        // Successfully created lock directory. Write owner info.
-        const lockInfo = {
-          token,
-          pid: process.pid,
-          hostname: hostname(),
-          createdAt: Date.now(),
-        };
-        let handle;
+    try {
+      await fs.mkdir(staging, { mode: 0o700 });
+      handle = await fs.open(path.join(staging, ownerName), "wx", 0o600);
+      await handle.writeFile(JSON.stringify({ token, pid: process.pid, hostname: hostname(), createdAt: start }));
+
+      while (true) {
         try {
-          handle = await fs.open(ownerFile, "wx", 0o600);
-          await handle.writeFile(JSON.stringify(lockInfo), "utf8");
-        } catch (error) {
-          await handle?.close();
-          await fs.rm(lockDir, { recursive: true, force: true });
-          throw error;
-        }
-        // Update the opened inode, never a replacement owner's lock file.
-        const heartbeat = setInterval(() => {
+          // Publish a nonempty directory atomically. A stale reaper may remove
+          // an empty directory but cannot remove a newer generation's marker.
           const now = new Date();
-          handle.utimes(now, now).catch(() => {});
-        }, Math.max(5, Math.floor(this.staleMs / 3)));
-        heartbeat.unref();
+          await handle.utimes(now, now);
+          await fs.rename(staging, lockDir);
+          acquired = true;
+          break;
+        } catch (error) {
+          if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        }
 
-        let released = false;
-        const release = async () => {
+        await this.reapStaleLock(lockDir);
+        if (Date.now() - start > this.timeoutMs) {
+          throw Object.assign(new Error(`Tenant concurrency conflict: lock timeout for tenant ${tenantKey}`), {
+            code: "STORAGE_BUSY", statusCode: 503,
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 15 + Math.floor(Math.random() * 25)));
+      }
+
+      const heartbeat = setInterval(() => {
+        const now = new Date();
+        handle.utimes(now, now).catch(() => {});
+      }, Math.max(5, Math.floor(this.staleMs / 3)));
+      heartbeat.unref();
+
+      let released = false;
+      return {
+        token,
+        release: async () => {
           if (released) return;
           released = true;
           clearInterval(heartbeat);
-          await handle.close();
           try {
-            // Safe release: only delete if token matches
-            const raw = await fs.readFile(ownerFile, "utf8").catch(() => null);
-            if (raw) {
-              const current = JSON.parse(raw);
-              if (current.token === token) {
-                await fs.rm(lockDir, { recursive: true, force: true }).catch(() => {});
-              }
-            }
-          } catch {}
-        };
-
-        return { token, release };
-      } catch (err) {
-        if (err.code === "EEXIST") {
-          // Lock exists. Check for stale lock (crash recovery)
-          try {
-            const stats = await fs.stat(lockDir);
-            const raw = await fs.readFile(ownerFile, "utf8").catch(() => null);
-            let updatedAt = stats.mtimeMs;
-            let info = null;
-            if (raw) {
-              try {
-                info = JSON.parse(raw);
-                updatedAt = (await fs.stat(ownerFile)).mtimeMs;
-              } catch {}
-            }
-
-            if (Date.now() - updatedAt > this.staleMs && !ownerIsAlive(info)) {
-              // Stale lock detected, safely force remove
-              await fs.rm(lockDir, { recursive: true, force: true }).catch(() => {});
-              continue;
-            }
-          } catch {}
-
-          if (Date.now() - start > this.timeoutMs) {
-            const busyErr = new Error(`Tenant concurrency conflict: lock timeout for tenant ${tenantKey}`);
-            busyErr.code = "STORAGE_BUSY";
-            busyErr.statusCode = 503;
-            throw busyErr;
+            await handle.close();
+          } finally {
+            await fs.unlink(path.join(lockDir, ownerName)).catch(() => {});
+            await fs.rmdir(lockDir).catch(() => {});
           }
-
-          // Backoff jitter: 15ms - 40ms
-          await new Promise((resolve) => setTimeout(resolve, 15 + Math.floor(Math.random() * 25)));
-          continue;
-        }
-        throw err;
+        },
+      };
+    } finally {
+      if (!acquired) {
+        await handle?.close().catch(() => {});
+        await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
       }
+    }
+  }
+
+  async reapStaleLock(lockDir) {
+    try {
+      const directory = await fs.stat(lockDir);
+      const entries = await fs.readdir(lockDir);
+      const name = entries.find(entry => /^owner-[a-f0-9-]{36}\.json$/.test(entry) || entry === "owner.json");
+      if (!name) {
+        if (entries.length === 0 && Date.now() - directory.mtimeMs > this.staleMs) await fs.rmdir(lockDir);
+        return;
+      }
+
+      const ownerFile = path.join(lockDir, name);
+      const observed = await fs.stat(ownerFile);
+      let owner = null;
+      try { owner = JSON.parse(await fs.readFile(ownerFile, "utf8")); } catch {}
+      const current = await fs.stat(ownerFile);
+      if (current.dev !== observed.dev || current.ino !== observed.ino ||
+          current.mtimeMs !== observed.mtimeMs || Date.now() - current.mtimeMs <= this.staleMs ||
+          ownerIsAlive(owner)) return;
+
+      // Only unlink the observed generation. A newer nonempty lock directory
+      // survives rmdir even when another reaper has already removed this one.
+      await fs.unlink(ownerFile);
+      await fs.rmdir(lockDir);
+    } catch {
+      // Released, renewed, or being recovered by another contender.
     }
   }
 

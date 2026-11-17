@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 // Keep the existing owner mutex as a barrier against exclusive work.
 const ASK_BARRIER = 'ask-shared-v2';
 const LEASE_MS = '180000';
+const localOwners = new Map();
 const redisNow = `local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)`;
 
@@ -47,11 +48,35 @@ export async function acquireSharedAskLease(redis, ownerId, token) {
 }
 
 // Uses the same tenant key as HTTP admission; recovery cannot bypass active requests.
+export function acquireLocalOwnerExecutionLease(ownerId, shareKey = null) {
+  const existing = localOwners.get(ownerId);
+  if (existing && (!shareKey || existing.shareKey !== shareKey || !existing.acceptingSubscribers)) {
+    throw Object.assign(new Error('Execution busy'), { code: 'EXECUTION_BUSY', status: 429 });
+  }
+  const record = existing || { shareKey, acceptingSubscribers: false };
+  if (!existing) localOwners.set(ownerId, record);
+  let released = false;
+  return {
+    assertOwned: async () => {
+      if (released || localOwners.get(ownerId) !== record) {
+        throw Object.assign(new Error('Execution lease lost'), { code: 'EXECUTION_LOCK_LOST' });
+      }
+    },
+    allowSubscribers: () => {
+      if (!existing && shareKey && !released) record.acceptingSubscribers = true;
+    },
+    release: async () => {
+      if (released) return;
+      released = true;
+      if (!existing) localOwners.delete(ownerId);
+    },
+  };
+}
+
 export async function acquireOwnerExecutionLease(redis, ownerId, controller) {
   if (!redis?.isReady) {
-    if ((process.env.NODE_ENV === 'production' && (process.env.REDIS_URL || process.env.REQUIRE_REDIS === 'true')) || redis) throw Object.assign(new Error('Execution unavailable'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
-    let released = false;
-    return { assertOwned: async () => { if (released) throw Object.assign(new Error('Execution lease lost'), { code: 'EXECUTION_LOCK_LOST' }); }, release: async () => { released = true; } };
+    if (process.env.NODE_ENV === 'production' || redis) throw Object.assign(new Error('Execution unavailable'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
+    return acquireLocalOwnerExecutionLease(ownerId);
   }
   const key = `security:owner-execution:${ownerId}`, token = randomUUID();
   if (!await redis.set(key, token, { NX: true, PX: 180000 })) throw Object.assign(new Error('Execution busy'), { code: 'EXECUTION_BUSY', status: 429 });

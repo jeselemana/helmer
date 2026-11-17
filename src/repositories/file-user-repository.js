@@ -121,7 +121,7 @@ export class FileUserRepository {
   async readStore({ force = false, clone = true, raw = false } = {}) {
     let pending = (this.cloud && !force) ? this.inFlightStoreRead : null;
     if (!pending) {
-      pending = this.readRawAuthoritativeStore({ force: Boolean(force), clone: false });
+      pending = this.readRawAuthoritativeStore({ force: this.cloud || Boolean(force), clone: false });
       if (this.cloud && !force) {
         this.inFlightStoreRead = pending;
         const clear = () => { if (this.inFlightStoreRead === pending) this.inFlightStoreRead = null; };
@@ -193,6 +193,10 @@ export class FileUserRepository {
         const nextStore = mutatorOutput?.store !== undefined ? mutatorOutput.store : storeCopy;
         const returnValue = mutatorOutput?.result !== undefined ? mutatorOutput.result : mutatorOutput;
 
+        if (mutatorOutput?.modified === false) {
+          return returnValue;
+        }
+
         const committed = await this.commitStore(nextStore, etag);
         if (!committed) {
           // OCC conflict detected in cloud: back off with jitter and retry
@@ -220,9 +224,9 @@ export class FileUserRepository {
     return found ? structuredClone(migrateUser(found)) : null;
   }
 
-  async findById(id) {
+  async findById(id, { force = false } = {}) {
     if (!id) return null;
-    const store = await this.readStore({ clone: false, raw: true });
+    const store = await this.readStore({ force, clone: false, raw: true });
     return this.extractUserById(store, id);
   }
 
@@ -351,10 +355,10 @@ export class FileUserRepository {
   update(id, changes, { allowSystemFields = false, preserveEmailVerification = false, expectedAuthVersion = null } = {}) {
     return this.mutateUsers(async (store) => {
       const index = store.users.findIndex((user) => user.id === id);
-      if (index === -1) return { store, result: null };
+      if (index === -1) return { store, result: null, modified: false };
 
-      const publicFields = ['fullName', 'username', 'email', 'avatarUrl', 'settings', 'lastLoginAt', 'onboardingFocus', 'onboardingRole', 'onboardingGoal', 'onboardingCompletedAt', 'status', 'deletionRequestedAt', 'scheduledDeletionAt'];
-      const internalFields = ['emailVerifiedAt', 'googleSub', 'googleEmail', 'emailCustomisedAt', 'pendingEmail', 'pendingEmailExpiresAt', 'authVersion', 'privacyEpoch', 'mfa'];
+      const publicFields = ['fullName', 'username', 'email', 'avatarUrl', 'settings', 'lastLoginAt', 'onboardingFocus', 'onboardingRole', 'onboardingGoal', 'onboardingCompletedAt'];
+      const internalFields = ['emailVerifiedAt', 'googleSub', 'googleEmail', 'emailCustomisedAt', 'pendingEmail', 'pendingEmailExpiresAt', 'authVersion', 'privacyEpoch', 'mfa', 'status', 'deletionRequestedAt', 'scheduledDeletionAt'];
       const fields = allowSystemFields ? [...publicFields, ...internalFields] : publicFields;
       const effectiveChanges = Object.fromEntries(fields.filter(key => changes[key] !== undefined).map(key => [key, changes[key]]));
       const current = store.users[index];
@@ -447,10 +451,14 @@ export class FileUserRepository {
     });
   }
 
-  updatePassword(id, passwordHash) {
+  updatePassword(id, passwordHash, { expectedAuthVersion = null } = {}) {
     return this.mutateUsers(async (store) => {
       const index = store.users.findIndex((user) => user.id === id);
       if (index === -1) return { store, result: null };
+      const currentVersion = store.users[index].authVersion || 1;
+      if (expectedAuthVersion !== null && currentVersion !== expectedAuthVersion) {
+        throw Object.assign(new Error("Session changed"), { status: 401, code: "SESSION_CHANGED" });
+      }
       const now = new Date().toISOString();
       store.users[index].passwordHash = passwordHash;
       store.users[index].passwordChangedAt = now;
@@ -471,7 +479,7 @@ export class FileUserRepository {
       status: "pending_deletion",
       deletionRequestedAt: now.toISOString(),
       scheduledDeletionAt: scheduled.toISOString(),
-    });
+    }, { allowSystemFields: true });
   }
 
   cancelDeletion(id) {
@@ -479,10 +487,47 @@ export class FileUserRepository {
       status: "active",
       deletionRequestedAt: null,
       scheduledDeletionAt: null,
+    }, { allowSystemFields: true });
+  }
+
+  /**
+   * Atomically read-modify-write user.settings under TenantLockManager + R2 OCC
+   * while preserving personalIntelligence/modelImprovement invariants and privacyEpoch.
+   * @param {string} id
+   * @param {(currentSettings: object, currentUser: object) => ({ settings: object, result?: any, modified?: boolean })} mutator
+   * @returns {Promise<{ user: object | null, result?: any }>}
+   */
+  updateSettingsAtomically(id, mutator) {
+    return this.mutateUsers(async (store) => {
+      const index = store.users.findIndex((user) => user.id === id);
+      if (index === -1) return { store, result: { user: null, result: null }, modified: false };
+
+      const current = store.users[index];
+      const currentSettings = current.settings && typeof current.settings === "object" ? structuredClone(current.settings) : {};
+      const outcome = await mutator(currentSettings, current);
+      if (!outcome || outcome.modified === false) {
+        return { store, result: { user: current, result: outcome?.result ?? null }, modified: false };
+      }
+
+      const nextSettings = { ...currentSettings, ...(outcome.settings || {}) };
+      if (nextSettings.personalIntelligence === false) nextSettings.modelImprovement = false;
+      const contextFields = ['personalIntelligence', 'modelImprovement', 'memories', 'autoContext', 'strategyPersonalization', 'autoSaveStrategies', 'customInstructions', 'brandName', 'industry', 'primaryMarket', 'targetAudience'];
+      let privacyEpoch = current.privacyEpoch || 0;
+      if (contextFields.some((key) => JSON.stringify(nextSettings[key]) !== JSON.stringify(current.settings?.[key]))) {
+        privacyEpoch += 1;
+      }
+
+      store.users[index] = {
+        ...current,
+        settings: nextSettings,
+        privacyEpoch,
+        updatedAt: new Date().toISOString(),
+      };
+      return { store, result: { user: store.users[index], result: outcome.result ?? null } };
     });
   }
 
-  deleteUser(id, { strategyRepository = null, chatRepository = null, plannerRepository = null, upRepository = null, aiLearningRepository = null, telemetryRepository = null, authStore = null } = {}) {
+  deleteUser(id, { strategyRepository = null, chatRepository = null, plannerRepository = null, upRepository = null, aiLearningRepository = null, telemetryRepository = null, authStore = null, cleanupQueue = null, researchJobStore = null } = {}) {
     return this.mutateUsers(async (store) => {
       const userExists = store.users.some((user) => user.id === id);
       if (!userExists) {
@@ -496,13 +541,23 @@ export class FileUserRepository {
       if (aiLearningRepository?.deleteAllByOwner) await aiLearningRepository.deleteAllByOwner(id);
       if (telemetryRepository?.deleteAllByOwner) await telemetryRepository.deleteAllByOwner(id);
       if (authStore?.invalidateUserSessions) await authStore.invalidateUserSessions(id);
+      if (cleanupQueue?.enqueue) {
+        await cleanupQueue.enqueue(id, id, "owner");
+        if (typeof cleanupQueue.process === "function") await cleanupQueue.process().catch(() => {});
+      } else if (researchJobStore?.jobsForOwner) {
+        for await (const job of researchJobStore.jobsForOwner(id)) {
+          await researchJobStore.mutateJob(job.id, id, () => ({ value: { id: job.id, ownerId: id, status: "deleted" } }));
+          await researchJobStore.removeRetention?.(job);
+          await researchJobStore.removeActive?.(job);
+        }
+      }
 
       store.users = store.users.filter((user) => user.id !== id);
       return { store, result: true };
     });
   }
 
-  async purgeExpiredAccounts({ strategyRepository = null, chatRepository = null, plannerRepository = null, upRepository = null, aiLearningRepository = null, telemetryRepository = null, authStore = null } = {}) {
+  async purgeExpiredAccounts({ strategyRepository = null, chatRepository = null, plannerRepository = null, upRepository = null, aiLearningRepository = null, telemetryRepository = null, authStore = null, cleanupQueue = null, researchJobStore = null } = {}) {
     return this.mutateUsers(async (store) => {
       const now = new Date();
       const expiredUsers = store.users.filter((user) => {
@@ -517,7 +572,7 @@ export class FileUserRepository {
         return !isNaN(createdAt.getTime()) && createdAt.getTime() <= unverifiedExpiry;
       });
 
-      if (expiredUsers.length === 0) return { store, result: 0 };
+      if (expiredUsers.length === 0) return { store, result: 0, modified: false };
 
       const expiredIds = new Set(expiredUsers.map((u) => u.id));
       const successfullyPurgedIds = new Set();
@@ -531,6 +586,16 @@ export class FileUserRepository {
           if (aiLearningRepository?.deleteAllByOwner) await aiLearningRepository.deleteAllByOwner(userId);
           if (telemetryRepository?.deleteAllByOwner) await telemetryRepository.deleteAllByOwner(userId);
           if (authStore?.invalidateUserSessions) await authStore.invalidateUserSessions(userId);
+          if (cleanupQueue?.enqueue) {
+            await cleanupQueue.enqueue(userId, userId, "owner");
+            if (typeof cleanupQueue.process === "function") await cleanupQueue.process().catch(() => {});
+          } else if (researchJobStore?.jobsForOwner) {
+            for await (const job of researchJobStore.jobsForOwner(userId)) {
+              await researchJobStore.mutateJob(job.id, userId, () => ({ value: { id: job.id, ownerId: userId, status: "deleted" } }));
+              await researchJobStore.removeRetention?.(job);
+              await researchJobStore.removeActive?.(job);
+            }
+          }
           successfullyPurgedIds.add(userId);
         } catch (err) {
           console.error(`Error cascading data deletion for expired user ${userId}:`, err);

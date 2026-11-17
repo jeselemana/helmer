@@ -185,12 +185,16 @@ export function pruneExpiredGroundedResults(chat, now = Date.now()) {
   if (!Array.isArray(chat?.messages)) return 0;
   const retained = chat.messages.filter((message) => {
     if (!isGroundedAssistantMessage(message)) return true;
-    const created = Date.parse(message.createdAt || chat.createdAt);
-    return Number.isFinite(created) && created > 0 && created <= now + 60000 && now - created < MAX_GROUNDED_CHAT_RETENTION_MS;
+    return isWithinGroundedRetention(message.groundedAt ?? (message.createdAt || chat.createdAt), now);
   });
   const removed = chat.messages.length - retained.length;
   if (removed) chat.messages = retained;
   return removed;
+}
+
+export function isWithinGroundedRetention(createdAt, now = Date.now()) {
+  const created = Date.parse(createdAt);
+  return Number.isFinite(created) && created > 0 && created <= now + 60000 && now - created < MAX_GROUNDED_CHAT_RETENTION_MS;
 }
 
 export function pruneExpiredGroundedStrategies(records, now = Date.now()) {
@@ -267,6 +271,10 @@ export function computeStrategyContentFingerprints(strategyLike) {
 }
 
 const ownerProvenanceStore = new Map();
+
+export function clearOwnerProvenance(ownerId) {
+  ownerProvenanceStore.delete(String(ownerId || "").trim());
+}
 
 function isValidProvenanceTimestamp(dateValue, now = Date.now()) {
   if (!dateValue) return false;
@@ -480,7 +488,7 @@ export function hydrateOwnerProvenanceEntries(ownerId, entries = [], now = Date.
   let removed = 0;
   const retained = [];
   for (const raw of entries) {
-    if (!raw || typeof raw !== "object") {
+    if (!raw || typeof raw !== "object" || (raw.ownerId && raw.ownerId !== ownerId)) {
       removed++;
       continue;
     }

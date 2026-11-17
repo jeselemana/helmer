@@ -1,5 +1,7 @@
 (() => {
   let registryPromise;
+  const previews = new Set();
+  const closePreviews = () => { for (const dispose of previews) dispose(); };
   const node = (tag, className, text) => { const result = document.createElement(tag); result.className = className || ""; if (text !== undefined) result.textContent = text; return result; };
   const iconPaths = {
     document: ["M6 3h8l4 4v14H6z", "M14 3v5h4M9 12h6M9 16h6"],
@@ -34,11 +36,12 @@
   }
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const isEn = () => document.documentElement.lang === "en";
-  const request = async url => {
-    const response = await fetch(url, { credentials: "same-origin" });
+  const request = async (url, signal) => {
+    const response = await fetch(url, { credentials: "same-origin", signal });
     const data = await response.json(); if (!response.ok) throw new Error(data.error || "Unable to open file"); return data;
   };
-  const registry = () => registryPromise ||= request("/api/ask/plugins").then(data => data.plugins).catch(error => { registryPromise = null; throw error; });
+  const isComposerPluginVisible = plugin => plugin && plugin.id !== "deep-research" && !(Array.isArray(plugin.capabilities) && plugin.capabilities.includes("deep_research"));
+  const registry = () => registryPromise ||= request("/api/ask/plugins").then(data => (Array.isArray(data?.plugins) ? data.plugins : []).filter(isComposerPluginVisible)).catch(error => { registryPromise = null; throw error; });
   function attachComposer({ input, body, getSelection, setSelection }) {
     const chips = node("div", "ask-plugin-tokens");
     const popup = node("div", "ask-plugin-selector"); popup.hidden = true; popup.id = `plugin-selector-${input.id}`;
@@ -156,20 +159,29 @@
     select.setAttribute("aria-label", isEn() ? "Version history" : "Versiya tarixçəsi"); close.type = "button"; close.setAttribute("aria-label", isEn() ? "Close preview" : "Önbaxışı bağla"); close.addEventListener("click", () => dialog.close());
     toolbar.append(title, select, close);
     const content = node("div", "artifact-preview-body", isEn() ? "Loading..." : "Yüklənir..."); dialog.append(toolbar, content); document.body.append(dialog); dialog.showModal();
-    dialog.addEventListener("close", () => dialog.remove(), { once: true });
-    let loadId = 0;
+    let controller;
+    const dispose = () => {
+      previews.delete(dispose);
+      controller?.abort();
+      dialog.close();
+      dialog.remove();
+    };
+    previews.add(dispose);
+    dialog.addEventListener("close", dispose, { once: true });
     const load = async version => {
-      const currentLoad = ++loadId;
+      controller?.abort();
+      controller = new AbortController();
+      const { signal } = controller;
       try {
-        const data = await request(`/api/artifacts/${artifact.id}/versions/${version}/preview`);
-        if (currentLoad !== loadId || !dialog.isConnected) return;
+        const data = await request(`/api/artifacts/${artifact.id}/versions/${version}/preview`, signal);
+        if (signal.aborted || !dialog.isConnected) return;
         title.textContent = data.artifact.filename;
         select.replaceChildren(); data.versions.forEach(item => { const option = node("option", "", `v${item.version} · ${new Date(item.createdAt).toLocaleString()}`); option.value = item.version; option.selected = item.version === Number(version); select.append(option); });
         drawSpec(content, data.specification, data.artifact.pluginId);
         const card = artifactCard(data.artifact, selected => { dialog.close(); onEdit?.(selected); }, false); if (card) content.prepend(card);
-      } catch (error) { if (currentLoad !== loadId || !dialog.isConnected) return; content.replaceChildren(node("p", "ask-error", error.message)); const retry = node("button", "ask-artifact-action", isEn() ? "Retry" : "Yenidən cəhd et"); retry.addEventListener("click", () => load(version)); content.append(retry); }
+      } catch (error) { if (signal.aborted || !dialog.isConnected) return; content.replaceChildren(node("p", "ask-error", error.message)); const retry = node("button", "ask-artifact-action", isEn() ? "Retry" : "Yenidən cəhd et"); retry.addEventListener("click", () => load(version)); content.append(retry); }
     };
     select.addEventListener("change", () => load(select.value)); await load(artifact.version);
   }
-  window.HelmerArtifacts = { attachComposer, artifactCard };
+  window.HelmerArtifacts = { attachComposer, artifactCard, closePreviews };
 })();

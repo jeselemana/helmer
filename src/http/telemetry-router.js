@@ -10,7 +10,7 @@ const ClientTelemetryEventSchema = z.object({
   clientSaveId: z.string().trim().min(8).max(120).nullable().optional(),
   title: z.string().max(200).optional(),
   groundingActive: z.boolean().optional(),
-  metadata: z.record(z.any()).optional(),
+  metadata: z.object({}).strict().optional(),
 }).strict();
 
 export function createTelemetryAdminRouter(telemetryService) {
@@ -23,7 +23,7 @@ export function createTelemetryAdminRouter(telemetryService) {
       const overview = await telemetryService.repository.getOverview({ dateRange });
       return res.json(overview);
     } catch (error) {
-      console.error("Telemetry overview error:", error);
+      console.error("Telemetry overview error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Telemetriya göstəriciləri əldə edilmədi.", code: "TELEMETRY_OVERVIEW_ERROR" });
     }
   });
@@ -53,7 +53,7 @@ export function createTelemetryAdminRouter(telemetryService) {
 
       return res.json(result);
     } catch (error) {
-      console.error("Telemetry events error:", error);
+      console.error("Telemetry events error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Audit jurnalı əldə edilmədi.", code: "TELEMETRY_EVENTS_ERROR" });
     }
   });
@@ -71,7 +71,7 @@ export function createTelemetryAdminRouter(telemetryService) {
       }
       return res.json({ event });
     } catch (error) {
-      console.error("Telemetry event get error:", error);
+      console.error("Telemetry event get error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Hadisə detalları əldə edilmədi.", code: "TELEMETRY_EVENT_ERROR" });
     }
   });
@@ -139,9 +139,8 @@ export function createTelemetryClientRouter(telemetryService, options = {}) {
 
       if (eventType === "export_requested") {
         const modelImprovement = isModelImprovementEnabled(req);
-        if (strategyRepository && typeof strategyRepository.loadOwnerProvenance === "function") {
-          await strategyRepository.loadOwnerProvenance(ownerId).catch(() => {});
-        }
+        const provenanceUnavailable = typeof strategyRepository?.loadOwnerProvenance === "function" &&
+          !await strategyRepository.loadOwnerProvenance(ownerId).then(() => true, () => false);
         let existing = null;
         if (strategyId && strategyRepository && typeof strategyRepository.getById === "function") {
           existing = await strategyRepository.getById(strategyId, ownerId);
@@ -152,7 +151,7 @@ export function createTelemetryClientRouter(telemetryService, options = {}) {
           existing ? [existing] : []
         );
         const serverGrounded = Boolean((existing && isGroundedStrategyRecord(existing)) || provenance.grounded || clientGroundingActive === true);
-        const isGroundedOrUnverified = !strategyId || !existing || serverGrounded;
+        const isGroundedOrUnverified = !strategyId || !existing || serverGrounded || provenanceUnavailable;
         const onlyNecessaryData = !modelImprovement || isGroundedOrUnverified;
         const resolvedTitle = onlyNecessaryData ? "" : (existing.strategy?.title || existing.title || "");
         await telemetryService.trackExport({

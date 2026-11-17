@@ -105,7 +105,7 @@ export class LearningLoopService {
 
   async recordInteraction(input) {
     const groundingActive = isGroundedInteraction(input);
-    const isRestricted = groundingActive || input.onlyNecessaryData === true || input.modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(input.ownerId, input.privacySnapshot));
+    const isRestricted = Boolean(groundingActive || input.onlyNecessaryData === true || input.modelImprovement === false || (this.privacyPolicy && !await this.privacyPolicy.allows(input.ownerId, input.privacySnapshot)));
     const now = input.createdAt || new Date().toISOString();
     const tokens = usageFields(input.usage);
     const cost = estimateCost(input.modelName, tokens.inputTokens, tokens.outputTokens);
@@ -133,7 +133,10 @@ export class LearningLoopService {
       modelImprovement: !isRestricted,
       createdAt: now,
     };
-    await this.repository.update(async (store) => {
+    const runUpdate = typeof this.repository.updateOwner === "function"
+      ? (mutator) => this.repository.updateOwner(interaction.ownerId, mutator)
+      : (mutator) => this.repository.update(mutator);
+    await runUpdate(async (store) => {
       // Recheck on every CAS attempt, after reading the authoritative learning revision.
       if (this.privacyPolicy && !await this.privacyPolicy.allows(input.ownerId, input.privacySnapshot)) {
         interaction.onlyNecessaryData = true; interaction.modelImprovement = false;
@@ -160,7 +163,10 @@ export class LearningLoopService {
       explicitRating: ["positive", "negative"].includes(values.explicitRating) ? values.explicitRating : undefined,
       timeToNextAction: Number.isFinite(Number(values.timeToNextAction)) ? Math.max(0, Math.round(Number(values.timeToNextAction))) : undefined,
     }).filter(([, value]) => value !== undefined));
-    return this.repository.update(async (store) => {
+    const runUpdate = typeof this.repository.updateInteractionOwner === "function"
+      ? (mutator) => this.repository.updateInteractionOwner(ownerId, interactionId, mutator)
+      : (mutator) => this.repository.update(mutator);
+    return runUpdate(async (store) => {
       if (this.privacyPolicy && !await this.privacyPolicy.allows(ownerId)) return null;
       const interaction = store.interactions.find((item) => item.id === interactionId && item.ownerId === ownerId);
       if (isGroundedInteraction(interaction)) return null;
@@ -174,7 +180,12 @@ export class LearningLoopService {
 
   async recordIteration(input) {
     if (this.privacyPolicy && !await this.privacyPolicy.allows(input.ownerId, input.privacySnapshot)) return null;
-    return this.repository.update(async (store) => {
+    const runUpdate = input.ownerId && typeof this.repository.updateInteractionOwner === "function"
+      ? (mutator) => this.repository.updateInteractionOwner(input.ownerId, input.parentInteractionId, mutator)
+      : typeof this.repository.updateByInteractionId === "function"
+        ? (mutator) => this.repository.updateByInteractionId(input.parentInteractionId, mutator)
+        : (mutator) => this.repository.update(mutator);
+    return runUpdate(async (store) => {
       if (this.privacyPolicy && !await this.privacyPolicy.allows(input.ownerId, input.privacySnapshot)) return null;
       const parent = store.interactions.find((item) => item.id === input.parentInteractionId);
       if (
@@ -267,7 +278,10 @@ export class LearningLoopService {
 
   async reviewCandidate(id, status, reviewerId) {
     if (!["pending", "approved", "rejected"].includes(status)) return null;
-    return this.repository.update((store) => {
+    const runUpdate = typeof this.repository.updateByCandidateId === "function"
+      ? (mutator) => this.repository.updateByCandidateId(id, mutator)
+      : (mutator) => this.repository.update(mutator);
+    return runUpdate((store) => {
       const candidate = store.candidates.find((item) => item.id === id);
       if (!candidate) return null;
       candidate.status = status;

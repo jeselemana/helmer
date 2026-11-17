@@ -362,7 +362,7 @@ export async function buildPersonalizationContext({
     }
   }
 
-  if (settings.autoContext !== false && userMessage && (chatRepository || strategyRepository)) {
+  if (settings.modelImprovement === true && settings.autoContext !== false && userMessage && (chatRepository || strategyRepository)) {
     const relevantExcerpts = await getRelevantUserContext({
       ownerId: user.id,
       userMessage,

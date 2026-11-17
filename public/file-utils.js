@@ -62,8 +62,23 @@ export function arrayBufferToBase64(buffer) {
 
 const UNSUPPORTED_UPLOAD_EXTENSIONS = new Set(["doc", "xls", "svg"]);
 
-export async function readUploadedFileAsData(file, { isEn = false } = {}) {
+function readAbortableBuffer(file, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    const abort = () => reader.abort();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.onabort = () => reject(signal.reason);
+    reader.onloadend = () => signal.removeEventListener("abort", abort);
+    reader.readAsArrayBuffer(file);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export async function readUploadedFileAsData(file, { isEn = false, signal } = {}) {
   if (!file) return null;
+  signal?.throwIfAborted();
   const ext = String(file.name || "").split(".").pop()?.toLowerCase() || "";
   if (UNSUPPORTED_UPLOAD_EXTENSIONS.has(ext)) {
     throw new Error(
@@ -79,6 +94,18 @@ export async function readUploadedFileAsData(file, { isEn = false } = {}) {
 
   const mimeType = detectMimeType(file.name, file.type);
   const isTextLike = isTextLikeFile(file);
+  if (signal && typeof FileReader !== "undefined" && file instanceof Blob) {
+    const buffer = await readAbortableBuffer(file, signal);
+    signal.throwIfAborted();
+    return {
+      name: file.name,
+      size: file.size,
+      type: mimeType,
+      mimeType,
+      data: arrayBufferToBase64(buffer),
+      textContent: isTextLike ? new TextDecoder().decode(buffer) : undefined,
+    };
+  }
 
   let textContent;
   if (isTextLike) {
@@ -99,6 +126,7 @@ export async function readUploadedFileAsData(file, { isEn = false } = {}) {
     }
   }
 
+  signal?.throwIfAborted();
   let base64Data = "";
   if (typeof file.arrayBuffer === "function") {
     try {
@@ -125,6 +153,7 @@ export async function readUploadedFileAsData(file, { isEn = false } = {}) {
     });
   }
 
+  signal?.throwIfAborted();
   return {
     name: file.name,
     size: file.size,

@@ -148,8 +148,9 @@ test('guest HTTP: changing the guest cookie cannot evade the IP daily quota', as
 test('guest quotas: finish plus close refunds only once and uses reservation day across midnight', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-20T23:59:59Z') });
   const policy = new AiPolicy({ redis: null, env: { GUEST_AI_DAILY_LIMIT: '3' } });
-  const req = { method: 'POST', path: '/api/ask', ownerId: 'guest_refund', ip: '127.0.0.1', body: {}, securityContext: {} };
+  const req = { method: 'POST', path: '/api/ask', ownerId: 'guest_refund', ip: '127.0.0.1', body: {}, securityContext: {}, get: () => 'guest-refund-fixture-key' };
   const res = new EventEmitter();
+  res.json = () => {};
   await policy.middleware()(req, res, () => {});
   const keys = [...req.guestMemoryQuotaKeys];
   t.mock.timers.tick(2000);

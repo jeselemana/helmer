@@ -116,6 +116,8 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
         }
         return { searchCalls: 0, searchUsageKnown: false, searchSettlementEvidence: 'unknown_incomplete_stream' };
       };
+      let decisionDispatched = false;
+      let providerDispatched = false;
       const finish = async () => {
         if (released) return;
         released = true;
@@ -129,11 +131,14 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
             };
             await release.recordUsage?.(usageToRecord);
             await context.onProviderUsage?.({ provider: kind, model: params.model, ...usageToRecord });
-          } else if (observedOutputBytes > 0 || groundedSearchUsed) {
+          } else if (observedOutputBytes > 0 || groundedSearchUsed || decisionDispatched) {
             const rawInput = typeof params?.contents === 'string' ? params.contents : JSON.stringify(params?.contents || params?.input || params?.messages || '');
+            const inputTokens = decisionDispatched
+              ? Buffer.byteLength(JSON.stringify(params))
+              : Math.max(1, Math.ceil(Buffer.byteLength(rawInput) / 4));
             const searchSettlement = resolveSearchSettlement(groundedSearchUsed ? 1 : 0);
             const estimatedUsage = {
-              inputTokens: Math.max(1, Math.ceil(Buffer.byteLength(rawInput) / 4)),
+              inputTokens,
               outputTokens: observedOutputBytes > 0 ? Math.max(1, Math.ceil(observedOutputBytes / 4)) : 0,
               ...searchSettlement,
               estimated: true,
@@ -141,14 +146,14 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
             };
             await release.recordUsage?.(estimatedUsage);
             await context.onProviderUsage?.({ provider: kind, model: params.model, ...estimatedUsage });
-          } else {
+          } else if (!providerDispatched) {
             await release.refund?.();
           }
         } catch (error) {
           const failure = /^EXECUTION_/.test(error.code || '') ? error : Object.assign(new Error('Usage settlement unavailable'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
           context.controller?.abort(failure);
           throw failure;
-        } finally { await release(); }
+        } finally { await release({ retainReservation: providerDispatched }); }
       };
       try {
         context.signal?.throwIfAborted();
@@ -170,8 +175,12 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
             },
           };
         }
+        else if (type === 'decision') payload = params;
         else if (type === 'chat') payload = { ...params, store: false, ...(params.max_completion_tokens ? { max_completion_tokens: Math.min(params.max_completion_tokens, 16384) } : { max_tokens: Math.min(params.max_tokens || 16384, 16384) }) };
         else payload = { ...params, store: false, max_output_tokens: Math.min(params.max_output_tokens || 16384, 16384), ...(context.guest ? { max_tool_calls: 1 } : {}) };
+        signal?.throwIfAborted();
+        providerDispatched = true;
+        decisionDispatched = type === 'decision';
         context.providerStarted = true;
         if (context.timings) context.timings.providerRequestMs = Date.now() - context.timings.startedAt;
         const value = await original(payload, type === 'gemini' ? undefined : { ...options, signal });
@@ -242,6 +251,8 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
     // Explicit caching creates an additional billable operation and persistent
     // provider data. Use bounded local context until it has its own admission.
     if (client.caches?.create) client.caches.create = async () => { throw Object.assign(new Error('Provider context caching disabled'), { code: 'CACHE_DISABLED' }); };
+  } else if (kind === 'decision') {
+    protect(client, 'decide', 'decision');
   } else {
     protect(client.responses, 'create', 'responses');
     if (client.responses?.parse) client.responses.parse = async (params, options) => parseResponse(await client.responses.create(params, options), params);

@@ -161,33 +161,55 @@
   #workspace .planner-view .planner-filter-pill { padding: 8px; }
   #workspace .planner-view .planner-group:not(.planner-spotlight) { padding: 0; }
 }
-@media (max-width: 720px) {
-  #workspace .planner-view { padding: 24px 16px 110px; }
-  #workspace .planner-view .planner-header-row { margin-bottom: 24px; }
-  #workspace .planner-view .planner-header-actions { width: 100%; grid-template-columns: minmax(0, 1fr) 38px 38px; }
-  #workspace .planner-view .planner-header-actions .archive-planner-switch { justify-self: start; }
-  #workspace .planner-view .planner-overview { justify-self: stretch; justify-content: space-between; gap: 8px; }
-  #workspace .planner-view .planner-header-text h1 { font-size: 30px; }
-  #workspace .planner-view .planner-composer-card { flex-direction: column; align-items: stretch; gap: 12px; padding: 14px; margin-bottom: 22px; border-radius: 12px; }
-  #workspace .planner-view .planner-composer-input { font-size: 16px; min-height: 30px; }
-  #workspace .planner-view .planner-composer-bottom { justify-content: space-between; }
+@media (max-width: 767px) {
+  #workspace:has(.planner-view) { padding: 0; }
+  #workspace .planner-view { padding: 14px 16px calc(96px + env(safe-area-inset-bottom)); }
+  #workspace .planner-view .planner-header-row { gap: 14px; margin-bottom: 18px; }
+  #workspace .planner-view .section-kicker { margin-bottom: 6px; }
+  #workspace .planner-view .planner-header-text h1 { font-size: 26px; line-height: 1.15; }
+  #workspace .planner-view .planner-header-text p { margin-top: 6px; font-size: 13px; line-height: 1.45; }
+  #workspace .planner-view .planner-header-actions { width: 100%; grid-template-columns: minmax(0, 1fr) 40px 40px; gap: 8px; }
+  #workspace .planner-view .planner-header-actions .archive-planner-switch { justify-self: stretch; width: 100%; max-width: none; }
+  #workspace .planner-view .planner-header-actions .planner-search-toggle,
+  #workspace .planner-view .planner-header-actions .planner-notif-btn { width: 40px; height: 40px; }
+  #workspace .planner-view .planner-header-actions .planner-search-bar { position: relative; grid-column: 1 / -1; justify-self: stretch; top: auto; right: auto; width: 100%; height: 42px; min-height: 42px; margin-top: 2px; }
+  #workspace .planner-view .planner-header-actions .planner-search-input { font-size: 15px; }
+  #workspace .planner-view .planner-overview { justify-self: stretch; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 14px; padding: 10px 12px; border-radius: 12px; }
+  #workspace .planner-view .planner-progress-panel { width: 100%; display: flex; align-items: center; gap: 10px; }
+  #workspace .planner-view .planner-progress-track { flex: 1; margin: 0; height: 4px; }
+  #workspace .planner-view .planner-metric { border-left: 0; padding: 0; flex: 1 1 0; min-width: 64px; }
+  #workspace .planner-view .planner-capture { margin: 12px auto 18px; padding-top: 4px; }
+  #workspace .planner-view .planner-capture-title { font-size: 20px; line-height: 1.32; letter-spacing: -.025em; }
+  #workspace .planner-view .planner-capture-context { font-size: 12px; margin: 6px auto 14px; line-height: 1.45; }
+  #workspace .planner-view .planner-capture .planner-composer-card,
+  #workspace .planner-view .planner-composer-card { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px 14px; min-height: 0; margin-bottom: 18px; border-radius: 16px; }
+  #workspace .planner-view .planner-capture .planner-composer-input,
+  #workspace .planner-view .planner-composer-input { font-size: 15px; min-height: 28px; }
+  #workspace .planner-view .planner-composer-bottom { justify-content: space-between; gap: 8px; }
   #workspace .planner-view .planner-select-label, #workspace .planner-view .planner-chevron-icon { display: inline; }
-  #workspace .planner-view .planner-time-select-pill { width: auto; padding: 0 10px; }
-  #workspace .planner-view .planner-toolbar { flex-direction: column; align-items: stretch; margin-bottom: 20px; }
+  #workspace .planner-view .planner-time-select-pill { width: auto; max-width: calc(100% - 46px); padding: 0 10px; background: var(--pl-soft); border-radius: 10px; }
+  #workspace .planner-view .planner-select-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #workspace .planner-view .planner-toolbar { flex-direction: column; align-items: stretch; margin-bottom: 18px; gap: 12px; }
   #workspace .planner-view .planner-search-bar { width: 100%; }
-  #workspace .planner-view .planner-filter-row { width: 100%; overflow-x: auto; }
-  #workspace .planner-view .planner-filter-pills { width: 100%; justify-content: space-between; }
-  #workspace .planner-view .planner-filter-pill { flex-shrink: 0; font-size: 11px; padding: 9px 7px; }
-  #workspace .planner-view .planner-tasks-container { grid-template-columns: minmax(0, 1fr); gap: 24px; }
-  #workspace .planner-view .planner-spotlight { padding: 18px; }
-  #workspace .planner-view .planner-spotlight .planner-task-list { grid-template-columns: minmax(0, 1fr); }
-  #workspace .planner-view .planner-group-header { flex-wrap: wrap; gap: 12px; }
-  #workspace .planner-view .planner-task-card { padding: 14px; }
-  #workspace .planner-view .planner-task-text { font-size: 14px; }
+  #workspace .planner-view .planner-filter-row { width: 100%; overflow: visible; }
+  #workspace .planner-view .planner-filter-pills { width: 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; padding: 3px; border-radius: 11px; }
+  #workspace .planner-view .planner-filter-pill { justify-content: center; text-align: center; min-width: 0; font-size: 11.5px; padding: 8px 4px; border-radius: 8px; }
+  #workspace .planner-view .planner-filter-pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #workspace .planner-view .planner-tasks-container { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  #workspace .planner-view .planner-spotlight { padding: 16px 14px; border-radius: 14px; }
+  #workspace .planner-view .planner-spotlight .planner-group-name { font-size: 16px; }
+  #workspace .planner-view .planner-spotlight-caption { margin-bottom: 14px; font-size: 11.5px; }
+  #workspace .planner-view .planner-spotlight .planner-task-list { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  #workspace .planner-view .planner-group-header { flex-wrap: wrap; min-height: 38px; gap: 8px 10px; padding-bottom: 10px; margin-bottom: 12px; }
+  #workspace .planner-view .planner-task-card { padding: 13px 14px; border-radius: 12px; }
+  #workspace .planner-view .planner-task-text { font-size: 14px; line-height: 1.48; }
+  #workspace .planner-view .planner-card-actions { margin-top: 6px; }
   #workspace .planner-view .planner-execute-btn span { display: inline; }
-  #workspace .planner-view .planner-priority-ai-banner { flex-direction: column; align-items: flex-start; gap: 12px; }
-  #workspace .planner-view .planner-floating-actions { bottom: 82px; max-width: calc(100vw - 32px); }
-  #workspace .planner-view .planner-floating-content { flex-wrap: wrap; justify-content: center; gap: 10px; }
+  #workspace .planner-view .planner-priority-ai-banner { flex-direction: column; align-items: stretch; gap: 12px; padding: 14px; }
+  #workspace .planner-view .planner-reprioritize-btn { width: 100%; justify-content: center; }
+  #workspace .planner-view .planner-empty-state { padding: 40px 16px; }
+  #workspace .planner-view .planner-floating-actions { left: 14px; right: 14px; bottom: calc(16px + env(safe-area-inset-bottom)); width: auto; max-width: none; z-index: 60; }
+  #workspace .planner-view .planner-floating-content { width: 100%; flex-wrap: wrap; justify-content: space-between; gap: 8px 10px; padding: 9px 12px; }
 }
 
 #workspace .planner-view .planner-task-card:focus-visible { outline: 2px solid var(--pl-accent); outline-offset: 3px; }
@@ -237,14 +259,7 @@ body.dark:has(.planner-view) .mobile-header { background: #12141c; }
   #workspace .planner-view .planner-capture-title { grid-column: 2; grid-row: 1; }
   #workspace .planner-view .planner-capture .planner-overview { grid-column: 3; grid-row: 1; margin: 0; }
 }
-@media (max-width: 720px) {
-  #workspace .planner-view .planner-capture .planner-overview { justify-self: stretch; }
-  #workspace .planner-view .planner-capture { margin: 18px auto 22px; }
-  #workspace .planner-view .planner-capture-title { font-size: 21px; line-height: 1.4; letter-spacing: -.025em; }
-  #workspace .planner-view .planner-capture-context { font-size: 12px; margin: 8px auto 16px; }
-  #workspace .planner-view .planner-capture .planner-composer-card { padding: 14px; min-height: 0; border-radius: 20px; }
-  #workspace .planner-view .planner-capture .planner-composer-input { font-size: 16px; }
-}
+/* Mobile overrides are consolidated in the 767px media query above. */
 
 /* Compact search opens beside its header trigger without shifting the page. */
 #workspace .planner-view .planner-header-actions .planner-search-bar { position: absolute; z-index: 65; top: calc(100% + 8px); right: 0; width: min(280px, calc(100vw - 32px)); height: 40px; min-height: 40px; padding: 0 12px; gap: 8px; border-radius: 20px; overflow: hidden; }
@@ -260,13 +275,7 @@ body.dark:has(.planner-view) .mobile-header { background: #12141c; }
   to { opacity: 1; transform: none; }
 }
 
-@media (max-width: 720px) {
-  #workspace .planner-view .planner-header-actions { grid-template-columns: minmax(0, 1fr) 44px 44px; gap: 8px; }
-  #workspace .planner-view .planner-header-actions .planner-search-toggle,
-  #workspace .planner-view .planner-header-actions .planner-notif-btn { width: 44px; height: 44px; }
-  #workspace .planner-view .planner-header-actions .planner-search-bar { position: relative; grid-column: 1 / -1; justify-self: end; top: auto; right: auto; width: min(280px, 100%); height: 44px; min-height: 44px; }
-  #workspace .planner-view .planner-header-actions .planner-search-input { font-size: 16px; }
-}
+/* Mobile header action overrides are consolidated in the 767px media query above. */
 
 #workspace .planner-view .planner-search-toggle { transition: background 140ms ease, color 140ms ease; }
 #workspace .planner-view .planner-search-toggle svg { transform-origin: center; animation: planner-search-icon-enter 180ms cubic-bezier(.2,.7,.2,1); }

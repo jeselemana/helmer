@@ -69,7 +69,7 @@ function escapeHtml(value) {
 }
 
 function safeInternalPath(value) {
-  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) return "/";
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return "/";
   try {
     const url = new URL(value, location.origin);
     if (url.origin !== location.origin || AUTH_PATHS.has(url.pathname)) return "/";

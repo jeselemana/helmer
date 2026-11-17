@@ -31,6 +31,13 @@
 #sidebar .sidebar-mode-option { border-radius: 8px; color: var(--nav-muted); font-size: 13px; box-shadow: none; }
 #sidebar .sidebar-mode-option.is-active { background: var(--nav-active); color: var(--nav-text); box-shadow: none; }
 #sidebar .primary-nav { gap: 4px; flex-shrink: 0; }
+#sidebar .nav-more-group { display: flex; flex-direction: column; gap: 2px; }
+#sidebar .nav-more-toggle { justify-content: flex-start; }
+#sidebar .nav-more-toggle .nav-more-chevron { margin-left: auto; color: var(--nav-muted); transition: transform 0.18s ease; flex-shrink: 0; }
+#sidebar .nav-more-toggle[aria-expanded="true"] .nav-more-chevron { transform: rotate(180deg); }
+#sidebar .nav-more-toggle.has-active-child { color: var(--nav-text); }
+#sidebar .nav-more-menu { display: flex; flex-direction: column; gap: 2px; padding-left: 10px; margin-top: 2px; }
+#sidebar .nav-more-menu[hidden] { display: none !important; }
 #sidebar .nav-item { position: relative; height: 40px; min-height: 40px; padding: 0 12px; border-radius: 8px; color: var(--nav-muted); font-size: 13px; font-weight: 500; box-shadow: none; }
 #sidebar .nav-item > span:first-of-type { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #sidebar .nav-item .nav-svg { color: inherit; width: 19px; height: 19px; flex-shrink: 0; }
@@ -40,9 +47,10 @@
 #sidebar .nav-item.is-active::before { content: ''; position: absolute; left: 0; top: 12px; bottom: 12px; width: 2px; border-radius: 2px; background: var(--nav-accent); }
 #sidebar .nav-count, #sidebar .whats-new-badge { background: transparent; color: var(--nav-muted); font-size: 11px; }
 #sidebar .recent-section { position: relative; margin-top: 24px; min-height: 0; overflow: visible; padding-bottom: 16px; }
-#sidebar .recent-collapse-toggle { width: auto; max-width: 60%; padding: 8px 12px; color: var(--nav-muted); font-size: 10px; letter-spacing: .06em; }
-#sidebar .recent-view-all { position: absolute; right: 8px; top: 0; padding: 8px 4px; border: 0; background: transparent; color: var(--nav-muted); font-size: 11px; cursor: pointer; }
+#sidebar .recent-collapse-toggle { width: 100%; max-width: none; padding: 8px 12px; color: var(--nav-muted); font-size: 10px; letter-spacing: .06em; }
+#sidebar .recent-view-all { display: inline-flex; align-items: center; margin-top: 4px; padding: 6px 12px; border: 0; background: transparent; color: var(--nav-muted); font-size: 12px; font-weight: 500; cursor: pointer; }
 #sidebar .recent-view-all:hover { color: var(--nav-accent); }
+#sidebar .recent-section.is-collapsed .recent-view-all { display: none; }
 #sidebar .recent-list { max-height: none; overflow: visible; padding: 4px 0 0; }
 #sidebar .recent-item { min-height: 48px; padding: 8px 12px; border-radius: 8px; }
 #sidebar .recent-title { color: var(--nav-text); font-size: 13px; }
@@ -177,7 +185,8 @@
   font-size: 12px;
   font-weight: 600;
 }
-#sidebar :is(button, a):focus-visible, #appShell > .navigation-rail button:focus-visible, #navigationRestore:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#sidebar a.nav-item, #appShell > .navigation-rail a.rail-button { text-decoration: none; }
+#sidebar :is(button, a):focus-visible, #appShell > .navigation-rail :is(button, a):focus-visible, #navigationRestore:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #sidebar button:disabled { opacity: .45; cursor: not-allowed; }
 #navigationRestore { position: fixed; display: grid; place-items: center; padding: 0; left: 12px; top: max(24px, env(safe-area-inset-top)); z-index: 46; width: 40px; height: 40px; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--bg-sidebar); color: var(--text-primary); cursor: pointer; }
 #navigationRestore[hidden] { display: none; }
@@ -195,7 +204,6 @@
   #sidebar .sidebar-mode-switch { height: 52px; }
   #sidebar .recent-delete-btn { width: 44px; height: 44px; opacity: 1; }
   #sidebar .recent-section { margin-top: 16px; }
-  #sidebar .recent-view-all { padding-top: 12px; }
   #appShell > #mobileOverlay { background: rgba(8, 12, 22, .32); backdrop-filter: none; }
   body.sidebar-open { overflow: hidden; }
   #navigationHide, #navigationRestore { display: none; }

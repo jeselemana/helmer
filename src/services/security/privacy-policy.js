@@ -5,7 +5,10 @@ export function privacySnapshot(user) {
   return { enabled: user?.settings?.modelImprovement === true && user?.settings?.personalIntelligence !== false, epoch: user?.privacyEpoch || 0, ownerId: user?.id, authVersion: user?.authVersion || 1 };
 }
 export class PrivacyPolicy {
-  constructor(users) { this.users = users; }
+  constructor(users, authStore = null) {
+    this.users = users;
+    this.authStore = authStore;
+  }
   async allows(ownerId, snapshot) {
     if (!ownerId || typeof ownerId !== 'string' || ownerId.startsWith('guest_')) return false;
     const store = executionContext.getStore();
@@ -15,7 +18,7 @@ export class PrivacyPolicy {
 
     if (effectiveSnapshot && !effectiveSnapshot.enabled) return false;
     try {
-      const user = await this.users.findById(ownerId);
+      const user = await this.users.findById(ownerId, { force: true });
       if (!user || user.status !== 'active' || user.scheduledDeletionAt || user.settings?.modelImprovement !== true || user.settings?.personalIntelligence === false) {
         return false;
       }
@@ -32,11 +35,17 @@ export class PrivacyPolicy {
     await Promise.all([
       (async () => {
         if (!context.guest) {
-          const user = await this.users.findById(context.ownerId);
+          const [user, session] = await Promise.all([
+            this.users.findById(context.ownerId, { force: true }),
+            context.sessionId && this.authStore?.getSession(context.sessionId),
+          ]);
           const snapshot = context.privacySnapshot;
           if (!user || user.status !== 'active' || user.scheduledDeletionAt ||
               !snapshot || (user.privacyEpoch || 0) !== snapshot.epoch ||
-              (snapshot.authVersion !== undefined && (user.authVersion || 1) !== snapshot.authVersion)) {
+              (snapshot.authVersion !== undefined && (user.authVersion || 1) !== snapshot.authVersion) ||
+              (this.authStore && (!session || session.userId !== context.ownerId ||
+                session.protocolVersion !== 2 || session.authVersion !== snapshot.authVersion ||
+                (session.expiresAt !== undefined && session.expiresAt <= Date.now())))) {
             throw Object.assign(new Error('Execution authorization revoked'), { code: 'EXECUTION_REVOKED', status: 403 });
           }
         }
@@ -50,7 +59,7 @@ export class PrivacyPolicy {
   }
   middleware() {
     return (req, res, next) => {
-      const context = { ownerId: req.ownerId, privacySnapshot: privacySnapshot(req.user), providerStarted: false, guest: !req.user, signal: null, timings: req.askTimings };
+      const context = { ownerId: req.ownerId, sessionId: req.auth?.sessionId, privacySnapshot: privacySnapshot(req.user), providerStarted: false, guest: !req.user, signal: null, timings: req.askTimings };
       context.assertAuthorized = () => this.assertExecution(context);
       req.securityContext = context;
       executionContext.run(context, next);

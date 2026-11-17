@@ -45,7 +45,7 @@ export class AtomicJsonStore {
     this.r2FileName = r2FileName;
     this.mirrorToR2 = options.mirrorToR2 !== false;
     this.cloud = options.cloud ?? (this.mirrorToR2 && isR2Configured());
-    this.readCloud = options.readCloud || (() => readTenantObject(r2FileName));
+    this.readCloud = options.readCloud || ((readOptions = {}) => readTenantObject(r2FileName, { force: true, ...readOptions }));
     this.writeCloud = options.writeCloud || ((value, etag) => writeTenantObject(r2FileName, value, etag));
     this.empty = empty;
     this.normalize = normalize;
@@ -61,7 +61,7 @@ export class AtomicJsonStore {
 
   async readAuthoritative() {
     if (this.cloud) {
-      const { record, etag, notFound } = await this.readCloud();
+      const { record, etag, notFound } = await this.readCloud({ force: true });
       if (notFound || record === null) return { store: this.normalize(structuredClone(this.empty)), etag: etag || null };
       if (!record || typeof record !== "object" || Array.isArray(record)) throw storageCorruption("Invalid cloud JSON store.");
       return { store: this.normalize(structuredClone(record)), etag };

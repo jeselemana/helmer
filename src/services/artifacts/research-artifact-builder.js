@@ -459,6 +459,7 @@ export async function generateSelectiveResearchArtifacts({ job, text, artifactRe
   if (!artifactRepository || !job?.ownerId || !job?.chatId) {
     return [];
   }
+  if (job.googleSearchEnabled !== false || job.groundingMetadata || job.sources?.length) return [];
 
   const selectedFormats = selectResearchArtifactFormats(text, job.prompt);
   if (!selectedFormats || selectedFormats.length === 0) {

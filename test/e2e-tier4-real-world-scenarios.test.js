@@ -88,6 +88,7 @@ test("Tier 4 - Scenario 1: Complete end-to-end guest-to-registered user lifecycl
     email: "founder@ecopack.az",
     username: "ecopack_baku",
     password: "StrongPassword2026!",
+    ageConfirmed: true,
   };
   const signupParse = SignupSchema.safeParse(signupPayload);
   assert.ok(signupParse.success, "Signup payload must strictly validate");

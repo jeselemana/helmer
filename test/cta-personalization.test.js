@@ -24,17 +24,17 @@ test("script.js: CTAs include a balanced mix of personalized and natural nameles
   assert.ok(scriptContent.includes("const name = getUserFirstName();"), "getUserFirstName is called in getBuildCta / getAskCta");
   assert.ok(scriptContent.includes("typeof item === \"function\" ? item(name) : item"), "function-based CTAs are resolved with name");
 
-  // Verify key bold business phrases in AZ and EN (both personalized and nameless)
-  assert.ok(scriptContent.includes("növbəti həmlən nədir?"), "AZ Build contains personalized play CTA");
-  assert.ok(scriptContent.includes("what's the next play?"), "EN Build contains personalized play CTA");
-  assert.ok(scriptContent.includes("Rəqibləri oyundan çıxarmaq vaxtıdır."), "AZ Build contains natural nameless CTA");
-  assert.ok(scriptContent.includes("Eat their lunch."), "EN Build contains natural nameless CTA");
-  assert.ok(scriptContent.includes("Ləngiyən məhv olur. Tərpən."), "AZ Build contains natural nameless urgency CTA");
-  assert.ok(scriptContent.includes("Speed is the ultimate weapon."), "EN Build contains natural nameless urgency CTA");
-  assert.ok(scriptContent.includes("prosesdəki kritik boşluq nədir?"), "AZ Ask contains personalized critical gap CTA");
-  assert.ok(scriptContent.includes("where's the pipeline leaking?"), "EN Ask contains personalized leaking pipeline CTA");
-  assert.ok(scriptContent.includes("Özünü aldatma — real rəqəmləri göstər."), "AZ Ask contains natural nameless unit economics CTA");
-  assert.ok(scriptContent.includes("Stop capping. Show the unit economics."), "EN Ask contains natural nameless unit economics CTA");
+  // Verify neutral, native business phrases in AZ and EN (both personalized and nameless)
+  assert.ok(scriptContent.includes("bu gün nə üzərində işləyirik?"), "AZ Build contains personalized neutral CTA");
+  assert.ok(scriptContent.includes("what are we building today?"), "EN Build contains personalized neutral CTA");
+  assert.ok(scriptContent.includes("Növbəti strategiyanı quraq."), "AZ Build contains natural nameless CTA");
+  assert.ok(scriptContent.includes("Let's map out your next strategy."), "EN Build contains natural nameless CTA");
+  assert.ok(scriptContent.includes("İdeyanı addım-addım plana çevirək."), "AZ Build contains structured planning CTA");
+  assert.ok(scriptContent.includes("Turn your brief into a clear plan."), "EN Build contains structured planning CTA");
+  assert.ok(scriptContent.includes("bu gün nəyi araşdıraq?"), "AZ Ask contains personalized neutral CTA");
+  assert.ok(scriptContent.includes("what would you like to explore?"), "EN Ask contains personalized neutral CTA");
+  assert.ok(scriptContent.includes("Nə ilə bağlı kömək lazımdır?"), "AZ Ask contains natural nameless CTA");
+  assert.ok(scriptContent.includes("How can I help today?"), "EN Ask contains natural nameless CTA");
 });
 
 test("style.css: ask-title has uniform reduced font-weight: 400 across all CTA elements", async () => {

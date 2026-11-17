@@ -50,7 +50,7 @@ export const SignupSchema = z.object({
   language: z.enum(["az", "en"]).optional(),
   ageConfirmed: z.literal(true, {
     errorMap: () => ({ message: "Qeydiyyat üçün 18 yaşınızı və İstifadə Şərtlərini təsdiqləməlisiniz." }),
-  }).optional(),
+  }),
 }).strict();
 
 export const LoginSchema = z.object({

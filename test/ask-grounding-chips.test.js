@@ -76,12 +76,9 @@ test("2. Frontend script.js: implements renderAskSourceChips and wires it to Ask
   assert.match(scriptContent, /target = "_blank"/, "Must open links in new tab");
   assert.match(scriptContent, /rel = "noopener noreferrer"/, "Must have rel=noopener noreferrer for security");
 
-  // Must wire renderAskSourceChips(message.groundingMetadata) into Ask responses & streaming finalization
-  const chipCalls = scriptContent.match(/renderAskSourceChips\(message\.groundingMetadata\)/g) || [];
-  assert.ok(chipCalls.length >= 3, `Expected renderAskSourceChips(message.groundingMetadata) to be called in renderAsk, finalizeStreamingAskMessageDom, and buildStrategyAskMessage (found ${chipCalls.length})`);
-
   // Must wire openGroundingSourcesModal in message details/actions
-  assert.match(scriptContent, /openGroundingSourcesModal\(message\.groundingMetadata\)/, "Must open grounding sources modal from message details");
+  const modalCalls = scriptContent.match(/openGroundingSourcesModal\(message\.groundingMetadata\)/g) || [];
+  assert.ok(modalCalls.length >= 3, `Expected openGroundingSourcesModal(message.groundingMetadata) in Ask message actions (found ${modalCalls.length})`);
 
   // Must support inline markdown links safely
   assert.match(scriptContent, /ask-inline-link/, "Must support safe inline links");
@@ -102,15 +99,14 @@ test("3. Frontend style.css: defines compact chip styling and full dark mode sup
   assert.match(styleContent, /:root\[data-theme="dark"\]\s+\.ask-grounding-chip/, "style.css must have dark mode rules for chips");
 });
 
-test("4. Architecture Rules: .cursorrules and .antigravity/rules.md document Rule 8 for Ask mode web search chips", async () => {
+test("4. Architecture Rules: AGENTS.md documents Rule 8 and rule pointers reference AGENTS.md", async () => {
+  const agentsMd = await fs.readFile(path.join(rootDir, "AGENTS.md"), "utf8");
   const cursorrules = await fs.readFile(path.join(rootDir, ".cursorrules"), "utf8");
   const antigravityRules = await fs.readFile(path.join(rootDir, ".antigravity/rules.md"), "utf8");
 
-  assert.match(cursorrules, /### 8\. Ask Mode Web Search Grounding & Source Chips/, ".cursorrules must contain Rule 8");
-  assert.match(cursorrules, /compact chip format/, ".cursorrules must require compact chip format");
-  assert.match(cursorrules, /https\?:\/\//, ".cursorrules must enforce strict URL sanitization");
-
-  assert.match(antigravityRules, /### 8\. Ask Mode Web Search Grounding & Source Chips/, ".antigravity/rules.md must contain Rule 8");
-  assert.match(antigravityRules, /compact chip format/, ".antigravity/rules.md must require compact chip format");
-  assert.match(antigravityRules, /https\?:\/\//, ".antigravity/rules.md must enforce strict URL sanitization");
+  assert.match(agentsMd, /### 8\. Ask Mode Web Search Grounding & Source Chips/, "AGENTS.md must contain Rule 8");
+  assert.match(agentsMd, /compact chip format/, "AGENTS.md must require compact chip format");
+  assert.match(agentsMd, /https\?:\/\//, "AGENTS.md must enforce strict URL sanitization");
+  assert.match(cursorrules, /AGENTS\.md/, ".cursorrules must reference canonical AGENTS.md");
+  assert.match(antigravityRules, /AGENTS\.md/, ".antigravity/rules.md must reference canonical AGENTS.md");
 });

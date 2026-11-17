@@ -40,8 +40,8 @@ export class PasswordResetEmailService {
       }),
     });
     if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`Resend email delivery failed (${response.status}): ${detail.slice(0, 300)}`);
+      await response.body?.cancel().catch(() => {});
+      throw new Error(`Resend email delivery failed (${response.status})`);
     }
   }
 
@@ -58,7 +58,7 @@ export class PasswordResetEmailService {
       });
       return;
     }
-    if (this.env.NODE_ENV === "production") throw new Error("Email transport is not configured.");
+    if (this.env.NODE_ENV !== "test") throw new Error("Email transport is not configured.");
     const outboxPath = path.join(this.dataDir, "email-outbox.json");
     await fs.mkdir(this.dataDir, { recursive: true });
     let outbox = [];
@@ -93,7 +93,8 @@ export class PasswordResetEmailService {
     userAgent,
     ip,
   }) {
-    const recipient = this.env.LEGAL_REPORT_EMAIL || "elemanajes@gmail.com";
+    const recipient = this.env.LEGAL_REPORT_EMAIL?.trim();
+    if (!recipient) throw new Error("LEGAL_REPORT_EMAIL is required.");
     const subject = `[Helmer] Hüquqi Problem Bildirişi: ${issueType || "Ümumi"}`;
     const text = `Helmer - Yeni Hüquqi Problem Bildirişi\n\n`
       + `Tarix: ${timestamp}\n`
@@ -174,8 +175,8 @@ export class PasswordResetEmailService {
       return;
     }
 
-    if (this.env.NODE_ENV === "production") {
-      console.warn("SMTP transport is not configured in production. Saving report to outbox.");
+    if (this.env.NODE_ENV !== "test") {
+      throw new Error("Email transport is not configured.");
     }
 
     const outboxPath = path.join(this.dataDir, "email-outbox.json");

@@ -128,6 +128,46 @@ export function publicUser(user) {
   };
 }
 
+const AUTH_RECOVERY_FLOOR_MS = 250;
+const AUTH_RECOVERY_WAIT_CAP_MS = 1000;
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Awaits auth email delivery up to waitCapMs while enforcing a constant minimum
+ * floorMs so Cloud Run keeps CPU active during normal sends without leaking
+ * account existence or stalling on hung upstream lookups.
+ */
+async function awaitBoundedAuthDelivery(failureMessage, operation, {
+  floorMs = AUTH_RECOVERY_FLOOR_MS,
+  waitCapMs = AUTH_RECOVERY_WAIT_CAP_MS,
+} = {}) {
+  const floorPromise = sleepMs(floorMs);
+  if (typeof operation !== "function") {
+    await floorPromise;
+    return;
+  }
+  const workPromise = Promise.resolve()
+    .then(() => operation())
+    .catch(() => {
+      console.error(failureMessage);
+    });
+  let capTimer = null;
+  const capPromise = new Promise((resolve) => {
+    capTimer = setTimeout(resolve, waitCapMs);
+  });
+  try {
+    await Promise.all([
+      floorPromise,
+      Promise.race([workPromise, capPromise]),
+    ]);
+  } finally {
+    if (capTimer) clearTimeout(capTimer);
+  }
+}
+
 function rateKey(req, scope, identity = "") {
   const source = `${scope}:${req.ip || req.socket.remoteAddress || "unknown"}:${identity}`;
   return createHash("sha256").update(source).digest("hex");
@@ -173,8 +213,19 @@ async function startSession(req, res, authStore, user) {
   return sessionId;
 }
 
-export function createAuthRouter({ userRepository, authStore, emailService, strategyRepository, chatRepository, plannerRepository, aiLearningRepository, upRepository, appUrl, telemetryService, googleClient: customGoogleClient = null }) {
+export function createAuthRouter({ userRepository, authStore, emailService, strategyRepository, chatRepository, plannerRepository, aiLearningRepository, upRepository, appUrl, telemetryService, cleanupQueue = null, researchJobStore = null, googleClient: customGoogleClient = null }) {
   const telemetryRepository = telemetryService?.repository;
+  const purgeExpired = () => userRepository.purgeExpiredAccounts({
+    strategyRepository,
+    chatRepository,
+    plannerRepository,
+    upRepository,
+    aiLearningRepository,
+    telemetryRepository,
+    authStore,
+    cleanupQueue,
+    researchJobStore,
+  }).catch(() => {});
   // server.js loads dotenv after ESM imports have been evaluated. Resolve this
   // value when the router is created so the configured client ID is available.
   const googleClientId = process.env.GOOGLE_CLIENT_ID;
@@ -241,23 +292,12 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     const purpose = address === user.email ? "signup" : "email-change";
     const tokenId = hashOpaqueToken(`${user.id}:${address}:${user.authVersion || 1}:${purpose}:${code}`);
     await authStore.createEmailVerificationToken(tokenId, user.id, EMAIL_VERIFICATION_TTL_SECONDS, { email: address, purpose, authVersion: user.authVersion || 1 });
-    if (process.env.NODE_ENV !== "production") {
-      console.log(`\n🔑 [DEV ONLY] E-poçt təsdiq kodu (${user.email}): ${code}\n`);
-    }
     try {
       await emailService.sendEmailVerificationCode({ email: address, fullName: user.fullName, code });
     } catch (error) {
-      if (process.env.NODE_ENV === "production") {
-        // Do not leave a usable code behind if delivery fails in production.
-        await authStore.consumeEmailVerificationToken(tokenId);
-        console.error("Email verification delivery failed", {
-          userId: user.id,
-          emailDomain: user.email.split("@")[1] || "unknown",
-          message: error.message,
-        });
-        throw error;
-      }
-      console.warn(`[DEV ONLY] Email delivery skipped (${error.message}). Code is ready in console: ${code}`);
+      await authStore.consumeEmailVerificationToken(tokenId);
+      console.error("Email verification delivery failed");
+      throw error;
     }
   }
 
@@ -342,7 +382,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
       if (user.scheduledDeletionAt) {
         const scheduledTime = new Date(user.scheduledDeletionAt).getTime();
         if (!isNaN(scheduledTime) && scheduledTime <= Date.now()) {
-          await userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
+          await purgeExpired();
           return {
             status: 401,
             error: "Hesabınız 14 günlük gözləmə müddəti bitdiyinə görə tamamilə silinib.",
@@ -413,7 +453,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
         if (emailOwner.scheduledDeletionAt) {
           const scheduledTime = new Date(emailOwner.scheduledDeletionAt).getTime();
           if (!isNaN(scheduledTime) && scheduledTime <= Date.now()) {
-            await userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
+            await purgeExpired();
             return {
               status: 401,
               error: "Hesabınız 14 günlük gözləmə müddəti bitdiyinə görə tamamilə silinib.",
@@ -629,8 +669,8 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
         redirect_uri: googleRedirectUri,
       });
       idToken = tokenResponse?.tokens?.id_token;
-    } catch (exchangeError) {
-      console.warn("Google OAuth token exchange failed:", exchangeError?.message || exchangeError);
+    } catch {
+      console.warn("Google OAuth token exchange failed");
       if (isBrowserRedirect) {
         return res.redirect(302, `/login?error=${encodeURIComponent("INVALID_GOOGLE_CODE")}`);
       }
@@ -656,8 +696,8 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
         idToken,
         audience: googleClientId,
       });
-    } catch (verifyError) {
-      console.warn("Google OAuth ID token verification failed:", verifyError?.message || verifyError);
+    } catch {
+      console.warn("Google OAuth ID token verification failed");
       if (isBrowserRedirect) {
         return res.redirect(302, `/login?error=${encodeURIComponent("INVALID_GOOGLE_TOKEN")}`);
       }
@@ -723,8 +763,8 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
         idToken: credential,
         audience: googleClientId,
       });
-    } catch (verifyError) {
-      console.warn("Google ID token verification failed:", verifyError?.message || verifyError);
+    } catch {
+      console.warn("Google ID token verification failed");
       return res.status(401).json({
         error: "Google giriş məlumatı etibarsızdır və ya vaxtı bitib.",
         code: "INVALID_GOOGLE_TOKEN",
@@ -794,33 +834,18 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     limit(authStore, "email-verification-resend", 3, 15 * 60, (req) => normalizeEmail(req.body?.email)),
     asyncRoute(async (req, res) => {
     const payload = parseBody(EmailVerificationRequestSchema, req.body);
-    const user = await verificationUser(payload.email);
-    if (user && (!user.emailVerifiedAt || user.pendingEmail === payload.email)) {
-      const cooldown = await startEmailVerificationCooldown(req, user.email);
-      if (!cooldown.allowed) {
-        const retryAfter = Math.max(1, Math.ceil((cooldown.resetAt - Date.now()) / 1000));
-        res.set("Retry-After", String(retryAfter));
-        return res.status(429).json({
-          error: `Yeni kodu ${retryAfter} saniyə sonra istəyə bilərsən.`,
-          code: "EMAIL_VERIFICATION_COOLDOWN",
-          retryAfter,
-        });
-      }
-      try {
-        await sendEmailVerificationCode(user);
-      } catch {
-        if (process.env.NODE_ENV !== "production") {
-          return res.json({
-            ok: true,
-            message: "Təsdiq kodu terminala çıxarıldı (Lokal test).",
-          });
-        }
-        return res.status(503).json({
-          error: "Təsdiq kodu hazırda göndərilə bilmədi. Bir neçə dəqiqə sonra yenidən yoxla.",
-          code: "EMAIL_DELIVERY_UNAVAILABLE",
-        });
-      }
-    }
+    const cooldown = await startEmailVerificationCooldown(req, payload.email);
+    await awaitBoundedAuthDelivery(
+      "Email verification resend failed",
+      cooldown.allowed
+        ? async () => {
+            const user = await verificationUser(payload.email);
+            if (!user || (user.emailVerifiedAt && user.pendingEmail !== payload.email)) return;
+            if (user.email !== payload.email && !(await startEmailVerificationCooldown(req, user.email)).allowed) return;
+            await sendEmailVerificationCode(user);
+          }
+        : null,
+    );
     return res.json({ message: "Hesab mövcuddursa, təsdiq kodu e-poçta göndərildi." });
   }));
 
@@ -830,7 +855,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     limit(authStore, "email-verification-confirm", 20, 15 * 60, (req) => normalizeEmail(req.body?.email), { perAccount: true }),
     asyncRoute(async (req, res) => {
     const payload = parseBody(EmailVerificationConfirmSchema, req.body);
-    await userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
+    await purgeExpired();
     const user = await verificationUser(payload.email);
     const purpose = user?.pendingEmail === payload.email ? 'email-change' : 'signup';
     const tokenId = user ? hashOpaqueToken(`${user.id}:${payload.email}:${user.authVersion || 1}:${purpose}:${payload.code}`) : hashOpaqueToken(`missing:${payload.code}`);
@@ -854,7 +879,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     limit(authStore, "login", 12, 15 * 60, (req) => normalizeIdentifier(req.body?.identifier)),
     limit(authStore, "login", 50, 15 * 60, (req) => normalizeIdentifier(req.body?.identifier), { perAccount: true }),
     asyncRoute(async (req, res) => {
-    await userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
+    await purgeExpired();
 
     const payload = parseBody(LoginSchema, req.body);
     const user = await userRepository.findByIdentifier(payload.identifier);
@@ -897,7 +922,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     if (user.scheduledDeletionAt) {
       const scheduledTime = new Date(user.scheduledDeletionAt).getTime();
       if (!isNaN(scheduledTime) && scheduledTime <= Date.now()) {
-        await userRepository.purgeExpiredAccounts({ strategyRepository, chatRepository, plannerRepository, upRepository, aiLearningRepository, telemetryRepository, authStore }).catch(() => {});
+        await purgeExpired();
         return res.status(401).json({
           error: "Hesabınız 14 günlük gözləmə müddəti bitdiyinə görə tamamilə silinib.",
           code: "ACCOUNT_EXPIRED_DELETED",
@@ -954,7 +979,14 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     asyncRoute(async (req, res) => {
       parseBody(EmptyBodySchema, req.body || {});
       if (!req.user) return res.status(401).json({ error: "Sessiya aktiv deyil.", code: "AUTH_REQUIRED" });
-      await authStore.invalidateUserSessions(req.user.id, req.auth?.sessionId || null);
+      const previousVersion = req.user.authVersion || 1;
+      const updated = await userRepository.update(req.user.id, { authVersion: previousVersion + 1 }, {
+        allowSystemFields: true, expectedAuthVersion: previousVersion,
+      });
+      const sessionId = req.auth?.sessionId;
+      const kept = updated && sessionId && await authStore.advanceSessionVersion(sessionId, req.user.id, previousVersion);
+      await authStore.invalidateUserSessions(req.user.id, kept ? sessionId : null);
+      if (!kept) clearSessionCookie(req, res);
       return res.json({ ok: true });
     }),
   );
@@ -1028,8 +1060,11 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
       const updated = await userRepository.update(req.user.id, updateData, { allowSystemFields: true });
       if (updated?.settings?.modelImprovement === false) await telemetryService?.repository?.scrubOwner?.(req.user.id);
 
-      if (updated?.settings?.modelImprovement === false && aiLearningRepository?.update) {
-        await aiLearningRepository.update((store) => {
+      if (updated?.settings?.modelImprovement === false) {
+        if (typeof aiLearningRepository?.scrubOwner === "function") {
+          await aiLearningRepository.scrubOwner(req.user.id);
+        } else if (aiLearningRepository?.update) {
+          await aiLearningRepository.update((store) => {
           const ownerInteractionIds = new Set(
             store.interactions.filter((i) => i.ownerId === req.user.id).map((i) => i.id)
           );
@@ -1055,7 +1090,8 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
               item.relevantContext = null;
             }
           }
-        });
+          });
+        }
       }
       return res.json({ user: publicUser(updated) });
     })
@@ -1067,21 +1103,34 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     asyncRoute(async (req, res) => {
       if (!req.user) return res.status(401).json({ error: "Sessiya aktiv deyil.", code: "AUTH_REQUIRED" });
       const payload = parseBody(AddMemoryItemSchema, req.body);
-      const currentMemories = Array.isArray(req.user.settings?.memories) ? req.user.settings.memories : [];
-      if (currentMemories.length >= 50) {
-        return res.status(400).json({ error: "Maksimum 50 yaddaş qeydi saxlanıla bilər.", code: "LIMIT_REACHED" });
-      }
       const newMemory = {
         id: `mem_${randomUUID().slice(0, 8)}`,
         text: payload.text,
         category: payload.category || "general",
         createdAt: new Date().toISOString(),
       };
-      const updatedMemories = [newMemory, ...currentMemories];
+      if (typeof userRepository.updateSettingsAtomically === "function") {
+        const outcome = await userRepository.updateSettingsAtomically(req.user.id, (currentSettings) => {
+          const currentMemories = Array.isArray(currentSettings.memories) ? currentSettings.memories : [];
+          if (currentMemories.length >= 50) {
+            return { modified: false, result: { limitReached: true } };
+          }
+          return {
+            settings: { memories: [newMemory, ...currentMemories] },
+            result: { limitReached: false },
+          };
+        });
+        if (outcome?.result?.limitReached) {
+          return res.status(400).json({ error: "Maksimum 50 yaddaş qeydi saxlanıla bilər.", code: "LIMIT_REACHED" });
+        }
+        return res.status(201).json({ memory: newMemory, user: publicUser(outcome.user) });
+      }
+      const currentMemories = Array.isArray(req.user.settings?.memories) ? req.user.settings.memories : [];
+      if (currentMemories.length >= 50) {
+        return res.status(400).json({ error: "Maksimum 50 yaddaş qeydi saxlanıla bilər.", code: "LIMIT_REACHED" });
+      }
       const updated = await userRepository.update(req.user.id, {
-        settings: {
-          memories: updatedMemories,
-        },
+        settings: { memories: [newMemory, ...currentMemories] },
       });
       return res.status(201).json({ memory: newMemory, user: publicUser(updated) });
     })
@@ -1090,10 +1139,20 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
   router.delete(
     "/settings/memory/:id",
     asyncRoute(async (req, res) => {
+      parseBody(EmptyBodySchema, req.body ?? {});
       if (!req.user) return res.status(401).json({ error: "Sessiya aktiv deyil.", code: "AUTH_REQUIRED" });
       const memoryId = String(req.params.id || "").trim();
       if (!memoryId || !/^[a-zA-Z0-9_-]{1,100}$/.test(memoryId)) {
         return res.status(400).json({ error: "Yaddaş ID-si düzgün deyil.", code: "VALIDATION_ERROR" });
+      }
+      if (typeof userRepository.updateSettingsAtomically === "function") {
+        const outcome = await userRepository.updateSettingsAtomically(req.user.id, (currentSettings) => {
+          const currentMemories = Array.isArray(currentSettings.memories) ? currentSettings.memories : [];
+          return {
+            settings: { memories: currentMemories.filter((m) => m.id !== memoryId) },
+          };
+        });
+        return res.json({ ok: true, user: publicUser(outcome.user) });
       }
       const currentMemories = Array.isArray(req.user.settings?.memories) ? req.user.settings.memories : [];
       const filtered = currentMemories.filter((m) => m.id !== memoryId);
@@ -1109,11 +1168,9 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
   router.delete("/settings/memory", asyncRoute(async (req, res) => {
     parseBody(EmptyBodySchema, req.body || {});
     if (!req.user) return res.status(401).json({ error: "Sessiya aktiv deyil.", code: "AUTH_REQUIRED" });
-    const updated = await userRepository.update(req.user.id, {
-      settings: {
-        memories: [],
-      },
-    });
+    const updated = typeof userRepository.updateSettingsAtomically === "function"
+      ? (await userRepository.updateSettingsAtomically(req.user.id, () => ({ settings: { memories: [] } }))).user
+      : await userRepository.update(req.user.id, { settings: { memories: [] } });
     return res.json({ ok: true, user: publicUser(updated) });
   }));
 
@@ -1123,8 +1180,6 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     asyncRoute(async (req, res) => {
     if (!req.user) return res.status(401).json({ error: "Sessiya aktiv deyil.", code: "AUTH_REQUIRED" });
     const payload = parseBody(ImportMemoryPayloadSchema, req.body);
-    const currentSettings = req.user.settings && typeof req.user.settings === "object" ? req.user.settings : {};
-    const currentMemories = Array.isArray(currentSettings.memories) ? currentSettings.memories : [];
 
     const now = new Date().toISOString();
     const importedMemories = (payload.memories || []).map((m) => ({
@@ -1134,38 +1189,46 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
       createdAt: now,
     }));
 
-    let finalMemories = [];
-    if (payload.mergeMode === "replace") {
-      finalMemories = importedMemories.slice(0, 50);
-    } else {
-      const existingTexts = new Set(currentMemories.map((m) => m.text.trim().toLowerCase()));
-      const newItems = importedMemories.filter((m) => !existingTexts.has(m.text.trim().toLowerCase()));
-      finalMemories = [...newItems, ...currentMemories].slice(0, 50);
-    }
+    const buildMergedSettings = (currentSettings) => {
+      const currentMemories = Array.isArray(currentSettings.memories) ? currentSettings.memories : [];
+      let finalMemories = [];
+      if (payload.mergeMode === "replace") {
+        finalMemories = importedMemories.slice(0, 50);
+      } else {
+        const existingTexts = new Set(currentMemories.map((m) => m.text.trim().toLowerCase()));
+        const newItems = importedMemories.filter((m) => !existingTexts.has(m.text.trim().toLowerCase()));
+        finalMemories = [...newItems, ...currentMemories].slice(0, 50);
+      }
 
-    const updatedSettings = {
-      personalIntelligence: payload.enablePersonalIntelligence !== false ? true : (currentSettings.personalIntelligence ?? true),
-      brandName: payload.brandName !== undefined && payload.brandName !== "" ? payload.brandName : (currentSettings.brandName || ""),
-      industry: payload.industry !== undefined && payload.industry !== "" ? payload.industry : (currentSettings.industry || ""),
-      primaryMarket: payload.primaryMarket !== undefined && payload.primaryMarket !== "" ? payload.primaryMarket : (currentSettings.primaryMarket || ""),
-      targetAudience: payload.targetAudience !== undefined && payload.targetAudience !== "" ? payload.targetAudience : (currentSettings.targetAudience || ""),
-      tone: payload.tone || currentSettings.tone || "professional",
-      customInstructions: payload.customInstructions !== undefined && payload.customInstructions !== ""
-        ? (payload.mergeMode === "merge" && currentSettings.customInstructions && currentSettings.customInstructions !== payload.customInstructions
-            ? `${currentSettings.customInstructions}\n\n${payload.customInstructions}`.slice(0, 2000)
-            : payload.customInstructions)
-        : (currentSettings.customInstructions || ""),
-      memories: finalMemories,
+      return {
+        personalIntelligence: payload.enablePersonalIntelligence !== false ? true : (currentSettings.personalIntelligence ?? true),
+        brandName: payload.brandName !== undefined && payload.brandName !== "" ? payload.brandName : (currentSettings.brandName || ""),
+        industry: payload.industry !== undefined && payload.industry !== "" ? payload.industry : (currentSettings.industry || ""),
+        primaryMarket: payload.primaryMarket !== undefined && payload.primaryMarket !== "" ? payload.primaryMarket : (currentSettings.primaryMarket || ""),
+        targetAudience: payload.targetAudience !== undefined && payload.targetAudience !== "" ? payload.targetAudience : (currentSettings.targetAudience || ""),
+        tone: payload.tone || currentSettings.tone || "professional",
+        customInstructions: payload.customInstructions !== undefined && payload.customInstructions !== ""
+          ? (payload.mergeMode === "merge" && currentSettings.customInstructions && currentSettings.customInstructions !== payload.customInstructions
+              ? `${currentSettings.customInstructions}\n\n${payload.customInstructions}`.slice(0, 2000)
+              : payload.customInstructions)
+          : (currentSettings.customInstructions || ""),
+        memories: finalMemories,
+      };
     };
 
-    const updated = await userRepository.update(req.user.id, {
-      settings: updatedSettings,
-    });
+    const updated = typeof userRepository.updateSettingsAtomically === "function"
+      ? (await userRepository.updateSettingsAtomically(req.user.id, (currentSettings) => ({
+          settings: buildMergedSettings(currentSettings),
+        }))).user
+      : await userRepository.update(req.user.id, {
+          settings: buildMergedSettings(req.user.settings && typeof req.user.settings === "object" ? req.user.settings : {}),
+        });
+    const totalMemories = Array.isArray(updated?.settings?.memories) ? updated.settings.memories.length : 0;
 
     return res.status(200).json({
       ok: true,
       importedCount: importedMemories.length,
-      totalMemories: finalMemories.length,
+      totalMemories,
       user: publicUser(updated),
     });
   }));
@@ -1205,7 +1268,10 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     if (await verifyPassword(req.user.passwordHash, payload.newPassword)) {
       return res.status(400).json({ error: "Yeni şifrə cari şifrədən fərqli olmalıdır.", code: "PASSWORD_REUSED" });
     }
-    await userRepository.updatePassword(req.user.id, await hashPassword(payload.newPassword));
+    const updated = await userRepository.updatePassword(req.user.id, await hashPassword(payload.newPassword), {
+      expectedAuthVersion: req.user.authVersion || 1,
+    });
+    if (!updated) return res.status(401).json({ code: 'SESSION_CHANGED' });
     await authStore.invalidateUserSessions(req.user.id);
     clearSessionCookie(req, res);
     return res.json({ ok: true });
@@ -1218,17 +1284,19 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     asyncRoute(async (req, res) => {
     const generic = { message: "Bu e-poçt sistemdə varsa, şifrə yeniləmə keçidi göndərildi." };
     const parsed = ForgotPasswordSchema.safeParse(req.body);
-    if (!parsed.success) return res.json(generic);
-    const user = await userRepository.findByEmail(parsed.data.email);
-    if (!user) return res.json(generic);
-    const rawToken = randomBytes(32).toString("base64url");
-    await authStore.createResetToken(hashOpaqueToken(rawToken), user.id, RESET_TTL_SECONDS, { purpose: "password-reset", authVersion: user.authVersion || 1 });
-    const resetUrl = `${appUrl.replace(/\/$/, "")}/reset-password?token=${encodeURIComponent(rawToken)}`;
-    try {
-      await emailService.sendPasswordResetEmail({ email: user.email, fullName: user.fullName, resetUrl });
-    } catch (error) {
-      console.error("Password reset email delivery failed", { name: error.name, message: error.message });
-    }
+    await awaitBoundedAuthDelivery(
+      "Password reset email delivery failed",
+      parsed.success
+        ? async () => {
+            const user = await userRepository.findByEmail(parsed.data.email);
+            if (!user) return;
+            const rawToken = randomBytes(32).toString("base64url");
+            await authStore.createResetToken(hashOpaqueToken(rawToken), user.id, RESET_TTL_SECONDS, { purpose: "password-reset", authVersion: user.authVersion || 1 });
+            const resetUrl = `${canonicalAppUrl}/reset-password?token=${encodeURIComponent(rawToken)}`;
+            await emailService.sendPasswordResetEmail({ email: user.email, fullName: user.fullName, resetUrl });
+          }
+        : null,
+    );
     return res.json(generic);
   }));
 
@@ -1240,7 +1308,10 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     }
     const user = await userRepository.findById(reset.userId);
     if (!user || reset.purpose !== "password-reset" || reset.authVersion !== (user.authVersion || 1)) return res.status(400).json({ error: "Keçid etibarsızdır və ya vaxtı bitib.", code: "INVALID_RESET_TOKEN" });
-    await userRepository.updatePassword(user.id, await hashPassword(payload.password));
+    const updated = await userRepository.updatePassword(user.id, await hashPassword(payload.password), {
+      expectedAuthVersion: reset.authVersion,
+    });
+    if (!updated) return res.status(401).json({ code: 'SESSION_CHANGED' });
     await authStore.invalidateUserSessions(user.id);
     clearSessionCookie(req, res);
     return res.json({ ok: true });

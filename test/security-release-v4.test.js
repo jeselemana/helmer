@@ -56,6 +56,7 @@ test('release: cache enforces byte capacity across large files', () => {
 test('release: production config validation flags missing secrets and invalid MFA key', () => {
   assert.doesNotThrow(() => validateSecurityConfig({ NODE_ENV: 'development' }));
   assert.throws(() => validateSecurityConfig({ NODE_ENV: 'production', SESSION_SECRET: '', AUTH_SECRET: 'x' }), /requires configured secrets/);
+  assert.throws(() => validateSecurityConfig({ NODE_ENV: 'production', SESSION_SECRET: 's', AUTH_SECRET: 'a', APP_URL: 'https://helmer.example.com' }), /REDIS_URL/);
   assert.throws(() => validateSecurityConfig({ NODE_ENV: 'production', SESSION_SECRET: 's', AUTH_SECRET: 'a', ADMIN_MFA_ENCRYPTION_KEY: 'short' }), /32-byte/);
   assert.doesNotThrow(() => validateSecurityConfig({
     NODE_ENV: 'production',

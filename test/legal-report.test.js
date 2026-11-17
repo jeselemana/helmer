@@ -5,11 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { PasswordResetEmailService } from "../src/auth/email-service.js";
 
-test("sendLegalReportEmail forwards to elemanajes@gmail.com with all required fields in outbox", async (t) => {
+test("sendLegalReportEmail forwards to legal@example.test with all required fields in outbox", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "helmer-legal-report-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
 
-  const service = new PasswordResetEmailService({ dataDir: directory, env: { NODE_ENV: "test" } });
+  const service = new PasswordResetEmailService({ dataDir: directory, env: { NODE_ENV: "test", LEGAL_REPORT_EMAIL: "legal@example.test" } });
 
   await service.sendLegalReportEmail({
     issueType: "Müəllif hüquqları və əqli mülkiyyət pozuntusu",
@@ -31,7 +31,7 @@ test("sendLegalReportEmail forwards to elemanajes@gmail.com with all required fi
   assert.equal(outbox.length, 1);
   const item = outbox[0];
 
-  assert.equal(item.to, "elemanajes@gmail.com");
+  assert.equal(item.to, "legal@example.test");
   assert.equal(item.replyTo, "reporter@example.com");
   assert.match(item.subject, /Müəllif hüquqları və əqli mülkiyyət pozuntusu/);
   assert.match(item.text, /Nigar Məmmədova/);
@@ -47,7 +47,7 @@ test("sendLegalReportEmail works without user email (anonymous user)", async (t)
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "helmer-legal-report-anon-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
 
-  const service = new PasswordResetEmailService({ dataDir: directory, env: { NODE_ENV: "test" } });
+  const service = new PasswordResetEmailService({ dataDir: directory, env: { NODE_ENV: "test", LEGAL_REPORT_EMAIL: "legal@example.test" } });
 
   await service.sendLegalReportEmail({
     issueType: "Fərdi məlumatlar və məxfilik pozuntusu",
@@ -61,7 +61,7 @@ test("sendLegalReportEmail works without user email (anonymous user)", async (t)
 
   assert.equal(outbox.length, 1);
   const item = outbox[0];
-  assert.equal(item.to, "elemanajes@gmail.com");
+  assert.equal(item.to, "legal@example.test");
   assert.equal(item.replyTo, undefined);
   assert.match(item.text, /Fərdi məlumatlar və məxfilik pozuntusu/);
   assert.match(item.text, /Mini/);

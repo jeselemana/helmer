@@ -1,9 +1,11 @@
 import express from "express";
 import { z } from "zod";
+import { EmptyBodySchema } from "../domain/strategy.js";
 import { assertExecutionAuthorized, createExecutionController } from "../services/security/execution-control.js";
 import { summarizeTasksWithLuna, prioritizeTasksWithLuna } from "../services/ai/strategy-service.js";
 import { aiConfig } from "../services/ai/config.js";
 import { httpStatusOf, publicErrorMessage } from "./error-response.js";
+import { GUEST_RESTRICTION_NOTICES } from "../services/ai/prompts.js";
 import { isModelImprovementEnabled } from "./auth-middleware.js";
 import {
   isGroundedStrategyRecord,
@@ -81,31 +83,24 @@ export function createPlannerRouter(plannerRepository, options = {}) {
   const strategyRepository = options.strategyRepository || null;
   const telemetryService = options.telemetryService || null;
 
-  const guestMutationRate = new Map();
-  function checkGuestPlannerRate(ip) {
-    const now = Date.now();
-    const windowMs = 10 * 60 * 1000;
-    const limit = 60;
-    const record = guestMutationRate.get(ip) || { count: 0, resetAt: now + windowMs };
-    if (now > record.resetAt) {
-      record.count = 0;
-      record.resetAt = now + windowMs;
+  router.use((req, res, next) => {
+    if (typeof req.ownerId === "string" && req.ownerId.startsWith("guest_") && !req.user) {
+      return res.status(401).json({
+        code: "AUTH_REQUIRED",
+        error: GUEST_RESTRICTION_NOTICES.planner,
+        reply: GUEST_RESTRICTION_NOTICES.planner,
+      });
     }
-    record.count += 1;
-    guestMutationRate.set(ip, record);
-    if (guestMutationRate.size > 10000) {
-      for (const [k, v] of guestMutationRate) if (v.resetAt < now) guestMutationRate.delete(k);
-    }
-    return record.count <= limit;
-  }
+    return next();
+  });
 
   async function loadOwnerStrategies(ownerId) {
     if (!strategyRepository || !ownerId) return [];
     if (typeof strategyRepository.loadOwnerProvenance === "function") {
-      await strategyRepository.loadOwnerProvenance(ownerId).catch(() => {});
+      await strategyRepository.loadOwnerProvenance(ownerId);
     }
     if (typeof strategyRepository.readAll === "function") {
-      return strategyRepository.readAll(ownerId).catch(() => []);
+      return strategyRepository.readAll(ownerId);
     }
     if (typeof strategyRepository.list === "function") {
       return strategyRepository.list(ownerId).catch(() => []);
@@ -141,19 +136,13 @@ export function createPlannerRouter(plannerRepository, options = {}) {
       const tasks = await plannerRepository.list(req.ownerId);
       return res.json({ tasks });
     } catch (error) {
-      console.error("Planner list error:", error);
+      console.error("Planner list error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Tapşırıqları yükləmək mümkün olmadı." });
     }
   });
 
   router.post("/batch", async (req, res) => {
     try {
-      if (!req.user) {
-        const ip = req.ip || req.socket?.remoteAddress || "127.0.0.1";
-        if (!checkGuestPlannerRate(ip)) {
-          return res.status(429).json({ error: "Çox sayda sorğu göndərildi. Bir qədər sonra yenidən cəhd edin.", code: "RATE_LIMITED" });
-        }
-      }
       const parsed = BatchCreateTasksSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({
@@ -197,19 +186,13 @@ export function createPlannerRouter(plannerRepository, options = {}) {
       const allTasks = await plannerRepository.list(req.ownerId);
       return res.json({ added, count: added.length, tasks: allTasks });
     } catch (error) {
-      console.error("Planner batch add error:", error);
+      console.error("Planner batch add error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Tapşırıqları əlavə etmək mümkün olmadı." });
     }
   });
 
   router.post("/", async (req, res) => {
     try {
-      if (!req.user) {
-        const ip = req.ip || req.socket?.remoteAddress || "127.0.0.1";
-        if (!checkGuestPlannerRate(ip)) {
-          return res.status(429).json({ error: "Çox sayda sorğu göndərildi. Bir qədər sonra yenidən cəhd edin.", code: "RATE_LIMITED" });
-        }
-      }
       const parsed = TaskInputSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({
@@ -249,7 +232,7 @@ export function createPlannerRouter(plannerRepository, options = {}) {
       ]);
       return res.status(201).json({ task: added[0] || null });
     } catch (error) {
-      console.error("Planner create error:", error);
+      console.error("Planner create error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Tapşırıq yaratmaq mümkün olmadı." });
     }
   });
@@ -370,7 +353,7 @@ export function createPlannerRouter(plannerRepository, options = {}) {
         return res.end();
       }
       const status = httpStatusOf(error);
-      console.error("Planner summarize error:", error);
+      console.error("Planner summarize error:", { name: error?.name, code: error?.code });
       return res.status(status).json({
         error: publicErrorMessage(error, "Tapşırıqları xülasələndirmək mümkün olmadı."),
         ...(error?.code ? { code: error.code } : {}),
@@ -502,7 +485,7 @@ export function createPlannerRouter(plannerRepository, options = {}) {
         return res.end();
       }
       const status = httpStatusOf(error);
-      console.error("Planner prioritize error:", error);
+      console.error("Planner prioritize error:", { name: error?.name, code: error?.code });
       return res.status(status).json({
         error: publicErrorMessage(error, "Tapşırıqları prioritetləşdirmək mümkün olmadı."),
         ...(error?.code ? { code: error.code } : {}),
@@ -562,22 +545,24 @@ export function createPlannerRouter(plannerRepository, options = {}) {
 
       return res.json({ task: updated });
     } catch (error) {
-      console.error("Planner update error:", error);
+      console.error("Planner update error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Tapşırığı yeniləmək mümkün olmadı." });
     }
   });
 
   router.delete("/completed", async (req, res) => {
+    if (!EmptyBodySchema.safeParse(req.body ?? {}).success) return res.status(400).json({ code: "VALIDATION_ERROR" });
     try {
       const count = await plannerRepository.clearCompleted(req.ownerId);
       return res.json({ ok: true, cleared: count });
     } catch (error) {
-      console.error("Planner clear completed error:", error);
+      console.error("Planner clear completed error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Tamamlanmış tapşırıqları silmək mümkün olmadı." });
     }
   });
 
   router.delete("/:id", async (req, res) => {
+    if (!EmptyBodySchema.safeParse(req.body ?? {}).success) return res.status(400).json({ code: "VALIDATION_ERROR" });
     try {
       const id = typeof req.params?.id === "string" ? req.params.id.trim() : "";
       if (!/^[0-9a-f-]{36}$/i.test(id)) {
@@ -589,7 +574,7 @@ export function createPlannerRouter(plannerRepository, options = {}) {
       }
       return res.json({ ok: true, id });
     } catch (error) {
-      console.error("Planner delete error:", error);
+      console.error("Planner delete error:", { name: error?.name, code: error?.code });
       return res.status(500).json({ error: "Tapşırığı silmək mümkün olmadı." });
     }
   });

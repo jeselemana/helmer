@@ -101,15 +101,15 @@ test("style.css defines minimalist premium buttons, dark mode parity, and typing
   );
 });
 
-test("script.js renders clean 'Context Selected' badge without dumping entire strategy title", async () => {
+test("script.js renders minimalist active context pill without dumping entire strategy title into placeholder", async () => {
   const js = await fs.readFile(path.join(process.cwd(), "public/script.js"), "utf8");
 
   assert.ok(
-    js.includes('element(\n      "span",\n      "ask-active-context-label",\n      "Context Selected"\n    )'),
-    "Active context badge displays clean 'Context Selected' label"
+    js.includes('element(\n      "span",\n      "ask-active-context-label",\n      contextTitle || fallbackLabel\n    )'),
+    "Active context pill displays concise truncated context title or fallback label"
   );
   assert.ok(
-    js.includes('contextChip.title = selectedStrategy?.title || selectedTask?.text || "Context Selected"'),
+    js.includes('contextChip.title = contextTitle || fallbackLabel'),
     "Stores original full context title in hover title attribute"
   );
   assert.ok(

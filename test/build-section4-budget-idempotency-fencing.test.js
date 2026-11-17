@@ -268,10 +268,11 @@ test('provider-policy settlement handles partial text error, partial search cuto
     assert.equal(budgetOf(ownerId), 35_225);
   }
 
-  // E. Pre-output failure refunds cleanly, and retry charges exactly once (no double charge)
+  // E. An ambiguous failure retains its reserve; the retry settles its observed usage once.
   {
     const ownerId = `settle-e-${randomUUID()}`;
     let calls = 0;
+    let failedReservation;
     const usages = [];
     const client = wrapProvider({
       models: {
@@ -295,12 +296,13 @@ test('provider-policy settlement handles partial text error, partial search cuto
       onProviderUsage: async u => usages.push(u),
     }, async () => {
       await assert.rejects(() => client.models.generateContent({ model: 'gemini-4-hydrogen', contents: 'Hi', config: {} }));
-      assert.equal(budgetOf(ownerId), 0, 'Pre-output failure must refund reservation completely');
+      failedReservation = budgetOf(ownerId);
+      assert.ok(failedReservation > 0);
       await client.models.generateContent({ model: 'gemini-4-hydrogen', contents: 'Hi', config: {} });
     });
 
     assert.equal(usages.length, 1);
-    assert.equal(budgetOf(ownerId), 300, 'Retry must settle exact single-call cost');
+    assert.equal(budgetOf(ownerId), failedReservation + 300);
   }
 });
 

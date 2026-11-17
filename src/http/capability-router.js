@@ -1,6 +1,7 @@
 import { assertExecutionAuthorized } from '../services/security/execution-control.js';
 import { createAskTransport } from './ask-transport.js';
 import { createAskConfig } from '../services/ai/ask-config.js';
+import { geminiFileCache } from '../services/ai/gemini-file-cache.js';
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -25,30 +26,66 @@ const upload = z.object({
   data: z.string().max(28 * 1024 * 1024).optional(), textContent: z.string().max(200000).optional(),
   ownerId: z.string().max(100).optional(),
 }).strict().refine(validUploadMetadata, "Invalid upload MIME or extension");
-// Existing Ask UI fields are accepted explicitly. Persisted artifact metadata always comes from the server.
+const historyText = z.string().max(2000);
+const groundingHistory = z.object({
+  groundingChunks: z.array(z.object({
+    web: z.object({ uri: historyText, title: historyText.optional(), domain: historyText.optional() }).strict(),
+  }).strict()).max(64).optional(),
+  citations: z.array(z.object({ url: historyText, title: historyText.optional() }).strict()).max(64).optional(),
+  webSearchQueries: z.array(historyText).max(64).optional(),
+  searchSuggestions: z.array(z.object({ query: historyText, url: historyText }).strict()).max(64).optional(),
+  searchEntryPoint: z.object({ renderedContent: z.string().max(50000) }).strict().optional(),
+}).strict();
+const artifactPointer = z.object({ id: uuid, version: z.number().int().positive() }).strict();
+const artifactHistory = artifactPointer.extend({
+  pluginId: historyText.optional(), outputLabel: historyText.optional(), filename: historyText.optional(),
+  mimeType: historyText.optional(), size: z.number().nonnegative().optional(), createdAt: historyText.optional(),
+  downloadUrl: historyText.optional(), previewUrl: historyText.optional(),
+}).strict();
+const executionHistory = z.object({
+  id: uuid.optional(), intent: historyText.optional(), status: historyText.optional(),
+  startedAt: historyText.optional(), completedAt: historyText.optional(), groundingActive: z.boolean().optional(),
+  steps: z.array(z.object({
+    pluginId: historyText.optional(), status: historyText.optional(), startedAt: historyText.optional(),
+    completedAt: historyText.optional(), outputType: historyText.optional(),
+    output: z.object({ type: historyText, artifact: artifactPointer.optional() }).strict().optional(),
+  }).strict()).max(6).optional(),
+}).strict();
+const researchStepHistory = z.object({
+  key: historyText, label: historyText, status: historyText, timestamp: historyText.optional(),
+  detail: historyText.optional(), query: z.string().max(10000).optional(),
+}).strict();
+const researchSourceHistory = z.object({
+  url: historyText, title: historyText.optional(), domain: historyText.optional(),
+  snippet: historyText.optional(), verified: z.boolean().optional(),
+  isHighSignal: z.boolean().optional(), score: z.number().finite().optional(),
+}).strict();
+
+// Existing Ask UI fields are accepted explicitly. Persisted artifact and source provenance always comes from the server.
 export const askRequestSchema = z.object({
   messages: z.array(z.object({
     role: z.enum(["user", "assistant", "model"]), content: z.string().max(10000), file: upload.optional(),
-    strategyTitle: z.string().max(1000).optional(), taskTitle: z.string().max(1000).optional(), model: z.string().max(100).optional(),
+    strategyTitle: z.string().max(1000).optional(), briefTitle: z.string().max(1000).optional(), taskTitle: z.string().max(1000).optional(), model: z.string().max(100).optional(),
     interactionId: uuid.optional(), createdAt: z.string().max(100).optional(), feedback: z.enum(["positive", "negative"]).nullable().optional(),
     isStreaming: z.boolean().optional(), status: z.string().max(100).optional(), statusText: z.string().max(500).optional(),
     thinkingLevel: z.enum(["low", "medium", "high", "xhigh", "off", "auto"]).optional(), thinkingEnabled: z.boolean().optional(), userPrompt: z.string().max(10000).optional(),
-    groundingMetadata: z.unknown().optional(), artifacts: z.array(z.unknown()).max(6).optional(), execution: z.unknown().optional(),
+    groundingMetadata: groundingHistory.nullable().optional(), artifacts: z.array(artifactHistory).max(6).optional(), execution: executionHistory.nullable().optional(),
     pluginIds: z.array(z.string().max(41)).max(6).optional(),
-    type: z.string().max(100).optional(), jobId: uuid.optional(), steps: z.array(z.unknown()).optional(),
-    sources: z.array(z.unknown()).optional(), query: z.string().max(10000).optional(), error: z.string().max(2000).optional(),
-    searchGrounded: z.boolean().optional(), groundingActive: z.boolean().optional(),
+    type: z.string().max(100).optional(), jobId: uuid.optional(), steps: z.array(researchStepHistory).max(64).optional(),
+    sources: z.array(researchSourceHistory).max(64).optional(), query: z.string().max(10000).optional(), error: z.string().max(2000).optional(),
+    searchGrounded: z.boolean().optional(), groundingActive: z.boolean().optional(), verifiedResearchSources: z.boolean().optional(),
     updatedAt: z.string().max(100).optional(), id: uuid.optional(),
   }).strict()).min(1).max(200),
   model: z.string().max(100).optional(), mode: z.enum(["ask", "research"]).optional(), thinkingLevel: z.enum(["low", "medium", "high", "off", "auto"]).optional(),
-  strategyId: uuid.optional(), taskId: uuid.optional(), chatId: uuid.optional(),
+  googleSearchEnabled: z.boolean().optional(),
+  strategyId: uuid.optional(), briefId: uuid.optional(), taskId: uuid.optional(), chatId: uuid.optional(),
   pluginIds: z.array(z.string().regex(/^[a-z][a-z0-9-]{0,40}$/)).max(6).optional(),
   chatRevision: z.number().int().positive().optional(),
   artifactId: uuid.optional(), stream: z.boolean().optional(),
 }).strict();
 
 function storedMessage(message) {
-  return { role: message.role, content: message.content, ...(message.strategyTitle ? { strategyTitle: message.strategyTitle } : {}), ...(message.taskTitle ? { taskTitle: message.taskTitle } : {}),
+  return { role: message.role, content: message.content, ...(message.strategyTitle ? { strategyTitle: message.strategyTitle } : {}), ...(message.briefTitle ? { briefTitle: message.briefTitle } : {}), ...(message.taskTitle ? { taskTitle: message.taskTitle } : {}),
     ...(message.file ? { file: { fileId: message.file.fileId, name: message.file.name, size: message.file.size, type: message.file.type, mimeType: message.file.mimeType } } : {}) };
 }
 
@@ -98,27 +135,48 @@ function sanitizeArtifactSpecForPrompt(spec) {
   return stripInternalStrategyMetadata(spec);
 }
 
-export function createCapabilityRouter({ allowGuestChat = false, registry, workflow, artifacts, chats, strategies, planner, rateLimit, hydrateFile, onComplete, limits = createAskConfig() }) {
+export function createCapabilityRouter({ allowGuestChat = false, registry, workflow, artifacts, chats, strategies, planner, rateLimit, hydrateFile, deleteFiles = null, cleanupQueue = null, onComplete, limits = createAskConfig() }) {
   const router = express.Router();
-  router.get("/plugins", requireAuth, (_req, res) => res.json({ plugins: registry.list() }));
+  router.get("/plugins", requireAuth, (_req, res) => res.json({ plugins: registry.list().filter(plugin => plugin.id !== "deep-research") }));
   router.post("/", (req, res, next) => allowGuestChat && !req.user && req.ownerId?.startsWith("guest_") ? next() : requireAuth(req, res, next), async (req, res, next) => {
     let transport, completedResult, committed = false, allocatedChatId, initialChat;
+    const newlyPersistedFileIds = new Set();
+    let activeOwnerId = null;
+    const cleanupOrphanedFiles = async () => {
+      if (initialChat || newlyPersistedFileIds.size === 0 || !activeOwnerId) return;
+      const orphanIds = [...newlyPersistedFileIds];
+      newlyPersistedFileIds.clear();
+      const removeFiles = deleteFiles || ((owner, msgs) => geminiFileCache.deleteChatFiles(owner, msgs));
+      try {
+        await removeFiles(activeOwnerId, orphanIds.map((fileId) => ({ file: { fileId } })));
+      } catch {
+        await cleanupQueue?.enqueueAskFile?.(activeOwnerId, orphanIds).catch(() => {});
+      }
+    };
     try {
       const parsed = askRequestSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: "Sorğu parametrləri düzgün deyil.", code: "VALIDATION_ERROR" });
       const payload = parsed.data;
-      if (!req.user && (payload.mode === 'research' || payload.artifactId || payload.messages.some(message => message.file) || (payload.pluginIds || []).some(id => id !== 'web'))) {
+      if (payload.strategyId && payload.briefId) {
+        return res.status(400).json({ error: "Eyni anda həm strategiya, həm də brif seçilə bilməz.", code: "VALIDATION_ERROR" });
+      }
+      if (!req.user && (payload.mode === 'research' || payload.artifactId || payload.briefId || payload.messages.some(message => message.file) || (payload.pluginIds || []).some(id => id !== 'web'))) {
         const errorMsg = payload.messages.some(message => message.file)
           ? "Fayl yükləmək və sənədlərinizi analiz etmək üçün qeydiyyatdan keçməlisiniz."
-          : "Davam etmək üçün qeydiyyatdan keçməlisiniz.";
+          : payload.briefId
+            ? GUEST_RESTRICTION_NOTICES.strategy
+            : "Davam etmək üçün qeydiyyatdan keçməlisiniz.";
         return res.status(401).json({ code: 'AUTH_REQUIRED', error: errorMsg, reply: errorMsg });
+      }
+      if (payload.mode === "research") {
+        return next();
       }
       const prompt = payload.messages.at(-1)?.content || "";
       if (payload.messages.at(-1)?.role !== "user" || (!prompt.trim() && !payload.messages.at(-1)?.file)) return res.status(400).json({ error: "Mesaj daxil edilməyib.", code: "VALIDATION_ERROR" });
       const chat = payload.chatId ? await chats.getById(payload.chatId, req.ownerId) : null;
       if (payload.chatId && !chat) return res.status(404).json({ error: "Söhbət tapılmadı.", code: "NOT_FOUND" });
-      if (!req.user && (chat?.strategyId || chat?.taskId || chat?.messages.some(message => message.file))) {
-        const notice = chat.strategyId ? GUEST_RESTRICTION_NOTICES.strategy : chat.taskId ? GUEST_RESTRICTION_NOTICES.planner : GUEST_RESTRICTION_NOTICES.file;
+      if (!req.user && (chat?.strategyId || chat?.briefId || chat?.taskId || chat?.messages.some(message => message.file))) {
+        const notice = (chat.strategyId || chat.briefId) ? GUEST_RESTRICTION_NOTICES.strategy : chat.taskId ? GUEST_RESTRICTION_NOTICES.planner : GUEST_RESTRICTION_NOTICES.file;
         return res.status(401).json({ code: 'AUTH_REQUIRED', error: notice, reply: notice });
       }
       const expectedRevision = chat ? (chat.revision || 1) : 1;
@@ -159,21 +217,54 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
         return next();
       }
       if (!req.user) return res.status(401).json({ code: "AUTH_REQUIRED" });
-      if (rateLimit) { let limited = true; rateLimit(req, res, () => { limited = false; }); if (limited) return; }
+      if (rateLimit) {
+        const allowed = await new Promise((resolve, reject) => {
+          let settled = false;
+          const finish = (err) => {
+            if (settled) return;
+            settled = true;
+            if (err) reject(err);
+            else resolve(true);
+          };
+          Promise.resolve(rateLimit(req, res, finish))
+            .then(() => {
+              if (!settled) {
+                settled = true;
+                resolve(false);
+              }
+            })
+            .catch((err) => {
+              if (!settled) {
+                settled = true;
+                reject(err);
+              }
+            });
+        });
+        if (!allowed) return;
+      }
       transport = createAskTransport(req, res, limits);
       const streaming = payload.stream === true || req.headers.accept?.includes("text/event-stream");
       const strategyId = payload.strategyId || chat?.strategyId;
+      if (payload.briefId && chat?.strategyId) {
+        return res.status(400).json({ error: "Strategiya kontekstli söhbətdə brif seçilə bilməz.", code: "VALIDATION_ERROR" });
+      }
+      if (payload.strategyId && chat?.briefId) {
+        return res.status(400).json({ error: "Brif kontekstli söhbətdə strategiya seçilə bilməz.", code: "VALIDATION_ERROR" });
+      }
+      const briefId = payload.briefId || (!strategyId ? chat?.briefId : null) || null;
       const taskId = payload.taskId || chat?.taskId;
       if (strategies && typeof strategies.loadOwnerProvenance === "function") {
-        await strategies.loadOwnerProvenance(req.ownerId).catch(() => {});
+        await strategies.loadOwnerProvenance(req.ownerId);
       }
-      const [strategy, task, allOwnerStrategies] = await Promise.all([
+      const [strategy, briefRecord, task, allOwnerStrategies] = await Promise.all([
         strategyId && strategies ? (chatStrategy && strategyId === chatStrategy.id ? chatStrategy : strategies.getById(strategyId, req.ownerId)) : null,
+        briefId && strategies ? strategies.getById(briefId, req.ownerId) : null,
         taskId && planner ? planner.list(req.ownerId).then(items => items.find(item => item.id === taskId) || null) : null,
-        strategies && typeof strategies.readAll === "function" ? strategies.readAll(req.ownerId).catch(() => []) : Promise.resolve([]),
+        strategies && typeof strategies.readAll === "function" ? strategies.readAll(req.ownerId) : Promise.resolve([]),
       ]);
       transport.signal.throwIfAborted();
-      if ((payload.strategyId && !strategy) || (payload.taskId && !task)) return res.status(404).json({ error: "Seçilmiş kontekst tapılmadı.", code: "NOT_FOUND" });
+      const briefText = typeof briefRecord?.brief === "string" ? briefRecord.brief.trim() : "";
+      if ((payload.strategyId && !strategy) || (payload.briefId && (!briefRecord || !briefText)) || (payload.taskId && !task)) return res.status(404).json({ error: "Seçilmiş kontekst tapılmadı.", code: "NOT_FOUND" });
       if ((strategyId && !strategy) || (taskId && !task)) return res.status(404).json({ error: "Seçilmiş kontekst tapılmadı.", code: "NOT_FOUND" });
       const taskStrategy = task?.strategyId && strategies ? await strategies.getById(task.strategyId, req.ownerId) : null;
       const taskIsGrounded = Boolean(
@@ -215,27 +306,32 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
         }
       }
       const safePrevious = previous && !previousIsGrounded && !isArtifactFromGroundedContext(previous, chat, strategy) ? previous : null;
-      const sourceContext = strategy || task ? JSON.stringify({ strategy: strategy ? sanitizeStrategyForCapabilityContext(strategy) : null, task: task ? { text: task.text, strategyTitle: task.strategyTitle } : null }) : "";
+      const sourceContext = strategy || briefText || task
+        ? JSON.stringify({
+            strategy: strategy ? sanitizeStrategyForCapabilityContext(strategy) : null,
+            ...(briefText ? { brief: briefText } : {}),
+            task: task ? { text: task.text, strategyTitle: task.strategyTitle } : null,
+          })
+        : "";
       const isRetry = chat?.messages.at(-1)?.role === "user" && chat.messages.at(-1).content === prompt;
       const incoming = payload.messages.at(-1);
       const fresh = { ...storedMessage(incoming), ...(incoming.file ? { file: incoming.file } : {}) };
       const withGroundedMarkers = (message) => ({
         ...storedMessage(message),
         ...(message.file ? { file: message.file } : {}),
-        ...(isGroundedAssistantMessage(message) ? { searchGrounded: true } : {}),
-        ...(typeof message.type === "string" ? { type: message.type } : {}),
-        ...(Array.isArray(message.pluginIds) ? { pluginIds: message.pluginIds } : {}),
-        ...(Array.isArray(message.sources) ? { sources: message.sources } : {}),
-        ...(message.groundingMetadata && typeof message.groundingMetadata === "object" ? { groundingMetadata: message.groundingMetadata } : {}),
-        ...(message.groundingActive === true ? { groundingActive: true } : {}),
       });
       const history = chat ? [...chat.messages.map(message => ({ ...message })), ...(isRetry ? [] : [fresh])] : payload.messages.map(withGroundedMarkers);
       if (isRetry && incoming.file) history.at(-1).file = incoming.file;
       history.at(-1).pluginIds = selection.plugins.map(plugin => plugin.id);
+      const existingFileIds = new Set((chat?.messages || []).map((m) => m?.file?.fileId).filter(Boolean));
+      activeOwnerId = req.ownerId;
       for (const message of history) if (message.file) {
         transport.signal.throwIfAborted();
         assertCachedFileReference(message.file, chat);
         message.file = await prepareUploadedContext(hydrateFile ? await hydrateFile(message.file, req.ownerId) : message.file);
+        if (message.file?.fileId && !existingFileIds.has(message.file.fileId)) {
+          newlyPersistedFileIds.add(message.file.fileId);
+        }
         if (!message.file.data && !message.file.textContent) {
           throw Object.assign(new Error("Yüklənmiş fayl kontekstinin müddəti bitib; faylı yenidən əlavə edin."), {
             status: 400,
@@ -252,14 +348,16 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
           : { ...withGroundedMarkers(message), ...(message.pluginIds ? { pluginIds: message.pluginIds } : {}) }
       ));
       await assertExecutionAuthorized(transport.signal);
-      initialChat = await chats.saveChat({ id: allocatedChatId, ownerId: req.ownerId, messages: safeHistory, strategyId, taskId, mustExist: Boolean(chat), expectedRevision: chat ? expectedRevision : null });
+      initialChat = await chats.saveChat({ id: allocatedChatId, ownerId: req.ownerId, messages: safeHistory, strategyId, briefId, taskId, mustExist: Boolean(chat), expectedRevision: chat ? expectedRevision : null });
       if (req.securityContext) req.securityContext.assertResources = async () => {
-        const [authorizedChat, authorizedStrategy, authorizedTasks] = await Promise.all([
+        const [authorizedChat, authorizedStrategy, authorizedBrief, authorizedTasks] = await Promise.all([
           chats.getById(allocatedChatId, req.ownerId),
           strategyId ? strategies.getById(strategyId, req.ownerId) : null,
+          briefId ? strategies.getById(briefId, req.ownerId) : null,
           taskId ? planner.list(req.ownerId) : null,
         ]);
         if (!authorizedChat || (strategyId && !authorizedStrategy) ||
+            (briefId && !authorizedBrief) ||
             (taskId && !authorizedTasks.some(item => item.id === taskId))) {
           throw Object.assign(new Error('Execution context removed'), { code: 'EXECUTION_REVOKED', status: 403 });
         }
@@ -282,7 +380,7 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       await req.securityContext?.assertAuthorized?.();
       transport.signal.throwIfAborted();
       req.securityContext?.markMutationPending?.();
-      const savedChat = await chats.saveChat({ id: allocatedChatId, ownerId: req.ownerId, messages: [...safeHistory, assistant], strategyId, taskId, mustExist: true, expectedRevision: initialChat.revision || 1 });
+      const savedChat = await chats.saveChat({ id: allocatedChatId, ownerId: req.ownerId, messages: [...safeHistory, assistant], strategyId, briefId, taskId, mustExist: true, expectedRevision: initialChat.revision || 1 });
       committed = true;
       const response = { done: true, reply: result.reply, artifacts: result.artifacts, execution: result.execution, model: result.model, chat: savedChat, chatId: savedChat.id, chatRevision: savedChat.revision, groundingMetadata: result.groundingMetadata };
       req.securityContext?.recordIdempotentResult?.(200, response);
@@ -293,6 +391,12 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       return res.json(response);
     } catch (error) {
       if (completedResult && !committed) for (const artifact of completedResult.artifacts.reverse()) await artifacts.rollback(artifact, req.ownerId).catch(() => {});
+      if (error?.code === "PROVENANCE_UNAVAILABLE") {
+        const response = { code: error.code, error: "Mənbə mənşəyini yoxlamaq mümkün olmadı.", retryable: true };
+        if (transport?.streaming) return transport.fail(error, response);
+        if (!res.destroyed && !res.writableEnded) return res.status(503).json(response);
+        return;
+      }
       // Provider/renderer internals and raw model output never appear in the conversation.
       const isFileContextExpired = error?.code === "FILE_CONTEXT_EXPIRED";
       const isValidationError = error?.code === "VALIDATION_ERROR" || error?.code === "FILE_TOO_LARGE";
@@ -303,10 +407,14 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
           ? { error: "Yüklənmiş fayl formatı və ya ölçüsü dəstəklənmir.", code: error.code, retryable: false, chatId: allocatedChatId, chatRevision: initialChat?.revision }
           : { error: "Tapşırığı tamamlamaq mümkün olmadı. Yenidən cəhd edin.", code: "CAPABILITY_EXECUTION_FAILED", retryable: true, execution: error.execution, chatId: allocatedChatId, chatRevision: initialChat?.revision };
       console.error("Capability execution failed:", error.code || error.name);
+      await cleanupOrphanedFiles();
       if (transport?.streaming) return transport.fail(error, response);
       if (res.destroyed || res.writableEnded) return;
       if (!res.headersSent) return res.status(statusCode).json(response);
-    } finally { transport?.dispose(); }
+    } finally {
+      await cleanupOrphanedFiles();
+      transport?.dispose();
+    }
   });
   return router;
 }

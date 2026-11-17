@@ -12,7 +12,7 @@ export const LEGAL_DOCUMENTS = {
       tocTitle: "Mündəricat",
       metadataTitle: "Sənəd Rekvizitləri",
       metadata: [
-        { label: "Qüvvəyə minmə tarixi", value: "3 oktyabr 2026-cı il" },
+        { label: "Qüvvəyə minmə tarixi", value: "13 noyabr 2026-cı il" },
         { label: "İnformasiya Ehtiyatının Operatoru (Təşəbbüskar)", value: "Innova Group Azerbaijan (müstəqil qeyri-kommersiya tədqiqat və texnologiya təşəbbüsü)" },
         { label: "Rəsmi İnternet İnformasiya Ehtiyatı", value: "helmeros.com", href: "https://helmeros.com" },
         { label: "Hüquqi və Texniki Əlaqə Ünvanı", value: "support@helmeros.com", href: "mailto:support@helmeros.com" },
@@ -98,7 +98,7 @@ export const LEGAL_DOCUMENTS = {
             },
             {
               type: "paragraph",
-              text: "4.3. Birtərəfli Asılılıq Şərti: Modelin təkmilləşdirilməsi funksiyasını aktivləşdirmək üçün fərdiləşdirilmiş xidmət rejimi (yaddaş konteksti) aktiv olmalıdır. Fərdiləşdirilmiş xidmət rejimi istifadəçi tərəfindən deaktiv edildikdə, modelin təkmilləşdirilməsi funksiyası da sistem tərəfindən avtomatik və dərhal dayandırılır. Əksinə, istifadəçi fərdiləşdirilmiş xidmət rejimini aktiv saxlamaqla modelin təkmilləşdirilməsi funksiyasını müstəqil şəkildə deaktiv edə bilər; bu halda yeni qarşılıqlı əlaqə məzmunu modelin təkmilləşdirilməsindən istisna edilir və yalnız zəruri əməliyyat qeydləri saxlanılır.",
+              text: "4.3. Avtomatik Kontekst və Modelin Təkmilləşdirilməsi: Modelin təkmilləşdirilməsi funksiyasını aktivləşdirmək üçün fərdiləşdirilmiş xidmət rejimi (yaddaş konteksti) aktiv olmalıdır. Fərdiləşdirilmiş xidmət rejimi istifadəçi tərəfindən deaktiv edildikdə, modelin təkmilləşdirilməsi funksiyası da sistem tərəfindən avtomatik və dərhal dayandırılır. Modelin təkmilləşdirilməsi söndürüldükdə əvvəlki söhbətlərdən və strategiyalardan avtomatik kontekst seçimi dayanır. Bu halda yeni qarşılıqlı əlaqə məzmunu modelin təkmilləşdirilməsindən istisna edilir və yalnız zəruri əməliyyat qeydləri saxlanılır.",
             },
             {
               type: "paragraph",
@@ -250,7 +250,7 @@ export const LEGAL_DOCUMENTS = {
       tocTitle: "Table of Contents",
       metadataTitle: "Document Details",
       metadata: [
-        { label: "Effective Date", value: "October 3, 2026" },
+        { label: "Effective Date", value: "November 13, 2026" },
         { label: "Information Resource Operator (Initiative)", value: "Innova Group Azerbaijan (Independent Non-Commercial Research & Technology Initiative)" },
         { label: "Official Internet Information Resource", value: "helmeros.com", href: "https://helmeros.com" },
         { label: "Legal & Technical Contact Address", value: "support@helmeros.com", href: "mailto:support@helmeros.com" },
@@ -336,7 +336,7 @@ export const LEGAL_DOCUMENTS = {
             },
             {
               type: "paragraph",
-              text: "4.3. One-Way Dependency Condition: Personalized service mode (memory context) must be active in order to enable the model improvement functionality. When the personalized service mode is deactivated by the user, the model improvement functionality is also automatically and immediately discontinued by the system. Conversely, the user may independently deactivate the model improvement functionality while keeping personalized service mode active; in that case, new interaction content is excluded from model improvement and only necessary operational records are retained.",
+              text: "4.3. Automatic Context and Model Improvement: Personalized service mode (memory context) must be active in order to enable the model improvement functionality. When the personalized service mode is deactivated by the user, the model improvement functionality is also automatically and immediately discontinued by the system. Turning off model improvement also disables automatic context retrieval from earlier chats and strategies. In that case, new interaction content is excluded from model improvement and only necessary operational records are retained.",
             },
             {
               type: "paragraph",
@@ -491,7 +491,7 @@ export const LEGAL_DOCUMENTS = {
       metadataTitle: "Sənəd Göstəriciləri",
       metadata: [
         { label: "Son yenilənmə tarixi", value: "3 oktyabr 2026-cı il" },
-        { label: "Qüvvəyə minmə tarixi", value: "3 oktyabr 2026-cı il" },
+        { label: "Qüvvəyə minmə tarixi", value: "13 noyabr 2026-cı il" },
         { label: "İnformasiya Ehtiyatının Operatoru", value: "Innova Group Azerbaijan (müstəqil qeyri-kommersiya tədqiqat təşəbbüsü)" },
         { label: "Rəsmi İnternet İnformasiya Ehtiyatı", value: "helmeros.com", href: "https://helmeros.com" },
         { label: "Məxfilik Məsələləri üzrə Əlaqə", value: "support@helmeros.com", href: "mailto:support@helmeros.com" },
@@ -562,7 +562,7 @@ export const LEGAL_DOCUMENTS = {
         },
         {
           id: "madde-3",
-          title: "Maddə 3. Fərdiləşdirilmiş Rejim, Modelin Təkmilləşdirilməsi və Birtərəfli Asılılıq Mexanizmi",
+          title: "Maddə 3. Fərdiləşdirilmiş Rejim, Modelin Təkmilləşdirilməsi və Avtomatik Kontekst",
           blocks: [
             {
               type: "paragraph",
@@ -578,7 +578,7 @@ export const LEGAL_DOCUMENTS = {
             },
             {
               type: "paragraph",
-              text: "3.3. Birtərəfli Asılılıq və Avtomatik Deaktivasiya Qaydası: Modelin təkmilləşdirilməsi funksiyasını aktivləşdirmək üçün fərdiləşdirilmiş təcrübə rejimi aktiv olmalıdır. İstifadəçi profil tənzimləmələrindən fərdiləşdirilmiş təcrübə rejimini deaktiv etdikdə, modelin təkmilləşdirilməsi funksiyası da sistem tərəfindən dərhal və avtomatik olaraq dayandırılır. Əksinə, istifadəçi fərdiləşdirilmiş təcrübə rejimini aktiv saxlamaqla modelin təkmilləşdirilməsi funksiyasını müstəqil şəkildə deaktiv edə bilər; bu halda yeni göndərilən sorğular və nəticələr modelin təkmilləşdirilməsindən istisna edilir, mövcud təlim namizədləri təmizlənir və yalnız zəruri əməliyyat qeydləri saxlanılır.",
+              text: "3.3. Avtomatik Kontekst və Deaktivasiya Qaydası: Modelin təkmilləşdirilməsi funksiyasını aktivləşdirmək üçün fərdiləşdirilmiş təcrübə rejimi aktiv olmalıdır. İstifadəçi profil tənzimləmələrindən fərdiləşdirilmiş təcrübə rejimini deaktiv etdikdə, modelin təkmilləşdirilməsi funksiyası da sistem tərəfindən dərhal və avtomatik olaraq dayandırılır. Modelin təkmilləşdirilməsi söndürüldükdə əvvəlki söhbətlərdən və strategiyalardan avtomatik kontekst seçimi dayanır. Bu halda yeni göndərilən sorğular və nəticələr modelin təkmilləşdirilməsindən istisna edilir, mövcud təlim namizədləri təmizlənir və yalnız zəruri əməliyyat qeydləri saxlanılır.",
             },
             {
               type: "paragraph",
@@ -756,7 +756,7 @@ export const LEGAL_DOCUMENTS = {
       metadataTitle: "Document Metrics",
       metadata: [
         { label: "Last Updated Date", value: "October 3, 2026" },
-        { label: "Effective Date", value: "October 3, 2026" },
+        { label: "Effective Date", value: "November 13, 2026" },
         { label: "Information Resource Operator", value: "Innova Group Azerbaijan (Independent Non-Commercial Research Initiative)" },
         { label: "Official Internet Information Resource", value: "helmeros.com", href: "https://helmeros.com" },
         { label: "Privacy Matters Contact", value: "support@helmeros.com", href: "mailto:support@helmeros.com" },
@@ -827,7 +827,7 @@ export const LEGAL_DOCUMENTS = {
         },
         {
           id: "article-3",
-          title: "Article 3. Personalized Mode, Model Improvement, and One-Way Dependency Mechanism",
+          title: "Article 3. Personalized Mode, Model Improvement, and Automatic Context",
           blocks: [
             {
               type: "paragraph",
@@ -843,7 +843,7 @@ export const LEGAL_DOCUMENTS = {
             },
             {
               type: "paragraph",
-              text: "3.3. One-Way Dependency and Automatic Deactivation Rule: The personalized experience mode must be active in order to enable the model improvement functionality. When the user deactivates the personalized experience mode from profile settings, the model improvement functionality is also immediately and automatically stopped by the system. Conversely, the user may independently deactivate the model improvement functionality while keeping the personalized experience mode active; in that case, newly submitted queries and outputs are excluded from model improvement, existing training candidates are purged, and only necessary operational records are retained.",
+              text: "3.3. Automatic Context and Deactivation: The personalized experience mode must be active in order to enable the model improvement functionality. When the user deactivates the personalized experience mode from profile settings, the model improvement functionality is also immediately and automatically stopped by the system. Turning off model improvement also disables automatic context retrieval from earlier chats and strategies. In that case, newly submitted queries and outputs are excluded from model improvement, existing training candidates are purged, and only necessary operational records are retained.",
             },
             {
               type: "paragraph",

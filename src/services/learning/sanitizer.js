@@ -30,6 +30,6 @@ export function sanitizeTrainingText(value) {
 
 export function sanitizeRelevantContext(context) {
   if (!context || typeof context !== "object") return {};
-  const allowlist = ["strategyId", "taskId", "chatId", "hasStrategyContext", "hasTaskContext", "personalizationApplied", "resourceId"];
+  const allowlist = ["strategyId", "briefId", "taskId", "chatId", "hasStrategyContext", "hasBriefContext", "hasTaskContext", "personalizationApplied", "resourceId"];
   return Object.fromEntries(allowlist.filter((key) => context[key] !== undefined).map((key) => [key, context[key]]));
 }

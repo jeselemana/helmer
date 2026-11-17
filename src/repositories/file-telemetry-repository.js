@@ -2,7 +2,7 @@ import { AtomicJsonStore, storageCorruption } from "./atomic-json-store.js";
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { listTenantObjects } from '../http/r2-storage.js';
+import { listTenantObjects, readTenantObject } from '../http/r2-storage.js';
 
 export const EMPTY_TELEMETRY_STORE = Object.freeze({
   schemaVersion: 1,
@@ -18,6 +18,21 @@ function normalizeStore(value) {
     schemaVersion: 1,
     events: Array.isArray(source.events) ? source.events : [],
     ...(source.deleted === true ? { deleted: true } : {}),
+  };
+}
+
+function redactEvent(event) {
+  return {
+    id: event.id, eventType: event.eventType, mode: event.mode,
+    timestamp: event.timestamp, model: event.model, status: event.status,
+    tokens: event.tokens, costUsd: event.costUsd, costAzn: event.costAzn, latencyMs: event.latencyMs,
+    groundingActive: event.groundingActive,
+    maskedUserId: event.ownerId ? event.maskedUserId : undefined,
+    modelImprovement: false, onlyNecessaryData: true,
+    summary: '[Zəruri əməliyyat qeydi - Məzmun ötürülmür]',
+    category: 'Zəruri Əməliyyat', marketMode: 'GLOBAL_MODE', qualityScore: null,
+    metadata: { onlyNecessaryData: true, model: event.model, tokens: event.tokens?.total, latencyMs: event.latencyMs },
+    ...(event.ownerId ? { ownerId: event.ownerId } : {}),
   };
 }
 
@@ -40,7 +55,13 @@ export class FileTelemetryRepository extends AtomicJsonStore {
 
   shardByKey(key) {
     if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Invalid telemetry tenant');
-    const options = { ...this.shardOptions, ...(this.readShard ? { readCloud: () => this.readShard(key) } : {}), ...(this.writeShard ? { writeCloud: (store, etag) => this.writeShard(key, store, etag) } : {}) };
+    const options = {
+      ...this.shardOptions,
+      readCloud: this.readShard
+        ? (readOptions = {}) => this.readShard(key, { force: true, ...readOptions })
+        : (readOptions = {}) => readTenantObject(`telemetry-v2/${key}.json`, { force: true, ...readOptions }),
+      ...(this.writeShard ? { writeCloud: (store, etag) => this.writeShard(key, store, etag) } : {}),
+    };
     return new AtomicJsonStore(path.join(this.shardsDirectory, `${key}.json`), this.redis, options, {
       redisKey: `helmer:store:telemetry:v2:${key}`, r2FileName: `telemetry-v2/${key}.json`, empty: EMPTY_TELEMETRY_STORE, normalize: normalizeStore,
     });
@@ -49,7 +70,7 @@ export class FileTelemetryRepository extends AtomicJsonStore {
   async readOwner(ownerId) { return this.shardByKey(this.tenantKey(ownerId)).readStore(); }
 
   async readStore() {
-    // Legacy records remain readable to admins; never guess their tenant from a short masked ID.
+    // Legacy records with no verified owner binding expose operational fields only.
     const legacy = await super.readStore();
     let names;
     if (this.cloud) names = (await this.listShards()).map(key => key.split('/').at(-1));
@@ -57,7 +78,10 @@ export class FileTelemetryRepository extends AtomicJsonStore {
       try { names = await fs.readdir(this.shardsDirectory); }
       catch (error) { if (error.code !== 'ENOENT') throw error; names = []; }
     }
-    const events = new Map(legacy.events.map(event => [event.id, event]));
+    const events = new Map(legacy.events.map(event => {
+      const { ownerId, ...visible } = event.ownerId ? event : redactEvent(event);
+      return [event.id, visible];
+    }));
     for (const name of names.filter(name => /^[a-f0-9]{64}\.json$/.test(name))) {
       for (const event of (await this.shardByKey(name.slice(0, -5)).readStore()).events) events.set(event.id, event);
     }
@@ -65,16 +89,24 @@ export class FileTelemetryRepository extends AtomicJsonStore {
   }
 
   async scrubOwner(ownerId) {
+    if (!ownerId) return;
     await this.shardByKey(this.tenantKey(ownerId)).update(store => {
-      for (const event of store.events) if (event.modelImprovement !== undefined) Object.assign(event, {
-        modelImprovement: false, onlyNecessaryData: true, summary: '[Zəruri əməliyyat qeydi - Məzmun ötürülmür]', category: 'Zəruri Əməliyyat', marketMode: 'GLOBAL_MODE', qualityScore: null,
-        metadata: { onlyNecessaryData: true, model: event.model, tokens: event.tokens?.total, latencyMs: event.latencyMs },
-      });
+      store.events = store.events.map(event => event.modelImprovement === undefined
+        ? event
+        : { ...redactEvent(event), maskedUserId: event.maskedUserId });
+    });
+    await this.update(store => {
+      store.events = store.events.map(event => !event.ownerId || event.ownerId === ownerId ? redactEvent(event) : event);
     });
   }
 
   async deleteAllByOwner(ownerId) {
+    if (!ownerId) return;
     await this.shardByKey(this.tenantKey(ownerId)).update(store => { store.events = []; store.deleted = true; });
+    await this.update(store => {
+      store.events = store.events.filter(event => event.ownerId !== ownerId)
+        .map(event => event.ownerId ? event : redactEvent(event));
+    });
   }
 
   async update(updater) {

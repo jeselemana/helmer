@@ -41,16 +41,17 @@ async function safeRmDir(dirPath, maxRetries = 10, delayMs = 50) {
   }
 }
 
-test("1. UI/UX: Switcher removed from Ask input, Deep Research integrated into @ capabilities registry without model names", async () => {
+test("1. UI/UX: Deep Research removed from @ menu and exposed as dedicated /deep-research page & sidebar item without model names", async () => {
   const scriptContent = await fs.readFile(path.join(rootDir, "public/script.js"), "utf8");
   const styleContent = await fs.readFile(path.join(rootDir, "public/style.css"), "utf8");
   const artifactsContent = await fs.readFile(path.join(rootDir, "public/artifacts.js"), "utf8");
+  const capabilityRouterContent = await fs.readFile(path.join(rootDir, "src/http/capability-router.js"), "utf8");
 
   // Verify switcher is removed from composer leading in script.js
   assert.doesNotMatch(scriptContent, /composerLeading\.append\([^)]*modeSwitcher/, "modeSwitcher must be removed from composerLeading");
   assert.doesNotMatch(scriptContent, /const modeSwitcher = element\("div", "ask-mode-switcher"\)/, "modeSwitcher DOM element must not be created");
 
-  // Verify Deep Research is registered in createPluginRegistry
+  // Verify Deep Research is registered in createPluginRegistry (for backend compatibility) without exposing model names
   const registry = createPluginRegistry();
   const deepResearchPlugin = registry.get("deep-research");
   assert.ok(deepResearchPlugin, "deep-research plugin must be registered");
@@ -68,16 +69,19 @@ test("1. UI/UX: Switcher removed from Ask input, Deep Research integrated into @
   assert.doesNotMatch(deepResearchPlugin.description, /gemini|flash|high|gpt|claude/i, "Plugin description must not reveal model names");
   assert.doesNotMatch(deepResearchPlugin.descriptionEn, /gemini|flash|high|gpt|claude/i, "Plugin descriptionEn must not reveal model names");
 
-  // Verify artifacts.js has research icon
-  assert.match(artifactsContent, /research:\s*\[/, "artifacts.js must provide research icon definition");
+  // Verify @ composer menu excludes deep-research in both capability-router GET /plugins and public/artifacts.js
+  assert.match(capabilityRouterContent, /router\.get\("\/plugins"[\s\S]*plugin\.id\s*!==\s*"deep-research"/, "GET /api/ask/plugins must exclude deep-research");
+  assert.match(artifactsContent, /isComposerPluginVisible[\s\S]*plugin\.id\s*!==\s*"deep-research"/, "public/artifacts.js must filter deep-research out of @ composer");
 
-  // Verify submitAskMessage triggers deep research on deep-research plugin or mention
-  assert.match(scriptContent, /isDeepResearch/, "submitAskMessage must calculate isDeepResearch");
-  assert.match(scriptContent, /pluginIds\.includes\("deep-research"\)/, "submitAskMessage must check deep-research in pluginIds");
+  // Verify dedicated Deep Research surface & route trigger deep research instead of @ mentions
+  assert.match(scriptContent, /const DEEP_RESEARCH_ROUTE_PATH\s*=\s*"\/deep-research"/, "Dedicated /deep-research route constant must be defined");
+  assert.match(scriptContent, /const isDeepResearch = Boolean\(conv\.isDeepResearch \|\| forceResearch\)/, "submitAskMessage must run deep research for dedicated Deep Research surface");
+  assert.doesNotMatch(scriptContent, /\@\s*\(deep-research\|research\)/, "Ask composer @mention regex for deep research must be removed");
 
-  // Verify CSS contains classes for pulsing indicator and deep research card, while switcher is removed
+  // Verify CSS contains classes for pulsing indicator, deep research intro, and card, while switcher is removed
   assert.doesNotMatch(styleContent, /\.ask-mode-switcher\s*\{/, "Old switcher CSS must be removed");
   assert.match(styleContent, /\.ask-research-pulsing-indicator/, "CSS must style pulsing indicator");
+  assert.match(styleContent, /\.deep-research-intro-icon/, "CSS must style Deep Research intro icon");
   assert.match(styleContent, /@keyframes ask-research-pulse/, "CSS must define calming pulse animation");
 });
 
@@ -516,13 +520,12 @@ test("8. System Prompt & Deep Thinking: Enforces concrete numbers, margin compar
   assert.match(enPrompt.userContent, /Data points on Trainium and TPU efficiency/, "Must pass gathered evidence to synthesis");
 });
 
-test("9. Mobile Ask Context Sheet: Deep Research option connects to deep-research plugin capability", async () => {
+test("9. Mobile Ask Context Sheet: Deep Research option navigates to /deep-research page", async () => {
   const scriptContent = await fs.readFile(path.join(rootDir, "public/script.js"), "utf8");
 
-  // Verify onDeepResearch handler connects to deep-research plugin
-  assert.match(scriptContent, /onDeepResearch:\s*\(\)\s*=>\s*\{[\s\S]*?state\.askPluginIds\.includes\("deep-research"\)/, "onDeepResearch must activate deep-research plugin");
-  assert.match(scriptContent, /onDeepResearch:\s*\(\)\s*=>\s*\{[\s\S]*?render\(\)/, "onDeepResearch must re-render composer to show @Deep Research token");
-  assert.match(scriptContent, /researchRow\.append\(researchLeading,\s*element\("span",\s*"mobile-sheet-row-trailing",\s*"›"\)\)/, "Mobile sheet must display Deep Research row");
+  // Verify onDeepResearch handler navigates to dedicated Deep Research page
+  assert.match(scriptContent, /onDeepResearch:\s*\(\)\s*=>\s*\{[\s\S]*?navigateToDeepResearch\(/, "onDeepResearch must navigate to Deep Research page");
+  assert.match(scriptContent, /researchRow\.append\(researchLeading,\s*element\("span",\s*"mobile-sheet-row-trailing",\s*"›"\)\)/, "Mobile sheet must display Deep Research row in Ask mode");
 });
 
 test("10. Source Accordion UI & Trailing Link Sanitization: Sources grouped into collapsible accordion, raw link dumps stripped", async () => {

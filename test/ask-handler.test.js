@@ -10,13 +10,14 @@ import { createAskService } from '../src/services/ai/ask-service.js';
 import { sanitizeAskGroundingMetadata } from '../src/services/ai/ask-grounding.js';
 import { createAskExecutionGuard } from '../src/http/ask-execution-guard.js';
 import { createCapabilityRouter } from '../src/http/capability-router.js';
-import { AiPolicy } from '../src/services/security/ai-policy.js';
+import { AiPolicy, createReplayResourceCheck } from '../src/services/security/ai-policy.js';
 import { PrivacyPolicy } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
 import { FileChatRepository } from '../src/repositories/file-chat-repository.js';
-import { GUEST_RESTRICTION_NOTICES } from '../src/services/ai/prompts.js';
+import { GUEST_EXHAUSTED_MESSAGE, GUEST_RESTRICTION_NOTICES, getGuestCtaNotice } from '../src/services/ai/prompts.js';
 import { createPluginRegistry } from '../src/services/plugins/registry.js';
 import { acquireOwnerExecutionLease } from '../src/services/security/owner-execution-lease.js';
+import { MAX_GROUNDED_CHAT_RETENTION_MS } from '../src/services/ai/grounded-chat-retention.js';
 
 const sse = text => text.split(/\r?\n\r?\n/).filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
@@ -24,6 +25,7 @@ class RedisFixture {
   isReady = true;
   values = new Map();
   beforeCompletion = async () => {};
+  beforeRate = async () => {};
   now = 100000;
   async get(key) { return this.values.get(key) || null; }
   async set(key, value, options = {}) {
@@ -33,6 +35,7 @@ class RedisFixture {
   async zRem() {}
   async eval(script, { keys, arguments: args }) {
     if (keys[0].startsWith('security:ask-minute:')) {
+      await this.beforeRate();
       const window = Number(args[1]);
       const buckets = keys.map(key => (this.values.get(key) || []).filter(time => time > this.now - window));
       const retry = Math.max(0, ...buckets.map((bucket, index) =>
@@ -91,7 +94,10 @@ async function fixture(t, { redis = null, limits, parallel = false } = {}) {
     releases: () => releaseCount, setStrategyOwner: value => { strategyOwner = value; },
     setBackgroundOwner: value => { backgroundOwner = value; },
   };
-  const policy = new AiPolicy({ redis, allowParallelAskChats: parallel, env: { GUEST_AI_DAILY_LIMIT: '5' } });
+  const policy = new AiPolicy({
+    redis, allowParallelAskChats: parallel, env: { GUEST_AI_DAILY_LIMIT: '5' },
+    canReplay: createReplayResourceCheck({ chatRepository }),
+  });
   configureProviderPolicy({ assertEnabled: () => policy.assertEnabled(), reserveProvider: async (context, params) => {
     const release = await policy.reserveProvider(context, params);
     return async () => { releaseCount++; await release(); };
@@ -137,6 +143,54 @@ async function fixture(t, { redis = null, limits, parallel = false } = {}) {
   return f;
 }
 
+test('Ask replays use the same key for the route aliases and reject deleted conversations', async t => {
+  for (const redis of [new RedisFixture(), null]) {
+    const f = await fixture(t, { redis });
+    const key = randomUUID();
+    const send = suffix => fetch(f.url + suffix, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Salam' }] }),
+    });
+    const response = await send('');
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal((await send('/')).status, 200);
+    assert.equal(f.calls.length, 1);
+    assert.equal(await f.chatRepository.delete(result.chatId, f.ownerA), true);
+    const stale = await send('/');
+    assert.equal(stale.status, 409);
+    assert.equal((await stale.json()).code, 'RESULT_UNAVAILABLE');
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('a failed Ask rate check releases the shared admission lease', async t => {
+  const redis = new RedisFixture();
+  redis.beforeRate = async () => { throw new Error('unavailable'); };
+  const f = await fixture(t, { redis, parallel: true });
+  const response = await f.ask();
+  assert.equal(response.status, 503);
+  assert.equal(await redis.get(`security:owner-execution:${f.ownerA}`), null);
+  assert.equal(f.calls.length, 0);
+});
+
+test('Ask follow-ups retain the source age even when the new answer has no grounding metadata', async t => {
+  const f = await fixture(t);
+  const createdAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const chat = await f.chatRepository.saveChat({
+    ownerId: f.ownerA, messages: [{ role: 'assistant', content: 'Earlier grounded reply', searchGrounded: true, createdAt }],
+  });
+  const response = await f.ask({ chatId: chat.id, chatRevision: chat.revision });
+  assert.equal(response.status, 200);
+  const { chat: saved } = await response.json();
+  const followup = saved.messages.at(-1);
+  assert.equal(followup.searchGrounded, true);
+  assert.equal(followup.groundedAt, createdAt);
+  assert.equal(followup.groundingMetadata, undefined);
+  await f.chatRepository.pruneGroundedHistory(f.ownerA, Date.parse(createdAt) + MAX_GROUNDED_CHAT_RETENTION_MS + 1);
+  assert.equal((await f.chatRepository.getById(chat.id, f.ownerA)).messages.some(message => message.role === 'assistant'), false);
+});
+
 test('Ask HTTP: SSE persists a tenant-sharded chat, private logging is redacted, JSON follow-up uses authoritative history', async t => {
   const f = await fixture(t);
   const response = await f.ask({ stream: true });
@@ -170,6 +224,21 @@ test('Ask HTTP: cross-tenant chat, strategy, task and cached-file attempts fail 
   const file = { fileId: 'gfc_foreign', name: 'private.txt', size: 1, type: 'text/plain' };
   const response = await f.ask({ messages: [{ role: 'user', content: 'Read', file }] }, f.ownerB);
   assert.equal(response.status, 400); assert.equal(f.calls.length, 0);
+});
+
+test('Ask with inherited strategy context stops when the strategy is removed during generation', async t => {
+  const f = await fixture(t);
+  const chat = await f.chatRepository.saveChat({
+    ownerId: f.ownerA, strategyId: f.strategyId, messages: [{ role: 'user', content: 'Previous message' }],
+  });
+  f.response = async () => {
+    f.setStrategyOwner(null);
+    return { text: 'Result from the removed strategy', candidates: [{}] };
+  };
+  const response = await f.ask({ chatId: chat.id });
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).code, 'EXECUTION_REVOKED');
+  assert.equal((await f.chatRepository.getById(chat.id, f.ownerA)).messages.length, 1);
 });
 
 test('Ask HTTP blocks a grounded Build strategy before model use or logging', async t => {
@@ -256,9 +325,13 @@ test('Ask HTTP: guest restrictions, exact CTA and exhaustion remain enforced on 
     assert.equal(response.status, 200);
     const final = sse(await response.text()).at(-1);
     assert.equal(final.remainingGuestMessages, remaining); assert.equal(final.done, true);
-    assert.match(final.reply, /Tam cavab\./);
+    if (remaining === 0) assert.equal(final.reply, GUEST_EXHAUSTED_MESSAGE);
+    else {
+      assert.match(final.reply, /Tam cavab\./);
+      assert.ok(final.reply.includes(getGuestCtaNotice(remaining)));
+    }
   }
-  assert.equal((await f.ask({}, guest)).status, 429); assert.equal(f.calls.length, 5);
+  assert.equal((await f.ask({}, guest)).status, 429); assert.equal(f.calls.length, 4);
 });
 
 test('Ask HTTP: first text arrives while generation is pending, concurrent same-owner request is denied, disconnect releases lease and saves nothing', async t => {

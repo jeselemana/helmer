@@ -85,6 +85,9 @@
           <button class="rail-button" id="railPlannerButton" type="button" aria-label="Planlaşdırılanlar" data-tooltip="Planlaşdırılanlar">
             <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M8 2v4"/><path d="M16 2v4"/><path d="M3 10h18"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/><path d="M16 18h.01"/></svg>
           </button>
+          <button class="rail-button" id="railDeepResearchButton" type="button" aria-label="Dərin Araşdırma" data-tooltip="Dərin Araşdırma">
+            <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
+          </button>
           <span class="rail-divider" aria-hidden="true"></span>
           <button class="rail-button" id="railUpButton" type="button" aria-label="Helmer UP" data-tooltip="Helmer UP">
             <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -103,6 +106,13 @@
               <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
               <path d="M5 3v4M3 5h4M19 17v4M17 19h4"/>
             </svg></button>
+          <a class="rail-button" id="railAboutButton" href="/about" aria-label="Haqqımızda" data-tooltip="Haqqımızda">
+            <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 16v-4"/>
+              <path d="M12 8h.01"/>
+            </svg>
+          </a>
           <button class="rail-button" id="railInstallAppButton" type="button" aria-label="Tətbiqi yüklə" data-tooltip="Tətbiqi yüklə">
             <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -205,36 +215,72 @@
             <span>Planlaşdırılanlar</span>
             <span class="nav-count" id="plannerCount">0</span>
           </button>
-          <button class="nav-item" id="upNav" type="button">
+          <button class="nav-item" id="deepResearchNav" type="button">
             <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
-              <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
-              <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
-              <path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/>
-              <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/>
-              <path d="M3.477 10.896a4 4 0 0 1 .585-.396"/>
-              <path d="M19.938 10.5a4 4 0 0 1 .585.396"/>
-              <path d="M6 18a4 4 0 0 1-1.967-.516"/>
-              <path d="M19.967 17.484A4 4 0 0 1 18 18"/>
+              <path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/>
+              <path d="m13.56 11.747 4.332-.924"/>
+              <path d="m16 21-3.105-6.21"/>
+              <path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/>
+              <path d="m6.158 8.633 1.114 4.456"/>
+              <path d="m8 21 3.105-6.21"/>
+              <circle cx="12" cy="13" r="2"/>
             </svg>
-            <span>UP</span>
+            <span>Dərin Araşdırma</span>
+            <span class="nav-new-badge" id="deepResearchNewBadge">Yeni</span>
           </button>
-          <button class="nav-item" id="installAppNav" type="button">
-            <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-            <span>Tətbiqi yüklə</span>
-          </button>
-          <button class="nav-item" id="whatsNewNav" type="button" aria-label="Yeniliklər">
-            <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
-              <path d="M5 3v4M3 5h4M19 17v4M17 19h4"/>
-            </svg>
-            <span class="whats-new-label">Yeniliklər</span>
-            <span class="whats-new-badge">v4.0</span>
-          </button>
+          <div class="nav-more-group" id="navMoreGroup">
+            <button class="nav-item nav-more-toggle" id="navMoreToggle" type="button" aria-expanded="false" aria-controls="navMoreMenu">
+              <svg class="nav-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <circle cx="5" cy="12" r="1.75"/>
+                <circle cx="12" cy="12" r="1.75"/>
+                <circle cx="19" cy="12" r="1.75"/>
+              </svg>
+              <span class="nav-more-label">Daha çox</span>
+              <svg class="nav-more-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </button>
+            <div class="nav-more-menu" id="navMoreMenu" hidden>
+              <button class="nav-item" id="upNav" type="button">
+                <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                  <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                  <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
+                  <path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/>
+                  <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/>
+                  <path d="M3.477 10.896a4 4 0 0 1 .585-.396"/>
+                  <path d="M19.938 10.5a4 4 0 0 1 .585.396"/>
+                  <path d="M6 18a4 4 0 0 1-1.967-.516"/>
+                  <path d="M19.967 17.484A4 4 0 0 1 18 18"/>
+                </svg>
+                <span>UP</span>
+              </button>
+              <button class="nav-item" id="installAppNav" type="button">
+                <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                <span>Tətbiqi yüklə</span>
+              </button>
+              <button class="nav-item" id="whatsNewNav" type="button" aria-label="Yeniliklər">
+                <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+                  <path d="M5 3v4M3 5h4M19 17v4M17 19h4"/>
+                </svg>
+                <span class="whats-new-label">Yeniliklər</span>
+                <span class="whats-new-badge">v4.5</span>
+              </button>
+              <a class="nav-item" id="aboutNav" href="/about" aria-label="Haqqımızda">
+                <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10"/>
+                  <path d="M12 16v-4"/>
+                  <path d="M12 8h.01"/>
+                </svg>
+                <span class="about-nav-label">Haqqımızda</span>
+              </a>
+            </div>
+          </div>
         </nav>
 
         <div class="recent-section" id="recentSection">
@@ -242,10 +288,10 @@
             <span class="sidebar-label-text" id="sidebarLabelText">Son işlər</span>
             <svg class="recent-collapse-chevron" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-          <button class="recent-view-all" id="recentViewAll" type="button">Hamısına bax ↗</button>
           <div class="recent-list" id="recentList">
             <div class="recent-empty"><strong>Strategiyalar burada görünəcək.</strong><span>Yadda saxladığın işlər bu bölmədə qalır.</span></div>
           </div>
+          <button class="recent-view-all" id="recentViewAll" type="button">Hamısına bax ↗</button>
         </div>
 
         </div>

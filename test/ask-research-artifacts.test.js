@@ -212,7 +212,8 @@ test("4. End-to-End Deep Research Artifact Persistence: Artifacts stored safely 
     chatId,
     prompt: "Maliyyə müqayisəsi və bazar payı",
     language: "az",
-    sources: [{ title: "Bloomberg", url: "https://bloomberg.com", domain: "bloomberg.com" }],
+    googleSearchEnabled: false,
+    sources: [],
     steps: [{ key: "synth", label: "Hesabat hazırlanır", status: "completed" }],
   };
 
@@ -228,6 +229,12 @@ EBITDA marjası 32% təşkil edir.
 `;
 
   // Generate selective artifacts
+  const grounded = await generateSelectiveResearchArtifacts({
+    job: { ...fakeJob, googleSearchEnabled: true },
+    text: sampleReport,
+    artifactRepository: artifactRepo,
+  });
+  assert.deepEqual(grounded, [], "Grounded reports cannot be sent to artifact generation");
   const generated = await generateSelectiveResearchArtifacts({
     job: fakeJob,
     text: sampleReport,

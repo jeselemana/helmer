@@ -240,13 +240,21 @@ export async function callDecisionsApi({
     });
   }
 
+  return decisionsClient.decide({ model, input, questions }, { apiKey, signal, fetcher });
+}
+
+const decisionsClient = wrapProvider({
+  decide: requestDecision,
+}, "decision");
+
+async function requestDecision(params, { apiKey, signal, fetcher }) {
   const response = await fetcher("https://generativelanguage.googleapis.com/v1beta/decisions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-goog-api-key": apiKey,
     },
-    body: JSON.stringify({ model, input, questions }),
+    body: JSON.stringify(params),
     signal,
   });
 

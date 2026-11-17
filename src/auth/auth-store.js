@@ -189,6 +189,18 @@ export class FileAuthStore {
     });
   }
 
+  async advanceSessionVersion(id, userId, previousVersion) {
+    return this.mutate((store, now) => {
+      const session = store.sessions[id];
+      if (session?.userId !== userId || session.expiresAt <= now ||
+          session.protocolVersion !== 2 || session.authVersion !== previousVersion) return false;
+      session.authVersion = previousVersion + 1;
+      delete session.mfaVerifiedAt;
+      delete session.reauthenticatedAt;
+      return true;
+    });
+  }
+
   async invalidateUserSessions(userId, exceptId = null) {
     return this.mutate((store) => {
       for (const [id, session] of Object.entries(store.sessions)) {
@@ -259,6 +271,21 @@ export class RedisAuthStore {
 
   async getSession(id) {
     return parseRecord(await this.client.get(this.sessionKey(id)));
+  }
+
+  async advanceSessionVersion(id, userId, previousVersion) {
+    return Boolean(await this.client.eval(`
+      local raw = redis.call('get', KEYS[1])
+      if not raw then return 0 end
+      local session = cjson.decode(raw)
+      local version = tonumber(ARGV[2])
+      if session.userId ~= ARGV[1] or session.protocolVersion ~= 2 or session.authVersion ~= version then return 0 end
+      session.authVersion = version + 1
+      session.mfaVerifiedAt = nil
+      session.reauthenticatedAt = nil
+      redis.call('set', KEYS[1], cjson.encode(session), 'KEEPTTL')
+      return 1
+    `, { keys: [this.sessionKey(id)], arguments: [userId, String(previousVersion)] }));
   }
 
   async updateSession(id, changes) {

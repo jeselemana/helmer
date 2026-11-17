@@ -221,6 +221,7 @@ function syncHeaderControls(lang) {
   const isEn = lang === "en";
   document.documentElement.lang = lang;
 
+  const navAbout = document.getElementById("navAbout");
   const navTerms = document.getElementById("navTerms");
   const navPrivacy = document.getElementById("navPrivacy");
   const navHome = document.getElementById("navHome");
@@ -229,6 +230,7 @@ function syncHeaderControls(lang) {
   const btnAz = document.getElementById("btnAz");
   const btnEn = document.getElementById("btnEn");
 
+  if (navAbout) navAbout.textContent = isEn ? "About" : "Haqqımızda";
   if (navTerms) navTerms.textContent = isEn ? "Terms of Service" : "İstifadə Şərtləri";
   if (navPrivacy) navPrivacy.textContent = isEn ? "Privacy Policy" : "Məxfilik Siyasəti";
   if (navHome) navHome.textContent = isEn ? "Workspace" : "İş Sahəsi";

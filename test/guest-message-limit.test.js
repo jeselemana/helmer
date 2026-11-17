@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import {
   GUEST_EXHAUSTED_MESSAGE,
   getGuestCtaNotice,
@@ -85,10 +86,14 @@ test('Guest message limit: AiPolicy accurately counts usage and remaining messag
     securityContext: {},
     get: () => 'valid-idempotency-key-1234567890',
   };
-  const res1 = { status() { return this; }, json() {}, once() {} };
+  const res1 = Object.assign(new EventEmitter(), { status() { return this; }, json() {} });
+  const finish = req => {
+    req.securityContext.providerStarted = true;
+    res1.emit('finish');
+  };
 
   let nextCalled = false;
-  await middleware(req1, res1, () => { nextCalled = true; });
+  await middleware(req1, res1, () => { nextCalled = true; finish(req1); });
   assert.equal(nextCalled, true);
   assert.equal(req1.guestUsageCount, 1);
   assert.equal(req1.remainingGuestMessages, 2);
@@ -100,10 +105,10 @@ test('Guest message limit: AiPolicy accurately counts usage and remaining messag
     ownerId: 'guest_test_actor_1',
     user: null,
     securityContext: {},
-    get: () => 'valid-idempotency-key-1234567890',
+    get: () => 'valid-idempotency-key-1234567891',
   };
   let nextCalled2 = false;
-  await middleware(req2, res1, () => { nextCalled2 = true; });
+  await middleware(req2, res1, () => { nextCalled2 = true; finish(req2); });
   assert.equal(nextCalled2, true);
   assert.equal(req2.guestUsageCount, 2);
   assert.equal(req2.remainingGuestMessages, 1);
@@ -115,10 +120,10 @@ test('Guest message limit: AiPolicy accurately counts usage and remaining messag
     ownerId: 'guest_test_actor_1',
     user: null,
     securityContext: {},
-    get: () => 'valid-idempotency-key-1234567890',
+    get: () => 'valid-idempotency-key-1234567892',
   };
   let nextCalled3 = false;
-  await middleware(req3, res1, () => { nextCalled3 = true; });
+  await middleware(req3, res1, () => { nextCalled3 = true; finish(req3); });
   assert.equal(nextCalled3, true);
   assert.equal(req3.guestUsageCount, 3);
   assert.equal(req3.remainingGuestMessages, 0);
@@ -131,14 +136,15 @@ test('Guest message limit: AiPolicy accurately counts usage and remaining messag
     ownerId: 'guest_test_actor_1',
     user: null,
     securityContext: {},
-    get: () => 'valid-idempotency-key-1234567890',
+    get: () => 'valid-idempotency-key-1234567893',
   };
   let statusCode = null, errorCode = null;
-  const res4 = {
+  const res4 = Object.assign(new EventEmitter(), {
     status(code) { statusCode = code; return this; },
     json(body) { errorCode = body?.code; },
-  };
+  });
   await middleware(req4, res4, () => {});
+  res4.emit('finish');
   assert.equal(statusCode, 429);
   assert.equal(errorCode, 'GUEST_DAILY_LIMIT');
 });

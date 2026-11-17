@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { guestBuildDailyLimit, guestDailyLimit } from '../src/services/security/config.js';
@@ -73,29 +74,30 @@ test('AiPolicy in-memory tracks up to 3 guest briefs in Build mode and rejects 4
   });
 
   const makeRes = () => {
-    let statusCode = 200;
-    let responseBody = null;
-    return {
-      status(code) { statusCode = code; return this; },
-      json(body) { responseBody = body; return this; },
-      once() {},
-      get statusVal() { return statusCode; },
-      get bodyVal() { return responseBody; },
-    };
+    return Object.assign(new EventEmitter(), {
+      statusVal: 200,
+      bodyVal: null,
+      status(code) { this.statusVal = code; return this; },
+      json(body) { this.bodyVal = body; return this; },
+    });
   };
 
   // Brief 1 - assess phase (checks quota, does not increment)
   const assessReq1 = makeReq('/api/strategy/assess');
   const res1 = makeRes();
   let next1 = false;
-  await middleware(assessReq1, res1, () => { next1 = true; });
+  const finish = req => {
+    req.securityContext.providerStarted = true;
+    res1.emit('finish');
+  };
+  await middleware(assessReq1, res1, () => { next1 = true; finish(assessReq1); });
   assert.equal(next1, true);
   assert.equal(assessReq1.remainingGuestBriefs, 3);
 
   // Brief 1 - generate-stream phase (consumes 1 brief quota)
   const genReq1 = makeReq('/api/strategy/generate-stream');
   let nextGen1 = false;
-  await middleware(genReq1, res1, () => { nextGen1 = true; });
+  await middleware(genReq1, res1, () => { nextGen1 = true; finish(genReq1); });
   assert.equal(nextGen1, true);
   assert.equal(genReq1.guestBuildUsageCount, 1);
   assert.equal(genReq1.remainingGuestBriefs, 2);
@@ -103,7 +105,7 @@ test('AiPolicy in-memory tracks up to 3 guest briefs in Build mode and rejects 4
   // Brief 2 - generate phase (consumes 2nd brief)
   const genReq2 = makeReq('/api/strategy/generate');
   let nextGen2 = false;
-  await middleware(genReq2, res1, () => { nextGen2 = true; });
+  await middleware(genReq2, res1, () => { nextGen2 = true; finish(genReq2); });
   assert.equal(nextGen2, true);
   assert.equal(genReq2.guestBuildUsageCount, 2);
   assert.equal(genReq2.remainingGuestBriefs, 1);
@@ -111,7 +113,7 @@ test('AiPolicy in-memory tracks up to 3 guest briefs in Build mode and rejects 4
   // Brief 3 - generate phase (consumes 3rd brief -> remaining 0)
   const genReq3 = makeReq('/api/strategy/generate-stream');
   let nextGen3 = false;
-  await middleware(genReq3, res1, () => { nextGen3 = true; });
+  await middleware(genReq3, res1, () => { nextGen3 = true; finish(genReq3); });
   assert.equal(nextGen3, true);
   assert.equal(genReq3.guestBuildUsageCount, 3);
   assert.equal(genReq3.remainingGuestBriefs, 0);
@@ -121,6 +123,7 @@ test('AiPolicy in-memory tracks up to 3 guest briefs in Build mode and rejects 4
   const res4 = makeRes();
   let nextAssess4 = false;
   await middleware(assessReq4, res4, () => { nextAssess4 = true; });
+  res4.emit('finish');
   assert.equal(nextAssess4, false);
   assert.equal(res4.statusVal, 429);
   assert.equal(res4.bodyVal?.code, 'GUEST_DAILY_LIMIT');
@@ -131,6 +134,7 @@ test('AiPolicy in-memory tracks up to 3 guest briefs in Build mode and rejects 4
   const resGen4 = makeRes();
   let nextGen4 = false;
   await middleware(genReq4, resGen4, () => { nextGen4 = true; });
+  resGen4.emit('finish');
   assert.equal(nextGen4, false);
   assert.equal(resGen4.statusVal, 429);
   assert.equal(resGen4.bodyVal?.code, 'GUEST_DAILY_LIMIT');

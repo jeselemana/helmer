@@ -170,7 +170,12 @@ test('compact Ask omits inline source chips and cancels generation when closed',
   };
   w.eval(`
     ${section('function escapeHtml(', 'function isComplexAskQuery(')}
-    const state = { askThinkingEnabled: false };
+    const state = { askThinkingEnabled: false, identityEpoch: 0, currentUser: { id: 'first' } };
+    window.switchAccount = () => {
+      state.identityEpoch++;
+      state.currentUser = { id: 'second' };
+    };
+    ${section('function isIdentityStale(', 'function connectToResearchJobStream(')}
     function isModelImprovementActive() { return false; }
     function sanitizeAskMessageForApi(message) { return message; }
     function rememberSavedAskChat() { window.saved = true; }
@@ -192,4 +197,18 @@ test('compact Ask omits inline source chips and cancels generation when closed',
   assert.equal(signal.aborted, true);
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(w.document.querySelector('.loading-ask-modal-overlay'), null);
+
+  w.saved = false;
+  let deliver;
+  w.fetch = async () => ({ ok: true, body: { getReader: () => ({
+    read: () => new Promise(resolve => { deliver = resolve; }),
+    cancel: async () => {}, releaseLock() {},
+  }) } });
+  w.eval("showLoadingAskModal('Previous account question')");
+  await new Promise(resolve => setImmediate(resolve));
+  w.switchAccount();
+  deliver({ value: new TextEncoder().encode(`data: ${JSON.stringify({ ...data, chat: { id: 'previous-chat' } })}\n\n`), done: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(w.saved, false);
+  assert.doesNotMatch(w.document.body.textContent, /Safe answer/);
 });
