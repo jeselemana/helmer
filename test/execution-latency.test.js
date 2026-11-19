@@ -4,17 +4,33 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import express from 'express';
+import { EventEmitter } from 'node:events';
 import { PrivacyPolicy, privacySnapshot, executionContext } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
 import { AiPolicy } from '../src/services/security/ai-policy.js';
+import { createAskHandler } from '../src/http/ask-handler.js';
 import { createHelmerDecisionRouter } from '../src/services/ai/decision-router.js';
 import { FileUserRepository } from '../src/repositories/file-user-repository.js';
 import { FilePlannerRepository } from '../src/repositories/file-planner-repository.js';
+import { FileChatRepository } from '../src/repositories/file-chat-repository.js';
 
 function deferred() {
   let resolve;
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
+}
+
+async function listen(t, app) {
+  const server = app.listen(0, '127.0.0.1');
+  if (!server.listening) {
+    await new Promise((resolve) => server.once('listening', resolve));
+  }
+  t.after(() => {
+    server.closeAllConnections?.();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  return `http://127.0.0.1:${server.address().port}`;
 }
 
 test('execution authorization reads account, scoped resources and every context reference concurrently and freshly', async () => {
@@ -443,4 +459,341 @@ test('FilePlannerRepository.getById enforces tenant isolation and coalesces clou
   assert.equal(seenOptions[0].clone, false);
   assert.notEqual(r1, r2);
   assert.equal(r1.text, 'Registered owner task');
+});
+
+test('PrivacyPolicy.assertExecution caches remote auth checks within maxStaleMs while maxStaleMs: 0 runs fresh with force: true', async () => {
+  const user = { id: 'owner-cache-test', status: 'active', authVersion: 1, privacyEpoch: 0 };
+  const findCalls = [];
+  const policy = new PrivacyPolicy({
+    cloud: true,
+    findById: async (ownerId, opts) => {
+      findCalls.push({ ownerId, opts });
+      return user;
+    },
+  });
+  const context = {
+    ownerId: user.id,
+    guest: false,
+    privacySnapshot: privacySnapshot(user),
+  };
+
+  await policy.assertExecution(context, { maxStaleMs: 2500 });
+  assert.equal(findCalls.length, 1);
+  assert.equal(findCalls[0].opts.force, false);
+
+  await policy.assertExecution(context, { maxStaleMs: 2500 });
+  assert.equal(findCalls.length, 1, 'cached remote authorization within maxStaleMs must skip duplicate R2 read');
+
+  await policy.assertExecution(context);
+  assert.equal(findCalls.length, 2, 'default maxStaleMs=0 must run fresh authorization');
+  assert.equal(findCalls[1].opts.force, true);
+});
+
+test('AiPolicy atomic shared-Ask admission collapses pause, idempotency, rate limit, and lease into 1 Redis RTT and skips duplicate finish write', async () => {
+  class AtomicRedis {
+    isReady = true;
+    supportsAtomicLua = true;
+    evalCalls = [];
+    values = new Map();
+    zsets = new Map();
+    paused = '0';
+    ownerLock = null;
+    now = 1000000;
+    async get(key) {
+      if (key === 'security:ai-paused') return this.paused === '1' ? '1' : null;
+      return this.values.get(key) || null;
+    }
+    async set(key, value) { this.values.set(key, value); return 'OK'; }
+    async eval(script, { keys, arguments: args = [] }) {
+      this.evalCalls.push({ keys, args, script });
+      if (script.includes("return {'PAUSED'}")) {
+        if (this.paused === '1') return ['PAUSED'];
+        const existing = this.values.get(keys[1]);
+        if (existing) return ['EXISTS', existing];
+        const windowMs = Number(args[2]);
+        let retry = 0;
+        for (let i = 0; i < 2; i++) {
+          const rk = keys[i + 2];
+          const entries = (this.zsets.get(rk) || []).filter((s) => s > this.now - windowMs);
+          this.zsets.set(rk, entries);
+          if (entries.length >= Number(args[i + 3])) {
+            retry = Math.max(retry, entries[0] + windowMs - this.now);
+          }
+        }
+        if (retry > 0) return ['RATE_LIMITED', String(Math.ceil(retry / 1000))];
+        const owner = this.values.get(keys[4]) ?? this.ownerLock;
+        if (owner && owner !== args[5]) return ['BUSY'];
+        this.values.set(keys[1], args[0]);
+        for (let i = 2; i <= 3; i++) {
+          const entries = this.zsets.get(keys[i]) || [];
+          entries.push(this.now);
+          this.zsets.set(keys[i], entries);
+        }
+        const leases = this.values.get(keys[5]) || new Map();
+        leases.set(args[1], this.now + Number(args[6]));
+        this.values.set(keys[5], leases);
+        this.values.set(keys[4], args[5]);
+        return ['OK'];
+      }
+      if (script.includes("redis.call('zrem', KEYS[2]")) {
+        const leases = this.values.get(keys[1]) || new Map();
+        leases.delete(args[1]);
+        if (!leases.size) { this.values.delete(keys[0]); this.values.delete(keys[1]); }
+        return 1;
+      }
+      if (script.includes("redis.call('set',KEYS[1],ARGV[2]")) {
+        if (this.values.get(keys[0]) !== args[0]) return 0;
+        this.values.set(keys[0], args[1]);
+        return 1;
+      }
+      return 1;
+    }
+  }
+
+  const redis = new AtomicRedis();
+  const policy = new AiPolicy({ redis, env: {}, allowParallelAskChats: true });
+  const mw = policy.middleware();
+  const makeReqRes = (key = randomUUID(), body = { messages: [{ role: 'user', content: 'Hi' }] }) => {
+    const req = {
+      method: 'POST', path: '/api/ask', ownerId: 'owner-atomic-1', ip: '127.0.0.1',
+      user: { id: 'owner-atomic-1', emailVerifiedAt: 'now', status: 'active' },
+      body, securityContext: {},
+      get: (h) => (h.toLowerCase() === 'idempotency-key' ? key : ''),
+    };
+    const headers = {};
+    const res = Object.assign(new EventEmitter(), {
+      statusCode: 200,
+      headers,
+      setHeader(k, v) { headers[k.toLowerCase()] = v; },
+      status(c) { this.statusCode = c; return this; },
+      json(b) { this.body = b; this.writableEnded = true; this.emit('finish'); return this; },
+    });
+    return { req, res };
+  };
+
+  // 1. OK path consumes exactly 1 eval before next()
+  const okKey = randomUUID();
+  const { req: req1, res: res1 } = makeReqRes(okKey);
+  let enteredNext = false;
+  await mw(req1, res1, () => { enteredNext = true; });
+  assert.equal(enteredNext, true);
+  assert.equal(redis.evalCalls.length, 1);
+
+  const release1 = req1.securityContext.enableAskBackgroundCompletion(5000);
+  req1.securityContext.recordIdempotentResult(200, { chatId: 'c1', ok: true });
+  await req1.securityContext.persistIdempotentResult();
+  const callsAfterPersist = redis.evalCalls.length;
+  await release1();
+  // finish() released sharedAskLease without issuing a duplicate requestKey overwrite!
+  assert.equal(redis.evalCalls.length, callsAfterPersist + 1);
+  assert.ok(!redis.evalCalls.at(-1).script.includes("redis.call('set',KEYS[1],ARGV[2]"));
+
+  // 2. EXISTS replay vs IDEMPOTENCY_CONFLICT
+  const { req: replayReq, res: replayRes } = makeReqRes(okKey);
+  await mw(replayReq, replayRes, () => assert.fail('Replay must not enter handler'));
+  assert.equal(replayRes.statusCode, 200);
+  assert.equal(replayRes.body.chatId, 'c1');
+
+  const { req: conflictReq, res: conflictRes } = makeReqRes(okKey, { messages: [{ role: 'user', content: 'Changed' }] });
+  await mw(conflictReq, conflictRes, () => assert.fail('Conflict must not enter handler'));
+  assert.equal(conflictRes.statusCode, 409);
+  assert.equal(conflictRes.body.code, 'IDEMPOTENCY_CONFLICT');
+
+  // 3. PAUSED
+  redis.paused = '1';
+  const { req: pausedReq, res: pausedRes } = makeReqRes();
+  await mw(pausedReq, pausedRes, () => assert.fail('Paused must block'));
+  assert.equal(pausedRes.statusCode, 503);
+  assert.equal(pausedRes.body.code, 'EXECUTION_DISABLED');
+  redis.paused = '0';
+
+  // 4. BUSY
+  redis.ownerLock = 'other-exclusive-lock';
+  const { req: busyReq, res: busyRes } = makeReqRes();
+  await mw(busyReq, busyRes, () => assert.fail('Busy lock must block'));
+  assert.equal(busyRes.statusCode, 429);
+  assert.equal(busyRes.body.code, 'EXECUTION_BUSY');
+  redis.ownerLock = null;
+
+  // 5. RATE_LIMITED (populate zset to 15)
+  redis.zsets.set('security:ask-minute:owner-atomic-1', Array(15).fill(redis.now));
+  const { req: rlReq, res: rlRes } = makeReqRes();
+  await mw(rlReq, rlRes, () => assert.fail('Rate limit must block'));
+  assert.equal(rlRes.statusCode, 429);
+  assert.equal(rlRes.body.code, 'RATE_LIMITED');
+  assert.ok(Number(rlRes.headers['retry-after']) >= 1);
+});
+
+test('Ask handler runs registerRun and DecisionRouter.routeAsk in parallel and aborts routeAsk on alreadyCancelled', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-parallel-route-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const ownerId = randomUUID();
+  const strategyId = randomUUID();
+  const regGate = deferred();
+  t.after(() => regGate.resolve());
+  const events = [];
+  let routeSignalAborted = false;
+
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.ownerId = ownerId;
+    req.user = { id: ownerId, emailVerifiedAt: 'now', status: 'active' };
+    req.auth = { user: req.user, sessionId: 's1' };
+    req.securityContext = { ownerId, assertAuthorized: async () => {} };
+    executionContext.run(req.securityContext, next);
+  });
+  app.post('/api/ask', createAskHandler({
+    configured: () => true,
+    chatRepository: new FileChatRepository(path.join(dir, 'chats'), null, { cloud: false }),
+    strategyRepository: {
+      async getById(id, reqOwner) {
+        if (id === strategyId && reqOwner === ownerId) {
+          return { id: strategyId, ownerId, title: 'S1', strategy: { summary: 'Strategy context' } };
+        }
+        return null;
+      },
+    },
+    plannerRepository: null,
+    researchService: {},
+    askRunManager: {
+      async registerRun() {
+        events.push('registerRun:start');
+        await regGate.promise;
+        events.push('registerRun:done');
+        return {
+          alreadyCancelled: true,
+          checkCancelled: async () => true,
+          finish: async () => {},
+        };
+      },
+    },
+    decisionRouter: {
+      async routeAsk({ signal }) {
+        events.push('routeAsk:start');
+        signal?.addEventListener('abort', () => { routeSignalAborted = true; }, { once: true });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return { enableSearch: false, requireGrounding: false, routerSource: 'decisions_api', latencyMs: 40 };
+      },
+    },
+    learningLoop: { createInteractionId: randomUUID, recordInteraction: async () => {}, recordSignal: async () => {} },
+    telemetryService: { trackAskQuery: async () => {} },
+    sanitizeGroundingMetadata: (x) => x,
+    generateAsk: async () => ({ text: 'Should not run', provider: 'google', model: 'm' }),
+  }));
+
+  const base = await listen(t, app);
+
+  const reqPromise = fetch(`${base}/api/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({ strategyId, messages: [{ role: 'user', content: 'Analyze strategy' }] }),
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.ok(events.includes('registerRun:start'));
+  assert.ok(events.includes('routeAsk:start'), 'routeAsk must start immediately in parallel before registerRun resolves');
+  regGate.resolve();
+
+  const res = await reqPromise;
+  await res.text();
+  assert.equal(routeSignalAborted, true, 'alreadyCancelled must abort in-flight routeAsk signal');
+  assert.ok(res.status >= 400);
+});
+
+test('Ask handler overlaps saveChat cloud commit with persistIdempotentResult via onCommitted while blocking done until both succeed', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-commit-overlap-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const ownerId = randomUUID();
+  const chatRepo = new FileChatRepository(path.join(dir, 'chats'), null, { cloud: false });
+  const order = [];
+  const persistGate = deferred();
+  const persistedCalled = deferred();
+  t.after(() => persistGate.resolve());
+  let shouldFailPersist = false;
+
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.ownerId = ownerId;
+    req.user = { id: ownerId, emailVerifiedAt: 'now', status: 'active' };
+    req.auth = { user: req.user, sessionId: 's1' };
+    req.securityContext = {
+      ownerId,
+      assertAuthorized: async () => {},
+      recordIdempotentResult(status, body) {
+        order.push(`record:${status}:${body.chat?.id}`);
+      },
+      async persistIdempotentResult() {
+        order.push('persist:start');
+        persistedCalled.resolve();
+        await persistGate.promise;
+        if (shouldFailPersist) {
+          throw Object.assign(new Error('EXECUTION_UNAVAILABLE'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
+        }
+        order.push('persist:done');
+      },
+    };
+    executionContext.run(req.securityContext, next);
+  });
+  app.post('/api/ask', createAskHandler({
+    configured: () => true,
+    chatRepository: chatRepo,
+    strategyRepository: null,
+    plannerRepository: null,
+    researchService: {},
+    decisionRouter: {
+      async routeAsk() { return { enableSearch: false, requireGrounding: false, routerSource: 'decisions_api', latencyMs: 1 }; },
+    },
+    learningLoop: { createInteractionId: randomUUID, recordInteraction: async () => {}, recordSignal: async () => {} },
+    telemetryService: { trackAskQuery: async () => {} },
+    sanitizeGroundingMetadata: (x) => x,
+    generateAsk: async ({ onChunk }) => {
+      await onChunk?.('Hello ');
+      return { text: 'Hello world', provider: 'google', model: 'm' };
+    },
+  }));
+
+  const base = await listen(t, app);
+
+  const res = await fetch(`${base}/api/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'Hello strategy' }], stream: true }),
+  });
+  assert.equal(res.status, 200);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let sseText = '';
+  const first = await reader.read();
+  sseText += decoder.decode(first.value, { stream: true });
+  await Promise.race([
+    persistedCalled.promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`persistIdempotentResult was not reached; sseText=${sseText}`)), 3000)),
+  ]);
+  assert.ok(!sseText.includes('"done":true'), 'done SSE event must wait for persistIdempotentResult');
+
+  persistGate.resolve();
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    sseText += decoder.decode(next.value, { stream: true });
+  }
+  reader.releaseLock();
+  assert.ok(sseText.includes('"done":true'));
+  assert.equal(order.filter((x) => x === 'persist:start').length, 1, 'persistIdempotentResult must run exactly once');
+  assert.equal(order.at(-1), 'persist:done');
+
+  // Verify post-commit replay-store failure still keeps saved chat on disk and never emits done
+  shouldFailPersist = true;
+  const failRes = await fetch(`${base}/api/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'Hello failure path' }], stream: true }),
+  });
+  const failText = await failRes.text();
+  assert.ok(!failText.includes('"done":true'), 'done must never be emitted when persistIdempotentResult rejects');
+  assert.ok(failText.includes('"code":"EXECUTION_UNAVAILABLE"'));
+  assert.equal((await chatRepo.list(ownerId)).length, 2, 'committed chat must remain saved on disk');
 });

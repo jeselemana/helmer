@@ -1,34 +1,37 @@
-export function guestDailyLimit(env = process.env) {
-  const raw = env.GUEST_AI_DAILY_LIMIT ?? '5';
+function parsePositiveSafeInt(raw, name) {
   if (!/^[1-9][0-9]*$/.test(String(raw)) || !Number.isSafeInteger(Number(raw))) {
-    throw new Error('GUEST_AI_DAILY_LIMIT must be a positive safe integer');
+    throw new Error(`${name} must be a positive safe integer`);
   }
   return Number(raw);
 }
 
-export function guestBuildDailyLimit(env = process.env) {
-  const raw = env.GUEST_BUILD_DAILY_LIMIT ?? '3';
-  if (!/^[1-9][0-9]*$/.test(String(raw)) || !Number.isSafeInteger(Number(raw))) {
-    throw new Error('GUEST_BUILD_DAILY_LIMIT must be a positive safe integer');
-  }
-  return Number(raw);
+export function guestAskPerMinuteLimit(env = process.env) {
+  return parsePositiveSafeInt(env.GUEST_ASK_RATE_LIMIT_PER_MINUTE ?? '10', 'GUEST_ASK_RATE_LIMIT_PER_MINUTE');
 }
 
-export function guestBuildPreflightDailyLimit(env = process.env) {
-  if (env.GUEST_BUILD_PREFLIGHT_DAILY_LIMIT !== undefined) {
-    const raw = env.GUEST_BUILD_PREFLIGHT_DAILY_LIMIT;
-    if (!/^[1-9][0-9]*$/.test(String(raw)) || !Number.isSafeInteger(Number(raw))) {
-      throw new Error('GUEST_BUILD_PREFLIGHT_DAILY_LIMIT must be a positive safe integer');
-    }
-    return Number(raw);
+export function guestAskIpPerMinuteLimit(env = process.env) {
+  if (env.GUEST_ASK_IP_RATE_LIMIT_PER_MINUTE !== undefined) {
+    return parsePositiveSafeInt(env.GUEST_ASK_IP_RATE_LIMIT_PER_MINUTE, 'GUEST_ASK_IP_RATE_LIMIT_PER_MINUTE');
   }
-  return Math.max(guestBuildDailyLimit(env) * 10, 30);
+  return Math.max(guestAskPerMinuteLimit(env) * 2, 20);
+}
+
+export function guestBuildPerMinuteLimit(env = process.env) {
+  return parsePositiveSafeInt(env.GUEST_BUILD_RATE_LIMIT_PER_MINUTE ?? '8', 'GUEST_BUILD_RATE_LIMIT_PER_MINUTE');
+}
+
+export function guestBuildIpPerMinuteLimit(env = process.env) {
+  if (env.GUEST_BUILD_IP_RATE_LIMIT_PER_MINUTE !== undefined) {
+    return parsePositiveSafeInt(env.GUEST_BUILD_IP_RATE_LIMIT_PER_MINUTE, 'GUEST_BUILD_IP_RATE_LIMIT_PER_MINUTE');
+  }
+  return Math.max(guestBuildPerMinuteLimit(env) * 2, 16);
 }
 
 export function validateSecurityConfig(env = process.env) {
-  guestDailyLimit(env);
-  guestBuildDailyLimit(env);
-  guestBuildPreflightDailyLimit(env);
+  guestAskPerMinuteLimit(env);
+  guestAskIpPerMinuteLimit(env);
+  guestBuildPerMinuteLimit(env);
+  guestBuildIpPerMinuteLimit(env);
   if (env.REQUIRE_REDIS === 'true' && !env.REDIS_URL?.trim()) {
     throw new Error('REDIS_URL is required when REQUIRE_REDIS is enabled');
   }
@@ -47,6 +50,10 @@ export function validateSecurityConfig(env = process.env) {
   if (!env.APP_URL || !/^https:\/\//.test(env.APP_URL)) {
     throw new Error('APP_URL must be an HTTPS URL in production');
   }
+  const hasTurnstileSiteKey = Boolean(env.TURNSTILE_SITE_KEY?.trim() || env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim());
+  if (hasTurnstileSiteKey && !env.TURNSTILE_SECRET_KEY?.trim()) {
+    throw new Error('TURNSTILE_SECRET_KEY is required when TURNSTILE_SITE_KEY is configured in production');
+  }
 }
 
 export async function ensureStartupRedisConnection(redis, env = process.env) {
@@ -64,7 +71,7 @@ export async function ensureStartupRedisConnection(redis, env = process.env) {
     }
     return Boolean(redis.isReady);
   } catch (error) {
-    console.error('❌ Redis connection error:', { name: error?.name, code: error?.code, message: error?.message });
+    console.error('❌ Redis connection error:', { name: error?.name, code: error?.code });
     if (required) {
       throw new Error('Fatal: Redis connection failed when Redis is required.', { cause: error });
     }

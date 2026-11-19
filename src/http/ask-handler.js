@@ -1,14 +1,17 @@
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { publicAskErrorCode } from './ask-errors.js';
 import { assertExecutionAuthorized } from '../services/security/execution-control.js';
 import { aiConfig, hasGeminiConfiguration } from '../services/ai/config.js';
 import { createAskConfig } from '../services/ai/ask-config.js';
+import { createAskRunManager } from '../services/ai/ask-run-manager.js';
 import { createAskTransport } from './ask-transport.js';
 import { askRequestSchema } from './capability-router.js';
 import { CreateResearchJobSchema } from '../services/ai/research-service.js';
 import { resolveAskThinkingLevel } from '../services/ai/ask-routing.js';
 import { createHelmerDecisionRouter } from '../services/ai/decision-router.js';
 import { hasGroundedAssistantHistory } from '../services/ai/search-router.js';
-import { buildAskPrompt, formatGuestAnswerWithCta, createGuestAnswerStream, detectGuestFunctionalRestriction, GUEST_EXHAUSTED_MESSAGE } from '../services/ai/prompts.js';
+import { buildAskPrompt, detectGuestFunctionalRestriction } from '../services/ai/prompts.js';
 import { assertCachedFileReference, prepareUploadedContext } from '../services/artifacts/upload-context.js';
 import { geminiFileCache } from '../services/ai/gemini-file-cache.js';
 import { buildPersonalizationContext } from '../services/ai/personal-context.js';
@@ -19,7 +22,6 @@ import {
   resolveGroundedStrategyProvenance,
   stripInternalStrategyMetadata,
 } from '../services/ai/grounded-chat-retention.js';
-import { guestMessageBalance } from '../services/security/ai-policy.js';
 import { privacySnapshot } from '../services/security/privacy-policy.js';
 import { isModelImprovementEnabled } from './auth-middleware.js';
 import { logWithoutBlocking } from '../services/learning/learning-loop-service.js';
@@ -29,11 +31,41 @@ function getReqPrivacySnapshot(req) {
   return req?.securityContext?.privacySnapshot || (req.user ? privacySnapshot(req.user) : null);
 }
 
+export const AskCancelSchema = z.object({
+  runId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i).optional(),
+  chatId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i).optional(),
+  idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,100}$/).optional(),
+}).strict().refine(
+  (data) => Boolean(data.runId || data.chatId || data.idempotencyKey),
+  { message: "At least one cancellation target is required." }
+);
+
+export function createAskCancelHandler({ askRunManager } = {}) {
+  return async function handleAskCancel(req, res) {
+    try {
+      if (!req.ownerId || (req.user && req.user.id !== req.ownerId)) {
+        return res.status(401).json({ code: "AUTH_REQUIRED", error: "Sorğu təsdiqlənmədi." });
+      }
+      const parsed = AskCancelSchema.safeParse(req.body || {});
+      if (!parsed.success) {
+        return res.status(400).json({ code: "VALIDATION_ERROR", error: "Sorğu parametrləri düzgün deyil." });
+      }
+      const result = askRunManager
+        ? await askRunManager.cancelRun(req.ownerId, parsed.data)
+        : { cancelled: false };
+      return res.json({ ok: true, cancelled: Boolean(result?.cancelled) });
+    } catch {
+      return res.status(500).json({ code: "ASK_ERROR", error: "Sorğunu dayandırmaq mümkün olmadı." });
+    }
+  };
+}
+
 export function createAskHandler({ chatRepository, strategyRepository, plannerRepository, researchService,
   learningLoop, telemetryService, generateAsk, sanitizeGroundingMetadata,
-  configured = hasGeminiConfiguration, limits = createAskConfig(), decisionRouter = null, cleanupQueue = null }) {
+  configured = hasGeminiConfiguration, limits = createAskConfig(), decisionRouter = null, cleanupQueue = null, askRunManager = null }) {
   const ASK_GEMINI_MODEL = aiConfig.askGeminiModel;
   const activeDecisionRouter = decisionRouter || createHelmerDecisionRouter();
+  const activeAskRunManager = askRunManager || createAskRunManager();
   return async function handleAsk(req, res) {
     const learningStartedAt = Date.now();
     let learningInteractionId = null;
@@ -42,9 +74,20 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
     let learningModel = ASK_GEMINI_MODEL;
     let learningContext = {};
     const newlyPersistedFileIds = new Set();
+    const pendingFilePersists = [];
     let chatCommitted = false;
     let activeOwnerId = null;
+    let prefetchController = null;
+    let prefetchedDecisionUsed = false;
+    let activeRunHandle = null;
+    let releaseDetachedGuard = null;
+    let releaseDetachedPolicy = null;
+    let activeRunId = null;
+    let allocatedChatId = null;
     const cleanupOrphanedFiles = async () => {
+      if (pendingFilePersists.length) {
+        await Promise.allSettled(pendingFilePersists);
+      }
       if (chatCommitted || newlyPersistedFileIds.size === 0 || !activeOwnerId) return;
       const orphanIds = [...newlyPersistedFileIds];
       newlyPersistedFileIds.clear();
@@ -71,9 +114,11 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       const messages = Array.isArray(req.body.messages)
         ? req.body.messages
             .filter((message) => ["user", "assistant", "model"].includes(message?.role) && (typeof message?.content === "string" || message?.file))
-            .map((message) => ({
+            .map((message, index, filtered) => ({
               role: message.role === "model" ? "assistant" : message.role,
-              content: typeof message.content === "string" ? message.content.trim().slice(0, 10000) : "",
+              content: typeof message.content === "string"
+                ? message.content.trim().slice(0, index === filtered.length - 1 && message.role === "user" ? 10000 : 35000)
+                : "",
               strategyTitle: typeof message.strategyTitle === "string" ? message.strategyTitle : undefined,
               briefTitle: typeof message.briefTitle === "string" ? message.briefTitle : undefined,
               taskTitle: typeof message.taskTitle === "string" ? message.taskTitle : undefined,
@@ -118,12 +163,12 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         return res.status(400).json({ error: "Task seçimi düzgün deyil." });
       }
 
-      const findPlannerTask = (id) => {
+      const findPlannerTask = (id, options = {}) => {
         if (!id || !plannerRepository) return Promise.resolve(null);
         if (typeof plannerRepository.getById === "function") {
-          return plannerRepository.getById(id, req.ownerId);
+          return plannerRepository.getById(id, req.ownerId, options);
         }
-        return plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === id) || null);
+        return plannerRepository.list(req.ownerId, options).then((list) => list.find((task) => task.id === id) || null);
       };
 
       let effectiveStrategyId = strategyId;
@@ -131,10 +176,10 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       let effectiveTaskId = taskId;
       req.securityContext.assertResources = async () => {
         const [authorizedChat, authorizedStrategy, authorizedBrief, authorizedTask] = await Promise.all([
-          chatId ? chatRepository.getById(chatId, req.ownerId) : null,
-          effectiveStrategyId ? strategyRepository?.getById(effectiveStrategyId, req.ownerId) : null,
-          effectiveBriefId ? strategyRepository?.getById(effectiveBriefId, req.ownerId) : null,
-          effectiveTaskId ? findPlannerTask(effectiveTaskId) : null,
+          chatId ? chatRepository.getById(chatId, req.ownerId, { coalesce: true }) : null,
+          effectiveStrategyId ? strategyRepository?.getById(effectiveStrategyId, req.ownerId, { coalesce: true }) : null,
+          effectiveBriefId ? strategyRepository?.getById(effectiveBriefId, req.ownerId, { coalesce: true }) : null,
+          effectiveTaskId ? findPlannerTask(effectiveTaskId, { coalesce: true }) : null,
         ]);
         if ((chatId && !authorizedChat) || (effectiveStrategyId && !authorizedStrategy) || (effectiveBriefId && !authorizedBrief) || (effectiveTaskId && !authorizedTask)) {
           throw Object.assign(new Error('Execution context removed'), { code: 'EXECUTION_REVOKED', status: 403 });
@@ -214,6 +259,9 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         ? req.preloadedAskChat
         : null;
       const earlyStrategyId = strategyId || preloadedChat?.strategyId || "";
+      const preloadedStrategy = earlyStrategyId && req.preloadedAskStrategy && req.preloadedAskStrategy.id === earlyStrategyId && req.preloadedAskStrategy.ownerId === req.ownerId
+        ? req.preloadedAskStrategy
+        : null;
       const earlyBriefId = briefId || (!earlyStrategyId ? preloadedChat?.briefId : "") || "";
       const earlyTaskId = taskId || preloadedChat?.taskId || "";
       const hasEarlyStrategyOrTask = Boolean(earlyStrategyId || earlyTaskId);
@@ -231,6 +279,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         );
         const prefetchHasMedia = prefetchMessages.some((m) => Boolean(m?.file));
         const prefetchPrompt = typeof messages.at(-1)?.content === "string" ? messages.at(-1).content : "";
+        prefetchController = new AbortController();
         prefetchedSearchDecisionPromise = activeDecisionRouter.routeAsk({
           prompt: prefetchPrompt,
           messages: prefetchMessages,
@@ -238,7 +287,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           hasStrategyContext: false,
           hasGroundedHistory: prefetchGroundedHistory,
           hasMedia: prefetchHasMedia,
-          signal: transport.signal,
+          signal: AbortSignal.any([transport.signal, prefetchController.signal]),
         });
         prefetchedSearchDecisionPromise.catch(() => {});
       }
@@ -246,7 +295,9 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         chatId
           ? (preloadedChat ? Promise.resolve(preloadedChat) : chatRepository.getById(chatId, req.ownerId))
           : Promise.resolve(null),
-        earlyStrategyId && strategyRepository ? strategyRepository.getById(earlyStrategyId, req.ownerId) : Promise.resolve(null),
+        earlyStrategyId && strategyRepository
+          ? (preloadedStrategy ? Promise.resolve(preloadedStrategy) : strategyRepository.getById(earlyStrategyId, req.ownerId))
+          : Promise.resolve(null),
         earlyBriefId && strategyRepository ? strategyRepository.getById(earlyBriefId, req.ownerId) : Promise.resolve(null),
         earlyTaskId ? findPlannerTask(earlyTaskId) : Promise.resolve(null),
         req.user?.settings?.personalIntelligence === true
@@ -353,24 +404,43 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         strategyProvenance.grounded
       );
 
+      const newBinaryUploadCount = messages.filter((message) => Boolean(message.file?.data)).length;
+      if (newBinaryUploadCount > 1) {
+        return res.status(400).json({ code: "VALIDATION_ERROR", error: "Bir sorğuda yalnız bir fayl yüklənə bilər." });
+      }
       const existingFileIds = new Set((existingChat?.messages || []).map((m) => m?.file?.fileId).filter(Boolean));
-      await Promise.all(messages.map(async (message) => {
+      for (const message of messages) {
+        transport.signal.throwIfAborted();
         if (message.file) {
           assertCachedFileReference(message.file, existingChat);
-          if (message.file.data) message.file = await prepareUploadedContext(message.file);
-          const resolved = await geminiFileCache.resolveFileAsync(message.file, req.ownerId);
-          if (resolved) {
-            if (resolved.fileId && !existingFileIds.has(resolved.fileId)) {
-              newlyPersistedFileIds.add(resolved.fileId);
-            }
-            message.file = {
-              ...message.file,
-              fileId: resolved.fileId || message.file.fileId,
-              data: resolved.data || message.file.data,
-              textContent: resolved.textContent || message.file.textContent,
-              ownerId: req.ownerId,
-            };
+        }
+      }
+      await Promise.all(messages.map(async (message) => {
+        if (!message.file) return;
+        transport.signal.throwIfAborted();
+        if (message.file.data) {
+          message.file = await prepareUploadedContext(message.file);
+        }
+        let resolved;
+        if (message.file.data || message.file.textContent) {
+          resolved = geminiFileCache.resolveFile(message.file, req.ownerId);
+          if (resolved?.fileId && req.ownerId) {
+            pendingFilePersists.push(Promise.resolve(geminiFileCache.persistEntry(resolved)).catch(() => false));
           }
+        } else {
+          resolved = await geminiFileCache.resolveFileAsync(message.file, req.ownerId);
+        }
+        if (resolved) {
+          if (resolved.fileId && !existingFileIds.has(resolved.fileId)) {
+            newlyPersistedFileIds.add(resolved.fileId);
+          }
+          message.file = {
+            ...message.file,
+            fileId: resolved.fileId || message.file.fileId,
+            data: resolved.data || message.file.data,
+            textContent: resolved.textContent || message.file.textContent,
+            ownerId: req.ownerId,
+          };
         }
       }));
 
@@ -473,11 +543,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       });
 
       const isGuest = !req.user;
-      let remainingMessages = null;
-      if (isGuest) {
-        // Missing or inconsistent quota metadata must never fabricate a balance.
-        remainingMessages = guestMessageBalance(req).remaining;
-      }
+      const remainingMessages = null;
 
       const selectedAskModel = ASK_GEMINI_MODEL;
       const explicitWeb = req.body.pluginIds?.includes("web") === true;
@@ -515,7 +581,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       // One durable completion path for JSON, SSE and exact guest notices.
       // Never emit done before the authorized, revision-checked commit and replay record.
-      const complete = async (reply, groundingMetadata, { restrictedFeature = false, notice = false, grounded = false, remaining = req.remainingGuestMessages } = {}) => {
+      const complete = async (reply, groundingMetadata, { restrictedFeature = false, notice = false, grounded = false, truncated = false, finishReason = null } = {}) => {
         const now = Date.now();
         const groundedAt = grounded ? new Date(Math.min(now, ...groundedHistoryDates)).toISOString() : undefined;
         const updatedMessages = [...messages, {
@@ -523,23 +589,59 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           interactionId: learningInteractionId, groundingMetadata, createdAt: new Date(now).toISOString(),
           ...(grounded ? { searchGrounded: true, groundedAt } : {}),
         }];
-        await assertExecutionAuthorized(transport.signal);
-        req.securityContext?.markMutationPending?.();
-        const savedChat = await chatRepository.saveChat({
-          id: chatId || undefined, mustExist: Boolean(chatId),
-          expectedRevision: existingChat?.revision || (chatId ? 1 : null), ownerId: req.ownerId,
-          messages: prepareMessagesForStorage(updatedMessages), strategyId: effectiveStrategyId || null, briefId: effectiveBriefId || null, taskId: effectiveTaskId || null,
-        });
-        chatCommitted = true;
-        const payload = {
+        const [, isCancelled] = await Promise.all([
+          assertExecutionAuthorized(transport.signal),
+          activeRunHandle?.checkCancelled ? activeRunHandle.checkCancelled() : Promise.resolve(false),
+          ...(pendingFilePersists.length ? pendingFilePersists : []),
+        ]);
+        if (isCancelled) {
+          if (req.securityContext) req.securityContext.explicitCancel = true;
+          transport.abortExplicit();
+          transport.signal.throwIfAborted();
+        }
+        const buildPayload = (chatRecord) => ({
           reply, model: selectedAskModel, interactionId: learningInteractionId,
-          chat: savedChat, chatId: savedChat?.id, chatRevision: savedChat?.revision || 1,
-          groundingMetadata, remainingGuestMessages: isGuest ? remaining : null, isGuest,
+          chat: chatRecord, chatId: chatRecord?.id, chatRevision: chatRecord?.revision || 1,
+          groundingMetadata, remainingGuestMessages: null, isGuest,
+          ...(activeRunId ? { runId: activeRunId } : {}),
           ...(restrictedFeature ? { restrictedFeature: true } : {}),
+          ...(truncated ? { truncated: true } : {}),
+          ...(finishReason ? { finishReason } : {}),
+        });
+        let idempotentPersisted = false;
+        let builtPayload = null;
+        const persistCommitPayload = async (chatRecord) => {
+          builtPayload = buildPayload(chatRecord);
+          req.securityContext?.recordIdempotentResult?.(200, builtPayload);
+          await req.securityContext?.persistIdempotentResult?.();
+          idempotentPersisted = true;
         };
-        req.securityContext?.recordIdempotentResult?.(200, payload);
-        await req.securityContext?.persistIdempotentResult?.();
+        req.securityContext?.markMutationPending?.();
+        let savedChat;
+        try {
+          savedChat = await chatRepository.saveChat({
+            id: chatId || allocatedChatId || undefined, mustExist: Boolean(chatId),
+            expectedRevision: existingChat?.revision || (chatId ? 1 : null), ownerId: req.ownerId,
+            messages: prepareMessagesForStorage(updatedMessages), strategyId: effectiveStrategyId || null, briefId: effectiveBriefId || null, taskId: effectiveTaskId || null,
+            onCommitted: async (committedChat) => {
+              chatCommitted = true;
+              await persistCommitPayload(committedChat);
+            },
+          });
+        } catch (saveErr) {
+          if (!chatCommitted && ['REVISION_CONFLICT', 'NOT_FOUND', 'GUEST_STORAGE_LIMIT', 'STORAGE_BUSY'].includes(saveErr?.code) && req.securityContext) {
+            req.securityContext.mutationPending = false;
+            req.securityContext.preCommitFailure = true;
+          }
+          throw saveErr;
+        }
+        chatCommitted = true;
+        const payload = builtPayload || buildPayload(savedChat);
+        if (!idempotentPersisted) {
+          await persistCommitPayload(savedChat);
+        }
         transport.signal.throwIfAborted();
+        if (res.writableEnded || res.destroyed || transport.disconnected) return;
         if (isStreamingRequest) {
           transport.start();
           if (notice) transport.send({ chunk: reply, model: selectedAskModel });
@@ -561,17 +663,20 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           return;
         }
       }
-      if (isGuest && remainingMessages === 0) {
-        req.securityContext.guestQuotaExhausted = true;
-        await complete(GUEST_EXHAUSTED_MESSAGE, undefined, { notice: true, remaining: 0 });
-        return;
+
+      transport.signal.throwIfAborted();
+      if (req.aborted || res.destroyed) return;
+
+      activeRunId = randomUUID();
+      allocatedChatId = chatId || randomUUID();
+      if (!res.headersSent) {
+        res.setHeader("X-Helmer-Ask-Run-Id", activeRunId);
+        res.setHeader("X-Helmer-Ask-Chat-Id", allocatedChatId);
       }
 
-      if (isStreamingRequest) {
-        transport.start();
-      }
       const decisionStartedAt = Date.now();
-      const searchDecision = await (prefetchedSearchDecisionPromise || activeDecisionRouter.routeAsk({
+      if (prefetchedSearchDecisionPromise) prefetchedDecisionUsed = true;
+      const decisionPromise = prefetchedSearchDecisionPromise || activeDecisionRouter.routeAsk({
         prompt: lastUserMsg,
         messages,
         explicitWeb,
@@ -579,7 +684,45 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         hasGroundedHistory,
         hasMedia: Boolean(hasAnyAttachment),
         signal: transport.signal,
-      }));
+      });
+      decisionPromise.catch(() => {});
+
+      const registerRunSideEffect = Promise.resolve()
+        .then(() => activeAskRunManager.registerRun({
+          runId: activeRunId,
+          ownerId: req.ownerId,
+          chatId: allocatedChatId,
+          idempotencyKey: req.get('Idempotency-Key') || '',
+          prompt: lastUserMsg,
+          model: selectedAskModel,
+          requestTimeoutMs: limits.requestTimeoutMs,
+          requestStartedAt: learningStartedAt,
+          onCancel: () => {
+            if (req.securityContext) req.securityContext.explicitCancel = true;
+            transport.abortExplicit();
+          },
+        }))
+        .then((handle) => {
+          activeRunHandle = handle;
+          if (activeRunHandle?.alreadyCancelled) {
+            if (req.securityContext) req.securityContext.explicitCancel = true;
+            transport.abortExplicit();
+            transport.signal.throwIfAborted();
+          }
+          // Passive TCP disconnect after pre-flight must NOT kill generation; only explicit Stop aborts.
+          transport.enableBackgroundCompletion();
+          releaseDetachedGuard = req.detachAskExecutionGuard?.() || null;
+          releaseDetachedPolicy = req.securityContext?.enableAskBackgroundCompletion?.(limits.requestTimeoutMs) || null;
+          if (isStreamingRequest) {
+            transport.start();
+          }
+          return handle;
+        });
+
+      const [regOutcome, decisionOutcome] = await Promise.allSettled([registerRunSideEffect, decisionPromise]);
+      if (regOutcome.status === "rejected") throw regOutcome.reason;
+      if (decisionOutcome.status === "rejected") throw decisionOutcome.reason;
+      const searchDecision = decisionOutcome.value;
       if (req.askTimings) {
         req.askTimings.decisionWaitMs = Date.now() - decisionStartedAt;
         req.askTimings.decisionLatencyMs = searchDecision?.latencyMs ?? null;
@@ -603,11 +746,6 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       let reply = "";
       let activeModel = ASK_GEMINI_MODEL;
 
-      let streamedGrounding;
-      const guestStream = isStreamingRequest && isGuest ? createGuestAnswerStream(remainingMessages, chunk => {
-        transport.send({ chunk, model: activeModel, groundingMetadata: streamedGrounding });
-        streamedGrounding = undefined;
-      }) : null;
       if (isStreamingRequest && enableSearch) {
         transport.send({ status: "searching", statusText: "Vebdə axtarıram", model: activeModel });
       }
@@ -620,23 +758,21 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         ownerId: req.ownerId, signal: transport.signal,
         ...(isStreamingRequest ? { onChunk: async (chunk, groundingMetadata) => {
           if (req.askTimings && req.askTimings.firstChunkMs === undefined) req.askTimings.firstChunkMs = Date.now() - req.askTimings.startedAt;
-          if (groundingMetadata) streamedGrounding = groundingMetadata;
-          if (guestStream) guestStream.push(chunk);
-          else transport.send({ chunk, model: activeModel, groundingMetadata });
+          transport.send({ chunk, model: activeModel, groundingMetadata });
           await transport.drain();
         } } : {}),
       });
       reply = generated.text;
       if (!reply) throw new Error("Ask mode returned an empty response.");
       transport.signal.throwIfAborted();
-      if (res.writableEnded || res.destroyed) return;
-      if (isGuest && typeof remainingMessages === "number") {
-        reply = guestStream ? guestStream.finish(reply) : formatGuestAnswerWithCta(reply, remainingMessages);
-      }
 
       const sanitizedGrounding = sanitizeGroundingMetadata(generated.groundingMetadata) || undefined;
       const groundingActive = Boolean(enableSearch || sanitizedGrounding?.groundingChunks?.length || hasGroundedHistory);
-      await complete(reply, sanitizedGrounding, { grounded: groundingActive });
+      await complete(reply, sanitizedGrounding, {
+        grounded: groundingActive,
+        truncated: Boolean(generated.truncated),
+        finishReason: generated.finishReason || null,
+      });
 
       const modelImprovementActive = isModelImprovementEnabled(req);
       const hasPriorAssistant = messages.some((message) => message.role === "assistant" || message.role === "model");
@@ -703,6 +839,9 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         modelImprovement: !isRestricted,
       }).catch(() => {});
       console.error("Ask mode error:", { code: publicAskErrorCode(error) });
+      if (req.securityContext && !chatCommitted && !req.securityContext.mutationPending) {
+        req.securityContext.askTerminalFailure = true;
+      }
       await cleanupOrphanedFiles();
       if (res.writableEnded || res.destroyed) return;
       if (transport.streaming) return transport.fail(error);
@@ -712,8 +851,16 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         error: "Cavabı hazırlamaq mümkün olmadı.",
       });
     } finally {
-      await cleanupOrphanedFiles();
+      if (prefetchController && !prefetchedDecisionUsed) {
+        prefetchController.abort();
+      }
       transport.dispose();
+      await Promise.allSettled([
+        cleanupOrphanedFiles(),
+        activeRunHandle ? activeRunHandle.finish().catch(() => {}) : Promise.resolve(),
+        releaseDetachedGuard ? releaseDetachedGuard().catch(() => {}) : Promise.resolve(),
+        releaseDetachedPolicy ? releaseDetachedPolicy().catch(() => {}) : Promise.resolve(),
+      ]);
     }
 
   };

@@ -12,6 +12,7 @@ export function createAskExecutionGuard({
   matchesRequest = req => req.method === "POST" && req.path === "/",
 } = {}) {
   const activeOwners = new Map();
+  const releasingTargets = new Map();
   let activeCount = 0;
   const capacity = Number.isSafeInteger(maxConcurrent) && maxConcurrent > 0 ? maxConcurrent : 100;
   return async (req, res, next) => {
@@ -21,6 +22,13 @@ export function createAskExecutionGuard({
     const shared = allowParallelChats && redis?.isReady && req.user && req.body?.mode !== "research";
     const rawChatId = req.body?.chatId;
     const chatId = typeof rawChatId === "string" && /^[0-9a-f-]{36}$/i.test(rawChatId) ? rawChatId.toLowerCase() : null;
+    const earlyReleaseKey = shared
+      ? (chatId ? `helmer:ask-lock:${req.ownerId}:chat:${chatId}` : `${req.ownerId}:shared`)
+      : `helmer:ask-lock:${req.ownerId}`;
+    const pendingRelease = releasingTargets.get(earlyReleaseKey);
+    if (pendingRelease && !req.aborted && !res.destroyed) {
+      await Promise.race([pendingRelease, new Promise((resolve) => setTimeout(resolve, 300))]);
+    }
     const target = shared ? chatId || Symbol("new chat") : null;
     const active = activeOwners.get(req.ownerId) || new Set();
     if (hasActiveJobForOwner(req.ownerId) || active.has(null) ||
@@ -52,34 +60,74 @@ export function createAskExecutionGuard({
     let locked = false;
     let platformSlotAcquired = false;
     let heartbeat;
-    let released = false;
+    let releasePromise = null;
+    let detached = false;
+    const releaseTrackKey = key || `${req.ownerId}:shared`;
 
-    const release = async () => {
-      if (released) return;
-      released = true;
-      clearInterval(heartbeat);
-      active.delete(target);
-      if (!active.size) activeOwners.delete(req.ownerId);
-      activeCount--;
-      if (platformSlotAcquired && redis?.isReady) {
-        await redis.zRem?.(platformSlotsKey, token).catch(() => {});
-      }
-      if (locked && redis?.isReady) {
-        await redis.eval(
-          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
-          { keys: [key], arguments: [token] },
-        ).catch(() => {});
+    const onSignalAbort = () => {
+      if (!detached && (req.aborted || res.destroyed || res.writableEnded)) {
+        void release();
       }
     };
 
+    const onHttpClose = () => {
+      if (!detached) void release();
+    };
+
+    const release = () => {
+      if (releasePromise) return releasePromise;
+      clearInterval(heartbeat);
+      req.removeListener?.("aborted", onHttpClose);
+      req.securityContext?.signal?.removeEventListener?.("abort", onSignalAbort);
+      res.removeListener?.("finish", onHttpClose);
+      res.removeListener?.("close", onHttpClose);
+      active.delete(target);
+      if (!active.size) activeOwners.delete(req.ownerId);
+      activeCount--;
+      const cleanup = (async () => {
+        if (platformSlotAcquired && redis?.isReady) {
+          await redis.zRem?.(platformSlotsKey, token).catch(() => {});
+        }
+        if (locked && redis?.isReady) {
+          await redis.eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+            { keys: [key], arguments: [token] },
+          ).catch(() => {});
+        }
+      })().finally(() => {
+        if (releasingTargets.get(releaseTrackKey) === releasePromise) {
+          releasingTargets.delete(releaseTrackKey);
+        }
+      });
+      releasePromise = cleanup;
+      releasingTargets.set(releaseTrackKey, releasePromise);
+      return releasePromise;
+    };
+
     try {
-      if (redis?.isReady && typeof redis.eval === "function" && typeof redis.zRem === "function") {
-        const now = Date.now();
-        const admitted = await redis.eval(
-          "redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1]); if redis.call('zcard', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end; redis.call('zadd', KEYS[1], ARGV[3], ARGV[4]); redis.call('pexpire', KEYS[1], 300000); return 1",
-          { keys: [platformSlotsKey], arguments: [String(now), String(capacity), String(now + 240000), token] },
-        );
-        if (admitted !== 1) {
+      const supportsAtomicLua = Boolean(
+        redis?.isReady &&
+        key &&
+        typeof redis.eval === "function" &&
+        typeof redis.zRem === "function" &&
+        (typeof redis.sendCommand === "function" || redis.supportsAtomicLua === true)
+      );
+      if (supportsAtomicLua) {
+        const acquireCombined = () => {
+          const now = Date.now();
+          return redis.eval(
+            "redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1]); if redis.call('zcard', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end; if redis.call('set', KEYS[2], ARGV[4], 'NX', 'PX', 240000) == false then return -1 end; redis.call('zadd', KEYS[1], ARGV[3], ARGV[4]); redis.call('pexpire', KEYS[1], 300000); return 1",
+            { keys: [platformSlotsKey, key], arguments: [String(now), String(capacity), String(now + 240000), token] },
+          );
+        };
+        let combined = await acquireCombined();
+        if (combined === -1 && !req.aborted && !res.destroyed) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          if (!req.aborted && !res.destroyed) {
+            combined = await acquireCombined();
+          }
+        }
+        if (combined === 0) {
           await release();
           return res.status(429).json({
             error: "Server hazırda yüksək yüklənmə altındadır. Bir az sonra yenidən cəhd edin.",
@@ -87,17 +135,49 @@ export function createAskExecutionGuard({
             retryable: true,
           });
         }
-        platformSlotAcquired = true;
-      }
-      if (key && redis?.isReady) {
-        locked = await redis.set(key, token, { NX: true, PX: 240000 });
-        if (!locked) {
+        if (combined !== 1) {
           await release();
           return res.status(429).json({
             error: "Başqa tapşırığın bitməsini gözləyin.",
             code: "EXECUTION_BUSY",
             retryable: true,
           });
+        }
+        platformSlotAcquired = true;
+        locked = true;
+      } else {
+        if (redis?.isReady && typeof redis.eval === "function" && typeof redis.zRem === "function") {
+          const now = Date.now();
+          const admitted = await redis.eval(
+            "redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1]); if redis.call('zcard', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end; redis.call('zadd', KEYS[1], ARGV[3], ARGV[4]); redis.call('pexpire', KEYS[1], 300000); return 1",
+            { keys: [platformSlotsKey], arguments: [String(now), String(capacity), String(now + 240000), token] },
+          );
+          if (admitted !== 1) {
+            await release();
+            return res.status(429).json({
+              error: "Server hazırda yüksək yüklənmə altındadır. Bir az sonra yenidən cəhd edin.",
+              code: "EXECUTION_BUSY",
+              retryable: true,
+            });
+          }
+          platformSlotAcquired = true;
+        }
+        if (key && redis?.isReady) {
+          locked = await redis.set(key, token, { NX: true, PX: 240000 });
+          if (!locked && !req.aborted && !res.destroyed) {
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            if (!req.aborted && !res.destroyed) {
+              locked = await redis.set(key, token, { NX: true, PX: 240000 });
+            }
+          }
+          if (!locked) {
+            await release();
+            return res.status(429).json({
+              error: "Başqa tapşırığın bitməsini gözləyin.",
+              code: "EXECUTION_BUSY",
+              retryable: true,
+            });
+          }
         }
       }
       if (locked || platformSlotAcquired) {
@@ -117,8 +197,14 @@ export function createAskExecutionGuard({
           } catch { req.securityContext?.controller?.abort(new Error('Execution lease unavailable')); }
         }, 30000); heartbeat.unref();
       }
-      res.once("finish", release);
-      res.once("close", release);
+      req.detachAskExecutionGuard = () => {
+        detached = true;
+        return release;
+      };
+      req.once?.("aborted", onHttpClose);
+      req.securityContext?.signal?.addEventListener?.("abort", onSignalAbort, { once: true });
+      res.once("finish", onHttpClose);
+      res.once("close", onHttpClose);
       if (req.aborted || res.destroyed || res.writableEnded) return release();
       return next();
     } catch {

@@ -24,7 +24,7 @@ import {
   refineStrategy,
 } from "../services/ai/strategy-service.js";
 import { buildStrategyPersonalizationContext } from "../services/ai/personal-context.js";
-import { detectTargetMarket, getGuestBuildCtaNotice, GUEST_BUILD_EXHAUSTED_MESSAGE } from "../services/ai/prompts.js";
+import { detectTargetMarket } from "../services/ai/prompts.js";
 import { BuildEstimateRequestSchema } from "../services/ai/build-estimate.js";
 import { buildConfig } from "../services/ai/build-config.js";
 import { createHelmerDecisionRouter, deterministicBuildFallbackRoute } from "../services/ai/decision-router.js";
@@ -919,7 +919,6 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
           res.json({
             ...responseBody,
             ...(req.user ? {} : {
-              remainingGuestBriefs: req.remainingGuestBriefs,
               isGuest: true,
             }),
           });
@@ -1238,10 +1237,12 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     activeGenerations.set(requestKey, entry);
     if (onEntry) onEntry(entry);
 
-    generationPromise.then(
-      () => setTimeout(() => activeGenerations.delete(requestKey), 15 * 60 * 1000).unref(),
-      () => activeGenerations.delete(requestKey),
-    );
+    const clearActive = () => {
+      if (activeGenerations.get(requestKey) === entry) {
+        activeGenerations.delete(requestKey);
+      }
+    };
+    generationPromise.then(clearActive, clearActive);
 
     return generationPromise;
   }
@@ -1283,9 +1284,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
               ? { escalatedToFlagship: false, routingTier: "standard" }
               : {})),
             ...(req.user ? {} : {
-              remainingGuestBriefs: req.remainingGuestBriefs,
               isGuest: true,
-              guestCtaNotice: req.remainingGuestBriefs !== undefined ? getGuestBuildCtaNotice(req.remainingGuestBriefs, req.headers["accept-language"]?.includes("en")) : undefined,
             }),
           });
         }
@@ -1399,9 +1398,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
               ? { escalatedToFlagship: false, routingTier: "standard" }
               : {})),
           ...(req.user ? {} : {
-            remainingGuestBriefs: req.remainingGuestBriefs,
             isGuest: true,
-            guestCtaNotice: req.remainingGuestBriefs !== undefined ? getGuestBuildCtaNotice(req.remainingGuestBriefs, req.headers["accept-language"]?.includes("en")) : undefined,
           }),
         });
         if (writeFrame("data: [DONE]\n\n")) res.end();
@@ -1630,7 +1627,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
 
       if (req.securityContext) {
         req.securityContext.assertResources = async () => {
-          if (!await repository.getById(existing.id, req.ownerId)) {
+          if (!await repository.getById(existing.id, req.ownerId, { coalesce: false })) {
             throw Object.assign(new Error("Execution context removed"), { code: "EXECUTION_REVOKED", status: 403 });
           }
         };

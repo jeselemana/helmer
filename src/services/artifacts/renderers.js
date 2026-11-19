@@ -2,7 +2,7 @@ import { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, Ta
 import ExcelJS from "exceljs";
 import PptxGenJS from "pptxgenjs";
 import PDFDocument from "pdfkit";
-import { PDFDocument as PDFReader, PDFDict, PDFArray, PDFName } from "pdf-lib";
+import { PDFDocument as PDFReader, PDFDict, PDFArray, PDFName, PDFStream, PDFRef } from "pdf-lib";
 import JSZip from "jszip";
 import { XMLValidator, XMLParser } from "fast-xml-parser";
 import { fileURLToPath } from "node:url";
@@ -217,25 +217,38 @@ export async function renderPDF(spec) {
   return result;
 }
 
-export async function validateRenderedFile(buffer, kind) {
+export async function validateRenderedFile(buffer, kind, { nested = false } = {}) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 100 || buffer.length > 25 * 1024 * 1024) throw new Error("Invalid artifact size");
   if (kind === "pdf") {
     if (buffer.subarray(0, 5).toString() !== "%PDF-") throw new Error("Invalid PDF signature");
     const pdf = await PDFReader.load(buffer);
     if (!pdf.getPageCount()) throw new Error("Empty PDF");
     const visited = new Set();
+    const deref = (val) => {
+      let cur = val;
+      for (let hops = 0; cur instanceof PDFRef && hops < 16; hops++) {
+        cur = pdf.context.lookup(cur);
+      }
+      return cur;
+    };
     const inspect = object => {
-      if (!object || visited.has(object)) return;
-      visited.add(object);
+      const resolved = deref(object);
+      if (!resolved || visited.has(resolved)) return;
+      visited.add(resolved);
       if (visited.size > 100000) throw new Error('PDF object limit exceeded');
-      if (object instanceof PDFDict) for (const [key, value] of object.entries()) {
+      if (resolved instanceof PDFStream) {
+        inspect(resolved.dict);
+        return;
+      }
+      if (resolved instanceof PDFDict) for (const [key, rawValue] of resolved.entries()) {
         const name = key.decodeText();
+        const value = deref(rawValue);
         if (['JS', 'JavaScript', 'AA', 'OpenAction', 'EmbeddedFiles', 'EF', 'XFA', 'RichMedia', 'Launch'].includes(name)) throw new Error('Unsafe PDF content');
         if (name === 'S' && value instanceof PDFName && ['JavaScript', 'Launch', 'SubmitForm', 'ImportData', 'GoToR', 'GoToE'].includes(value.decodeText())) throw new Error('Unsafe PDF action');
-        if (name === 'URI' && (typeof value.decodeText !== 'function' || !/^https:\/\//i.test(value.decodeText()))) throw new Error('Unsafe PDF relationship');
+        if (name === 'URI' && (!value || typeof value.decodeText !== 'function' || !/^https:\/\//i.test(value.decodeText()))) throw new Error('Unsafe PDF relationship');
         inspect(value);
       }
-      else if (object instanceof PDFArray) for (const value of object.asArray()) inspect(value);
+      else if (resolved instanceof PDFArray) for (const value of resolved.asArray()) inspect(value);
     };
     for (const [, object] of pdf.context.enumerateIndirectObjects()) inspect(object);
     return;
@@ -243,15 +256,70 @@ export async function validateRenderedFile(buffer, kind) {
   const zip = await JSZip.loadAsync(buffer, { checkCRC32: true });
   const required = { docx: ["word/document.xml"], xlsx: ["xl/workbook.xml", "xl/worksheets/sheet1.xml"], pptx: ["ppt/presentation.xml", "ppt/slides/slide1.xml"] }[kind];
   if (!required || !zip.file("[Content_Types].xml") || required.some(name => !zip.file(name))) throw new Error("Invalid Office package");
+  const MAX_OFFICE_ENTRIES = 1000;
+  const MAX_OFFICE_INFLATED_BYTES = 50 * 1024 * 1024;
+  let fileEntriesCount = 0;
+  let inflatedBytes = 0;
+  const readZipEntryBuffer = (entry) => new Promise((resolve, reject) => {
+    const chunks = [];
+    let settled = false;
+    const stream = entry.nodeStream("nodebuffer");
+    stream.on("data", (chunk) => {
+      if (settled) return;
+      inflatedBytes += chunk.length;
+      if (inflatedBytes > MAX_OFFICE_INFLATED_BYTES) {
+        settled = true;
+        stream.destroy?.();
+        reject(new Error("Office package decompression limit exceeded"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    stream.once("error", (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+    stream.once("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+  });
   for (const file of Object.values(zip.files)) {
-    if (/vbaProject|externalLinks|embeddings.*\.bin/i.test(file.name)) throw new Error("Unsafe Office package");
-    if (!file.dir && /\.(?:xml|rels)$/.test(file.name)) {
-      const content = await file.async("string");
-      if (/<!DOCTYPE|<!ENTITY/i.test(content) || XMLValidator.validate(content) !== true) throw new Error("Invalid Office XML");
-      if (file.name.endsWith(".rels")) {
-        const relationships = new XMLParser({ ignoreAttributes: false }).parse(content).Relationships?.Relationship || [];
-        for (const relation of Array.isArray(relationships) ? relationships : [relationships]) {
-          if (relation["@_TargetMode"] === "External" && !/^https:\/\//i.test(relation["@_Target"])) throw new Error("Unsafe external relationship");
+    const normalizedName = String(file.name || "").replace(/\\/g, "/");
+    if (file.name.includes("\\") || normalizedName.startsWith("/") || normalizedName.split("/").includes("..")) {
+      throw new Error("Unsafe Office package");
+    }
+    const isAllowedPptxChartWorkbook =
+      !nested &&
+      kind === "pptx" &&
+      !file.dir &&
+      /^ppt\/embeddings\/Microsoft_Excel_Worksheet\d+\.xlsx$/i.test(normalizedName);
+    if (!isAllowedPptxChartWorkbook && /(?:vbaProject|vbaData|externalLinks|activeX\/.+|embeddings\/.+|xl\/macrosheets\/.+|xl\/dialogsheets\/.+)/i.test(normalizedName)) {
+      throw new Error("Unsafe Office package");
+    }
+    if (!file.dir) {
+      fileEntriesCount += 1;
+      if (fileEntriesCount > MAX_OFFICE_ENTRIES) throw new Error("Office package entry limit exceeded");
+      const entryBuffer = await readZipEntryBuffer(file);
+      if (isAllowedPptxChartWorkbook) {
+        await validateRenderedFile(entryBuffer, "xlsx", { nested: true });
+      }
+      if (/\.(?:xml|rels)$/i.test(normalizedName)) {
+        const content = entryBuffer.toString("utf8");
+        if (/<!DOCTYPE|<!ENTITY/i.test(content) || XMLValidator.validate(content) !== true) throw new Error("Invalid Office XML");
+        if (/\.rels$/i.test(normalizedName)) {
+          const relationships = new XMLParser({ ignoreAttributes: false }).parse(content).Relationships?.Relationship || [];
+          for (const relation of Array.isArray(relationships) ? relationships : [relationships]) {
+            const targetMode = String(relation["@_TargetMode"] || "").trim().toLowerCase();
+            const target = String(relation["@_Target"] || "").trim();
+            if (targetMode === "external") {
+              if (!/^https:\/\//i.test(target)) throw new Error("Unsafe external relationship");
+            } else if (/^(?:\\\\|\/\/)/.test(target) || (/^[a-z][a-z0-9+.-]*:/i.test(target) && !/^https:\/\//i.test(target))) {
+              throw new Error("Unsafe external relationship");
+            }
+          }
         }
       }
     }

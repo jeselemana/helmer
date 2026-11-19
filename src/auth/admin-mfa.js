@@ -30,7 +30,7 @@ export function createAdminMfaRouter({ users, store, adminIds, env = process.env
   const router = express.Router();
   router.use(requireAuth, (req, res, next) => {
     res.set('Cache-Control', 'no-store');
-    const isAllowed = Boolean(req.user?.id && (adminIds.has(req.user.id) || (req.user.username && adminIds.has(req.user.username))));
+    const isAllowed = Boolean(req.user?.id && adminIds.has(req.user.id));
     if (!isAllowed) return res.status(404).json({ code: 'NOT_FOUND' });
     next();
   });
@@ -53,7 +53,7 @@ export function createAdminMfaRouter({ users, store, adminIds, env = process.env
     let enrollment;
     try { enrollment = JSON.parse(env.ADMIN_MFA_ENROLLMENT_HASHES || '{}')[req.user.id]; } catch {}
     const digest = hashOpaqueToken(payload.enrollmentToken);
-    if (!enrollment || enrollment.expiresAt <= Date.now() || typeof enrollment.hash !== 'string' || enrollment.hash.length !== digest.length || !timingSafeEqual(Buffer.from(enrollment.hash), Buffer.from(digest))) return res.status(403).json({ code: 'INVALID_ENROLLMENT_TOKEN' });
+    if (!enrollment || !Number.isFinite(enrollment.expiresAt) || enrollment.expiresAt <= Date.now() || typeof enrollment.hash !== 'string' || enrollment.hash.length !== digest.length || !timingSafeEqual(Buffer.from(enrollment.hash), Buffer.from(digest))) return res.status(403).json({ code: 'INVALID_ENROLLMENT_TOKEN' });
     const secret = generateSecret(), setupToken = randomBytes(32).toString('base64url');
     await store.createResetToken(hashOpaqueToken(setupToken), req.user.id, 600, { purpose: 'mfa-setup', sessionId: req.auth.sessionId, secret: encryptMfaSecret(secret, req.user.id, env), enrollmentHash: digest });
     res.json({ setupToken, secret, uri: generateURI({ issuer: 'Helmer', label: req.user.email, secret }) });

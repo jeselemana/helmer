@@ -4,6 +4,7 @@ export function createUpView({ request: transport, getUser, getLanguage, onLogin
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     window.addEventListener('helmer:logout', () => pendingIdempotencyKeys.clear());
     window.addEventListener('helmer:user-changed', () => pendingIdempotencyKeys.clear());
+    window.addEventListener('helmer:auth-required', () => pendingIdempotencyKeys.clear());
   }
   const request = async (path, options = {}) => {
     const isChallengeMutation = options.method === 'POST' && /^\/api\/up\/challenges(?:\/|$)/.test(path);
@@ -108,7 +109,9 @@ export function createUpView({ request: transport, getUser, getLanguage, onLogin
         if (valid()) {
           error = e.message;
           try {
-            data = await request('/api/up');
+            const refreshed = await request('/api/up');
+            if (!valid()) return;
+            data = refreshed;
             if (challenge?.id === data.activeChallenge?.id) challenge = data.activeChallenge;
             else if (challenge) challenge = data.history.find(c => c.id === challenge.id) || challenge;
           } catch {}

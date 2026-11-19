@@ -454,7 +454,7 @@ test("Deep Research Stop button cancels UI state and aborts in-flight model requ
 test("DistributedResearchService preserves briefId and googleSearchEnabled in snapshots and revokes deleted briefId", async () => {
   const { DistributedResearchService } = await import("../src/services/ai/distributed-research.js");
   const distSrc = await fs.readFile(path.join(rootDir, "src/services/ai/distributed-research.js"), "utf8");
-  assert.match(distSrc, /if\s*\(job\.briefId\s*&&\s*!\s*await\s*this\.strategyRepository\?\.getById\(job\.briefId,\s*job\.ownerId\)\)\s*throw revoked\(\)/);
+  assert.match(distSrc, /if\s*\(job\.briefId\s*&&\s*!\s*await\s*this\.strategyRepository\?\.getById\(job\.briefId,\s*job\.ownerId(?:,\s*\{[^}]*\})?\)\)\s*throw revoked\(\)/);
   assert.match(distSrc, /'googleSearchEnabled',\s*'strategyId',\s*'briefId'/);
 
   const askHandlerSrc = await fs.readFile(path.join(rootDir, "src/http/ask-handler.js"), "utf8");

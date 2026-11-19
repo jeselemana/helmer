@@ -371,10 +371,10 @@ test('local Research holds the same owner lease as Ask and Build after the HTTP 
   assert.equal((await post('/api/strategy/assess')).status, 200);
 });
 
-test('Guest Build preflight (/assess and /estimate) and reserveProvider enforce IP quotas across cookie rotation', async t => {
+test('Guest Build preflight (/assess and /estimate) and reserveProvider enforce IP per-minute rate limits and IP USD budgets across cookie rotation', async t => {
   const policy = new AiPolicy({
     redis: null,
-    env: { GUEST_BUILD_DAILY_LIMIT: '3', GUEST_BUILD_PREFLIGHT_DAILY_LIMIT: '2', AI_USER_DAILY_USD: '5' },
+    env: { GUEST_BUILD_RATE_LIMIT_PER_MINUTE: '3', GUEST_BUILD_IP_RATE_LIMIT_PER_MINUTE: '2', AI_USER_DAILY_USD: '5' },
   });
   const app = express();
   app.use(express.json());
@@ -402,12 +402,13 @@ test('Guest Build preflight (/assess and /estimate) and reserveProvider enforce 
     body: JSON.stringify({ brief: 'Test brief content for quota enforcement' }),
   });
 
-  // Two preflight calls across rotated cookies consume the IP preflight limit; 3rd fails
+  // Two preflight calls across rotated cookies consume the IP per-minute limit; 3rd fails
   assert.equal((await post('/api/strategy/estimate', 'cookie-1')).status, 200);
   assert.equal((await post('/api/strategy/assess', 'cookie-2')).status, 200);
   const blocked = await post('/api/strategy/assess', 'cookie-3');
   assert.equal(blocked.status, 429);
-  assert.equal((await blocked.json()).code, 'GUEST_DAILY_LIMIT');
+  assert.ok(Number(blocked.headers.get('retry-after')) >= 1);
+  assert.equal((await blocked.json()).code, 'RATE_LIMITED');
 
   // Direct reserveProvider check across rotated guest cookies on the same IP (100*1.5 + 200*7.5 = 1650 micros)
   const budgetPolicy = new AiPolicy({ redis: null, env: { AI_USER_DAILY_USD: '10', AI_GUEST_IP_DAILY_USD: '0.002' } });

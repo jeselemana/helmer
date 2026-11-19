@@ -1,4 +1,8 @@
 /* Helmer Strategy OS — Corporate Enterprise Legal Stylesheet */
+[hidden] {
+  display: none !important;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;

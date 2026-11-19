@@ -117,7 +117,7 @@ export function buildStrategyPersonalizationContext({ user }) {
   return `\n\nUse only this minimal user-configured profile when relevant to the strategy. Do not infer additional personal context.\n<build_profile>\n${lines.join("\n")}\n</build_profile>`;
 }
 
-const USER_CONTEXT_CACHE_TTL_MS = 45 * 1000;
+const USER_CONTEXT_CACHE_TTL_MS = 90 * 1000;
 const MAX_CACHED_TENANTS = 250;
 const MAX_INDEXED_CHATS = 25;
 const MAX_INDEXED_STRATEGIES = 20;
@@ -129,6 +129,19 @@ export function invalidateUserContextCache(ownerId) {
     return;
   }
   tenantContextCache.delete(ownerId);
+}
+
+export function syncCachedTenantChats(ownerId, rawChats) {
+  if (!ownerId) return;
+  const cached = tenantContextCache.get(ownerId);
+  if (!cached) return;
+  cached.allChats = Array.isArray(rawChats)
+    ? rawChats
+        .filter((c) => c && !c.deleted && c.ownerId === ownerId && Array.isArray(c.messages))
+        .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
+        .slice(0, MAX_INDEXED_CHATS)
+    : [];
+  cached.timestamp = Date.now();
 }
 
 async function loadTenantContextData(ownerId, chatRepository, strategyRepository) {
@@ -145,6 +158,7 @@ async function loadTenantContextData(ownerId, chatRepository, strategyRepository
     return {
       allChats: cached.allChats,
       allStrategies: cached.allStrategies,
+      groundedStrategyIds: cached.groundedStrategyIds,
       fromCache: true,
     };
   }
@@ -161,12 +175,17 @@ async function loadTenantContextData(ownerId, chatRepository, strategyRepository
         .slice(0, MAX_INDEXED_CHATS)
     : [];
 
-  const allStrategies = Array.isArray(rawStrategies)
+  const ownerStrategies = Array.isArray(rawStrategies)
     ? rawStrategies
         .filter((s) => s && !s.deleted && s.ownerId === ownerId)
         .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
-        .slice(0, MAX_INDEXED_STRATEGIES)
     : [];
+
+  const groundedStrategyIds = new Set(
+    ownerStrategies.filter((strategy) => isGroundedStrategyRecord(strategy) && strategy.id).map((strategy) => strategy.id)
+  );
+
+  const allStrategies = ownerStrategies.slice(0, MAX_INDEXED_STRATEGIES);
 
   if (tenantContextCache.size >= MAX_CACHED_TENANTS) {
     const oldestKey = tenantContextCache.keys().next().value;
@@ -179,9 +198,10 @@ async function loadTenantContextData(ownerId, chatRepository, strategyRepository
     strategyRepoRef: strategyRepository,
     allChats,
     allStrategies,
+    groundedStrategyIds,
   });
 
-  return { allChats, allStrategies, fromCache: false };
+  return { allChats, allStrategies, groundedStrategyIds, fromCache: false };
 }
 
 export async function getRelevantUserContext({
@@ -197,12 +217,8 @@ export async function getRelevantUserContext({
   const queryTokens = tokens(userMessage);
   if (!queryTokens.size) return "";
 
-  const { allChats, allStrategies, fromCache } = await loadTenantContextData(ownerId, chatRepository, strategyRepository);
+  const { allChats, allStrategies, groundedStrategyIds, fromCache } = await loadTenantContextData(ownerId, chatRepository, strategyRepository);
   const candidates = [];
-
-  const groundedStrategyIds = new Set(
-    allStrategies.filter((strategy) => isGroundedStrategyRecord(strategy)).map((strategy) => strategy.id)
-  );
 
   for (const chat of allChats) {
     if (chat.deleted || chat.ownerId !== ownerId || chat.id === currentChatId || !Array.isArray(chat.messages)) continue;
@@ -220,7 +236,17 @@ export async function getRelevantUserContext({
           resourceKey: chat.id ? `chat:${chat.id}` : null,
           sourceType: "chat",
           sourceId: chat.id,
-          exists: chatRepository?.getById ? async () => Boolean(await chatRepository.getById(chat.id, ownerId)) : null,
+          exists: chatRepository?.getById
+            ? async () => {
+                const live = await chatRepository.getById(chat.id, ownerId, { coalesce: true });
+                return Boolean(
+                  live &&
+                  !live.deleted &&
+                  !live.messages?.some(isGroundedAssistantMessage) &&
+                  !(live.strategyId && groundedStrategyIds.has(live.strategyId))
+                );
+              }
+            : null,
         });
       }
     }
@@ -239,7 +265,12 @@ export async function getRelevantUserContext({
         resourceKey: strategy.id ? `strategy:${strategy.id}` : null,
         sourceType: "strategy",
         sourceId: strategy.id,
-        exists: strategyRepository?.getById ? async () => Boolean(await strategyRepository.getById(strategy.id, ownerId)) : null,
+        exists: strategyRepository?.getById
+          ? async () => {
+              const live = await strategyRepository.getById(strategy.id, ownerId, { coalesce: true });
+              return Boolean(live && !live.deleted && !isGroundedStrategyRecord(live));
+            }
+          : null,
       });
     }
   }
@@ -264,8 +295,8 @@ export async function getRelevantUserContext({
       const key = `${type}:${id}`;
       if (!liveRevalidations.has(key)) {
         const loader = type === "chat"
-          ? chatRepository?.getById?.(id, ownerId)
-          : strategyRepository?.getById?.(id, ownerId);
+          ? chatRepository?.getById?.(id, ownerId, { coalesce: true })
+          : strategyRepository?.getById?.(id, ownerId, { coalesce: true });
         liveRevalidations.set(key, Promise.resolve(loader).catch(() => null));
       }
       return liveRevalidations.get(key);
@@ -280,11 +311,22 @@ export async function getRelevantUserContext({
         const fresh = await revalidateResource(item.sourceType, item.sourceId);
         if (!fresh || fresh.deleted || fresh.ownerId !== ownerId) return null;
         if (item.sourceType === "strategy") {
+          if (isGroundedStrategyRecord(fresh)) return null;
           return {
             ...item,
             label: `Yadda saxlanmış strategiya (${clip(fresh.title, 80) || "strategiya"})`,
             value: clip(fresh.brief || fresh.context?.business || fresh.summary),
           };
+        }
+        if (Array.isArray(fresh.messages) && fresh.messages.some(isGroundedAssistantMessage)) {
+          return null;
+        }
+        if (fresh.strategyId) {
+          if (groundedStrategyIds.has(fresh.strategyId)) return null;
+          if (typeof strategyRepository?.getById === "function") {
+            const linkedStrategy = await revalidateResource("strategy", fresh.strategyId);
+            if (linkedStrategy && isGroundedStrategyRecord(linkedStrategy)) return null;
+          }
         }
         return {
           ...item,

@@ -12,7 +12,9 @@ import { PrivacyPolicy } from "../src/services/security/privacy-policy.js";
 import { getPricingForModel, calculateEstimatedCost } from "../src/services/telemetry/pricing.js";
 import {
   callDecisionsApi,
+  getDecisionsApiStatus,
   hasDecisionApiConfiguration,
+  resolveDecisionApiKey,
   resolveDecisionVertexConfig,
 } from "../src/services/ai/client.js";
 import { evaluateSearchRoute } from "../src/services/ai/search-router.js";
@@ -387,7 +389,7 @@ test("503 / timeout fallback to gemini-3.5-flash-lite (MINIMAL thinking) + stric
           vertexParams = params;
           return {
             text: JSON.stringify(
-              params.contents[0].parts[0].text.includes('"draft_brief"')
+              String(params.config?.systemInstruction || params.contents[0].parts[0].text).includes('"draft_brief"')
                 ? { a: "refine_brief", d: 0, m: true, c: true }
                 : { s: true, r: false }
             ),
@@ -970,4 +972,93 @@ test("gemini-decision-1 noul parser reads entry.noul instead of inverting high-c
   assert.equal(buildRes.needsMarketSearch, false);
   assert.equal(buildRes.hasEnoughContext, false);
   assert.equal(buildRes.briefAction, "ask_questions");
+});
+
+test("DECISIONS_API_KEY alias, low-confidence (< 0.70) fallback, and router getDiagnostics() without key leaks", async () => {
+  const envWithAlias = {
+    GEMINI_API_KEY: "AQ.AbCdEfGhVertexExpressSecret",
+    DECISIONS_API_KEY: "AIzaSyAliasDeveloperKeySecret123",
+    GOOGLE_CLOUD_PROJECT: "helmer-prod-123",
+  };
+  assert.equal(hasDecisionApiConfiguration(envWithAlias), true);
+  assert.equal(resolveDecisionApiKey(envWithAlias), "AIzaSyAliasDeveloperKeySecret123");
+
+  const status = getDecisionsApiStatus(envWithAlias);
+  assert.equal(status.configured, true);
+  assert.equal(status.keySource, "DECISIONS_API_KEY");
+  assert.equal(status.model, "gemini-decision-1");
+  assert.equal(status.endpoint, "https://generativelanguage.googleapis.com/v1beta/decisions");
+  assert.doesNotMatch(JSON.stringify(status), /AIzaSy|AQ\.AbCd/);
+
+  let decisionCalls = 0;
+  let fallbackCalls = 0;
+  const router = createHelmerDecisionRouter({
+    redis: createMockRedis(),
+    env: envWithAlias,
+    fetcher: async (url, init) => {
+      decisionCalls++;
+      assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/decisions");
+      assert.equal(init.headers["x-goog-api-key"], "AIzaSyAliasDeveloperKeySecret123");
+      const body = JSON.parse(init.body);
+      if (body.questions?.needs_web_search) {
+        return new Response(
+          JSON.stringify({
+            answers: {
+              needs_web_search: { type: "noul", noul: 0.58, confidence: 0.58 },
+              require_grounding: { type: "noul", noul: 0.25, confidence: 0.75 },
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          answers: {
+            brief_action: { type: "choice", choice: "draft_brief", confidence: 0.9 },
+            brief_depth: { type: "score", score: 1, confidence: 0.9 },
+            needs_market_search: { type: "noul", noul: 0.5, confidence: 0.5 },
+            has_enough_context: { type: "noul", noul: 0.55, confidence: 0.55 },
+            route_tier: { type: "choice", choice: "hydrogen_medium", confidence: 0.85 },
+          },
+        }),
+        { status: 200 }
+      );
+    },
+    getVertexClientFn: () => ({
+      models: {
+        generateContent: async (params) => {
+          fallbackCalls++;
+          const isBuild = String(params.config?.systemInstruction || "").includes('"draft_brief"');
+          return {
+            text: JSON.stringify(
+              isBuild
+                ? { a: "draft_brief", d: 1, t: "hydrogen_medium", m: false, c: true }
+                : { s: true, r: false }
+            ),
+          };
+        },
+      },
+    }),
+  });
+
+  const diagBefore = await router.getDiagnostics();
+  assert.equal(diagBefore.active, true);
+  assert.equal(diagBefore.mode, "decisions_api");
+  assert.equal(diagBefore.keySource, "DECISIONS_API_KEY");
+  assert.doesNotMatch(JSON.stringify(diagBefore), /AIzaSy|AQ\.AbCd/);
+
+  // Ask confidence 0.58 (< 0.70) falls back to vertex_flash_lite
+  const askRes = await router.routeAsk({ prompt: "Müəmmalı bazar sualı" });
+  assert.equal(decisionCalls, 1);
+  assert.equal(fallbackCalls, 1);
+  assert.equal(askRes.routerSource, "vertex_flash_lite");
+  assert.equal(askRes.fallbackReason, "decision_low_confidence");
+  assert.equal(askRes.enableSearch, true);
+
+  // Build confidence < 0.70 falls back to vertex_flash_lite
+  const buildRes = await router.routeBuild({ prompt: "Launch SaaS platform" });
+  assert.equal(decisionCalls, 2);
+  assert.equal(fallbackCalls, 2);
+  assert.equal(buildRes.routerSource, "vertex_flash_lite");
+  assert.equal(buildRes.fallbackReason, "decision_low_confidence");
 });

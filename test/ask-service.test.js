@@ -317,3 +317,36 @@ test('Ask service enforces mandatory search and drops immediate-streaming shortc
   assert.match(system, /MANDATORY SEARCH EXECUTION/);
   assert.doesNotMatch(system, /LOW THINKING \/ FAST STREAMING/);
 });
+
+test('Ask service resets search timeout on thinking parts, blocks RECITATION, and handles MAX_TOKENS', async () => {
+  // 1. Thinking tokens extend 18s search deadline to idleTimeoutMs
+  const shortLimits = { ...limits, searchTimeoutMs: 40, firstEventTimeoutMs: 40, idleTimeoutMs: 140 };
+  const thinkingClient = {
+    models: {
+      generateContentStream: async () => (async function* () {
+        yield { candidates: [{ content: { parts: [{ thought: true, text: 'analyzing...' }] } }] };
+        await delay(70); // Exceeds searchTimeoutMs (40ms) but within idleTimeoutMs (140ms)
+        yield { text: 'Hazırdır.' };
+      })(),
+    },
+  };
+  const thinkingGenerate = createAskService({ getClient: () => thinkingClient, limits: shortLimits });
+  const thinkingResult = await thinkingGenerate({ messages, enableSearch: true, onChunk: async () => {} });
+  assert.equal(thinkingResult.text, 'Hazırdır.');
+
+  // 2. RECITATION finishReason is blocked safely as AI_SAFETY_BLOCKED
+  const recitationFixture = fixture([{ text: '', candidates: [{ finishReason: 'RECITATION' }] }]);
+  await assert.rejects(() => recitationFixture.generate({ messages }), { code: 'AI_SAFETY_BLOCKED' });
+
+  // 3. Empty response with MAX_TOKENS throws AI_MAX_TOKENS without ungrounded fallback
+  const emptyMaxTokens = fixture([{ text: '', candidates: [{ finishReason: 'MAX_TOKENS' }] }]);
+  await assert.rejects(() => emptyMaxTokens.generate({ messages, enableSearch: true }), { code: 'AI_MAX_TOKENS' });
+  assert.equal(emptyMaxTokens.calls.length, 1);
+
+  // 4. Partial response ending on MAX_TOKENS returns truncated metadata
+  const partialMaxTokens = fixture([{ text: 'Qismən cavab', candidates: [{ finishReason: 'MAX_TOKENS' }] }]);
+  const truncatedResult = await partialMaxTokens.generate({ messages });
+  assert.equal(truncatedResult.text, 'Qismən cavab');
+  assert.equal(truncatedResult.truncated, true);
+  assert.equal(truncatedResult.finishReason, 'MAX_TOKENS');
+});

@@ -54,21 +54,21 @@ export function createResearchRouter({ researchService, chatRepository, strategy
         }
       }
 
-      const findPlannerTask = (id) => {
+      const findPlannerTask = (id, options = {}) => {
         if (!id || !plannerRepository) return Promise.resolve(null);
         if (typeof plannerRepository.getById === "function") {
-          return plannerRepository.getById(id, req.ownerId);
+          return plannerRepository.getById(id, req.ownerId, options);
         }
-        return plannerRepository.list(req.ownerId).then((list) => list.find((task) => task.id === id) || null);
+        return plannerRepository.list(req.ownerId, options).then((list) => list.find((task) => task.id === id) || null);
       };
 
       if (req.securityContext) {
         req.securityContext.assertResources = async () => {
           const [authorizedChat, authorizedStrategy, authorizedBrief, authorizedTask] = await Promise.all([
-            chatId && chatRepository ? chatRepository.getById(chatId, req.ownerId) : null,
-            strategyId && strategyRepository ? strategyRepository.getById(strategyId, req.ownerId) : null,
-            briefId && strategyRepository ? strategyRepository.getById(briefId, req.ownerId) : null,
-            taskId && plannerRepository ? findPlannerTask(taskId) : null,
+            chatId && chatRepository ? chatRepository.getById(chatId, req.ownerId, { coalesce: false }) : null,
+            strategyId && strategyRepository ? strategyRepository.getById(strategyId, req.ownerId, { coalesce: false }) : null,
+            briefId && strategyRepository ? strategyRepository.getById(briefId, req.ownerId, { coalesce: false }) : null,
+            taskId && plannerRepository ? findPlannerTask(taskId, { coalesce: false }) : null,
           ]);
           if (
             (chatId && chatRepository && !authorizedChat) ||

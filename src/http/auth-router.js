@@ -24,6 +24,8 @@ import {
   parseBody,
 } from "../auth/validation.js";
 import { hashOpaqueToken, hashPassword, verifyPassword } from "../auth/password.js";
+import { isDisposableEmail } from "../auth/disposable-emails.js";
+import { verifyTurnstileToken } from "../auth/turnstile.js";
 import {
   SESSION_TTL_SECONDS,
   clearGuestCookie,
@@ -60,15 +62,29 @@ export function verifyPkceChallenge(codeVerifier, expectedChallenge) {
 }
 
 export function sanitizeReturnTo(value) {
-  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) {
+  if (
+    typeof value !== "string" ||
+    /[\u0000-\u001f\u007f]/.test(value) ||
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    value.startsWith("/\\")
+  ) {
     return "/workspace";
   }
   try {
     const parsed = new URL(value, "http://localhost");
-    if (parsed.origin !== "http://localhost" || AUTH_LOOP_PATHS.has(parsed.pathname) || parsed.pathname.startsWith("/api/")) {
+    if (
+      parsed.origin !== "http://localhost" ||
+      !parsed.pathname.startsWith("/") ||
+      parsed.pathname.startsWith("//")
+    ) {
       return "/workspace";
     }
-    return parsed.pathname === "/" ? "/workspace" : `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    const normPath = parsed.pathname.toLowerCase().replace(/\/+$/, "") || "/";
+    if (AUTH_LOOP_PATHS.has(normPath) || normPath === "/api" || normPath.startsWith("/api/")) {
+      return "/workspace";
+    }
+    return normPath === "/" ? "/workspace" : `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
     return "/workspace";
   }
@@ -213,7 +229,7 @@ async function startSession(req, res, authStore, user) {
   return sessionId;
 }
 
-export function createAuthRouter({ userRepository, authStore, emailService, strategyRepository, chatRepository, plannerRepository, aiLearningRepository, upRepository, appUrl, telemetryService, cleanupQueue = null, researchJobStore = null, googleClient: customGoogleClient = null }) {
+export function createAuthRouter({ userRepository, authStore, emailService, strategyRepository, chatRepository, plannerRepository, aiLearningRepository, upRepository, appUrl, telemetryService, cleanupQueue = null, researchJobStore = null, googleClient: customGoogleClient = null, turnstileSiteKey = undefined, turnstileSecretKey = undefined, turnstileFetcher = undefined }) {
   const telemetryRepository = telemetryService?.repository;
   const purgeExpired = () => userRepository.purgeExpiredAccounts({
     strategyRepository,
@@ -234,6 +250,8 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
   const canonicalAppUrl = String(appUrl || process.env.APP_URL || "http://localhost:8080").replace(/\/$/, "");
   const googleRedirectUri = process.env.GOOGLE_REDIRECT_URI || `${canonicalAppUrl}/api/auth/google/callback`;
   const googleClient = customGoogleClient || new OAuth2Client(googleClientId, googleClientSecret, googleRedirectUri);
+  const resolvedTurnstileSiteKey = String(turnstileSiteKey ?? process.env.TURNSTILE_SITE_KEY ?? process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? "").trim();
+  const resolvedTurnstileSecretKey = String(turnstileSecretKey ?? process.env.TURNSTILE_SECRET_KEY ?? "").trim();
   const router = express.Router();
 
   async function verificationUser(email) {
@@ -260,7 +278,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     res.json({ nonce });
   }));
   const ReauthSchema = z.object({ currentPassword: z.string().min(1).max(128).optional(), credential: z.string().min(1).max(4096).optional(), nonce: z.string().min(32).max(128).optional() }).strict();
-  router.post('/reauth', limit(authStore, 'reauth', 8, 300, req => req.user?.id), asyncRoute(async (req, res) => {
+  router.post('/reauth', limit(authStore, 'reauth', 8, 300, req => req.user?.id), limit(authStore, 'reauth', 8, 300, req => req.user?.id, { perAccount: true }), asyncRoute(async (req, res) => {
     if (!req.auth?.user?.emailVerifiedAt) return res.status(401).json({ code: 'AUTH_REQUIRED' });
     const payload = ReauthSchema.parse(req.body); let accepted = false;
     if (payload.currentPassword) accepted = await verifyPassword(req.user.passwordHash, payload.currentPassword);
@@ -323,6 +341,8 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
       googleOAuthEnabled: Boolean(googleClientId),
       googlePkceEnabled: googlePkceConfigured,
       googleCallbackPath: "/api/auth/google/callback",
+      turnstileSiteKey: resolvedTurnstileSiteKey || "",
+      turnstileEnabled: Boolean(resolvedTurnstileSiteKey),
     });
   });
 
@@ -796,10 +816,39 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
   }),
 );
 
-  router.post("/signup", limit(authStore, "signup", 8, 15 * 60), asyncRoute(async (req, res) => {
+  router.post(["/signup", "/register"], limit(authStore, "signup", 5, 60), asyncRoute(async (req, res) => {
     const payload = parseBody(SignupSchema, req.body);
+    const turnstileToken = payload.turnstileToken || req.get("X-Helmer-Turnstile-Token") || "";
+    const turnstileResult = await verifyTurnstileToken({
+      token: turnstileToken,
+      secretKey: resolvedTurnstileSecretKey,
+      remoteIp: req.ip || req.socket?.remoteAddress,
+      appUrl: canonicalAppUrl,
+      expectedAction: "signup",
+      fetcher: turnstileFetcher || fetch,
+    });
+    if (!turnstileResult.ok) {
+      return res.status(turnstileResult.status).json({
+        error: turnstileResult.error,
+        code: turnstileResult.code,
+      });
+    }
+    if (isDisposableEmail(payload.email)) {
+      return res.status(400).json({
+        error: "Müvəqqəti (disposable) e-poçt ünvanları ilə qeydiyyatdan keçmək qadağandır. Zəhmət olmasa daimi e-poçt ünvanı daxil edin.",
+        code: "DISPOSABLE_EMAIL_NOT_ALLOWED",
+        field: "email",
+      });
+    }
     const passwordHash = await hashPassword(payload.password);
-    const user = await userRepository.create({ ...payload, passwordHash });
+    const user = await userRepository.create({
+      fullName: payload.fullName,
+      username: payload.username,
+      email: payload.email,
+      language: payload.language,
+      ageConfirmed: payload.ageConfirmed,
+      passwordHash,
+    });
     if (telemetryService) {
       telemetryService.trackAuth({
         ownerId: user.id,
@@ -994,6 +1043,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
   router.post(
     "/account/delete-request",
     limit(authStore, "account-delete", 5, 15 * 60, (req) => req.user?.id),
+    limit(authStore, "account-delete", 5, 15 * 60, (req) => req.user?.id, { perAccount: true }),
     asyncRoute(async (req, res) => {
       if (!req.user) return res.status(401).json({ error: "Sessiya aktiv deyil.", code: "AUTH_REQUIRED" });
       const payload = z.object({ currentPassword: z.string().min(1).max(128).optional(), reauthToken: z.string().min(32).max(128).optional() }).strict().parse(req.body || {});
@@ -1034,6 +1084,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
   router.patch(
     ["/account", "/profile"],
     limit(authStore, "account-update", 20, 15 * 60, (req) => req.user?.id),
+    limit(authStore, "account-update", 20, 15 * 60, (req) => req.user?.id, { perAccount: true }),
     asyncRoute(async (req, res) => {
       if (!req.user) return res.status(401).json({ error: "Sessiya aktiv deyil.", code: "AUTH_REQUIRED" });
       const payload = parseBody(AccountUpdateSchema, req.body);
@@ -1259,7 +1310,7 @@ export function createAuthRouter({ userRepository, authStore, emailService, stra
     return res.json({ user: publicUser(updated) });
   }));
 
-  router.post("/change-password", limit(authStore, "change-password", 8, 15 * 60, (req) => req.user?.id), asyncRoute(async (req, res) => {
+  router.post("/change-password", limit(authStore, "change-password", 8, 15 * 60, (req) => req.user?.id), limit(authStore, "change-password", 8, 15 * 60, (req) => req.user?.id, { perAccount: true }), asyncRoute(async (req, res) => {
     if (!req.user) return res.status(401).json({ error: "Sessiya aktiv deyil.", code: "AUTH_REQUIRED" });
     const payload = parseBody(ChangePasswordSchema, req.body);
     if (!(await verifyPassword(req.user.passwordHash, payload.currentPassword))) {

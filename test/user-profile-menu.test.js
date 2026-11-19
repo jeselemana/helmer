@@ -150,7 +150,7 @@ test("Profile icon tooltip and aria-label are localized in English and Azerbaija
   assert.ok(js.includes('railAccountButton.setAttribute("aria-label", t("nav.openAccountSettings")'), "railAccountButton aria-label is synced with i18n");
 });
 
-test("Profile menu: renders user email below profile name and minimalist limits for guest mode", async () => {
+test("Profile menu: renders user email below profile name and omits legacy guest daily limits", async () => {
   const js = await fs.readFile(path.join(process.cwd(), "public/script.js"), "utf8");
   const css = await fs.readFile(path.join(process.cwd(), "public/style.css"), "utf8");
 
@@ -158,17 +158,8 @@ test("Profile menu: renders user email below profile name and minimalist limits 
   assert.ok(js.includes("profile-menu-email"), "profile-menu-email is rendered");
   assert.ok(css.includes(".profile-menu-email"), ".profile-menu-email styling is defined in style.css");
 
-  // Guest limits section
-  assert.ok(js.includes("profile-menu-limits"), "profile-menu-limits container is rendered for guest");
-  assert.ok(js.includes("profile-menu-limits-title"), "profile-menu-limits-title is rendered");
-  assert.ok(js.includes("profile-menu-limit-row"), "profile-menu-limit-row is rendered for Ask and Build");
-  assert.ok(js.includes("profile-menu-limit-name"), "profile-menu-limit-name is rendered");
-  assert.ok(js.includes("profile-menu-limit-val"), "profile-menu-limit-val is rendered");
-
-  // CSS styling for guest limits
-  assert.ok(css.includes(".profile-menu-limits {"), ".profile-menu-limits styling is defined in style.css");
-  assert.ok(css.includes(".profile-menu-limits-title {"), ".profile-menu-limits-title styling is defined");
-  assert.ok(css.includes(".profile-menu-limit-row {"), ".profile-menu-limit-row styling is defined");
+  // Legacy guest daily limits section is removed from profile menu
+  assert.ok(!js.includes("profile-menu-limits"), "profile-menu-limits container is removed from guest profile menu");
 });
 
 

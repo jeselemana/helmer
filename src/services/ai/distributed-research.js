@@ -63,11 +63,11 @@ export class DistributedResearchService extends ResearchService {
       await assertPlatformEnabled();
       await this.assertJobOwned(job);
       if (this.privacyPolicy) await this.privacyPolicy.assertExecution({ ownerId: job.ownerId, sessionId: job.sessionId, privacySnapshot: job.privacySnapshot, signal: job.abortController.signal });
-      const chat = await this.chatRepository.getById(job.chatId, job.ownerId);
+      const chat = await this.chatRepository.getById(job.chatId, job.ownerId, { coalesce: false });
       if (!chat || chat.deleted) throw revoked();
-      if (job.strategyId && !await this.strategyRepository?.getById(job.strategyId, job.ownerId)) throw revoked();
-      if (job.briefId && !await this.strategyRepository?.getById(job.briefId, job.ownerId)) throw revoked();
-      if (job.taskId && !(await this.plannerRepository?.list(job.ownerId) || []).some(task => task.id === job.taskId)) throw revoked();
+      if (job.strategyId && !await this.strategyRepository?.getById(job.strategyId, job.ownerId, { coalesce: false })) throw revoked();
+      if (job.briefId && !await this.strategyRepository?.getById(job.briefId, job.ownerId, { coalesce: false })) throw revoked();
+      if (job.taskId && !(await this.plannerRepository?.list(job.ownerId, { coalesce: false }) || []).some(task => task.id === job.taskId)) throw revoked();
       if (this.jobStore) {
         const durable = await this.readCheckpoint(job.id, job.ownerId);
         if (!durable || durable.ownerId !== job.ownerId || ['cancelled', 'deleted', 'interrupted'].includes(durable.status)) throw revoked();
@@ -231,7 +231,7 @@ export class DistributedResearchService extends ResearchService {
     const remote = await this.readCheckpoint(jobId, ownerId);
     if (!remote) return super.getJob(jobId, ownerId);
     if (remote.ownerId !== ownerId || remote.status === 'deleted' || !isWithinGroundedRetention(remote.createdAt)) return null;
-    const chat = remote.chatId ? await this.chatRepository.getById(remote.chatId, ownerId) : null;
+    const chat = remote.chatId ? await this.chatRepository.getById(remote.chatId, ownerId, { coalesce: false }) : null;
     if (!chat || chat.deleted) {
       await this.persistCheckpoint(jobId, { ownerId, status: 'deleted', prompt: null, content: null, checkpoint: null, strategyContext: null, taskContext: null, sources: [], steps: [], groundingMetadata: null }, { control: true }).catch(() => {});
       return null;

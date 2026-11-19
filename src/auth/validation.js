@@ -51,6 +51,7 @@ export const SignupSchema = z.object({
   ageConfirmed: z.literal(true, {
     errorMap: () => ({ message: "Qeydiyyat üçün 18 yaşınızı və İstifadə Şərtlərini təsdiqləməlisiniz." }),
   }),
+  turnstileToken: z.string().trim().max(2048).optional(),
 }).strict();
 
 export const LoginSchema = z.object({

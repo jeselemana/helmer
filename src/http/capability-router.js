@@ -64,7 +64,7 @@ const researchSourceHistory = z.object({
 // Existing Ask UI fields are accepted explicitly. Persisted artifact and source provenance always comes from the server.
 export const askRequestSchema = z.object({
   messages: z.array(z.object({
-    role: z.enum(["user", "assistant", "model"]), content: z.string().max(10000), file: upload.optional(),
+    role: z.enum(["user", "assistant", "model"]), content: z.string().max(40000), file: upload.optional(),
     strategyTitle: z.string().max(1000).optional(), briefTitle: z.string().max(1000).optional(), taskTitle: z.string().max(1000).optional(), model: z.string().max(100).optional(),
     interactionId: uuid.optional(), createdAt: z.string().max(100).optional(), feedback: z.enum(["positive", "negative"]).nullable().optional(),
     isStreaming: z.boolean().optional(), status: z.string().max(100).optional(), statusText: z.string().max(500).optional(),
@@ -82,7 +82,13 @@ export const askRequestSchema = z.object({
   pluginIds: z.array(z.string().regex(/^[a-z][a-z0-9-]{0,40}$/)).max(6).optional(),
   chatRevision: z.number().int().positive().optional(),
   artifactId: uuid.optional(), stream: z.boolean().optional(),
-}).strict();
+}).strict().refine(
+  (data) => {
+    const last = data.messages.at(-1);
+    return !last || last.role !== "user" || last.content.length <= 10000;
+  },
+  { message: "Sonuncu istifadəçi mesajı 10000 simvoldan uzun ola bilməz.", path: ["messages"] }
+);
 
 function storedMessage(message) {
   return { role: message.role, content: message.content, ...(message.strategyTitle ? { strategyTitle: message.strategyTitle } : {}), ...(message.briefTitle ? { briefTitle: message.briefTitle } : {}), ...(message.taskTitle ? { taskTitle: message.taskTitle } : {}),
@@ -210,6 +216,7 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       const selection = resolveCapabilityIntent({ registry, pluginIds: payload.pluginIds, prompt, previousArtifact: effectivePreviousForSelection });
       if (selection.intent === "chat" || (selection.plugins.length === 1 && selection.plugins[0].id === "web")) {
         if (chat) req.preloadedAskChat = chat;
+        if (chatStrategy) req.preloadedAskStrategy = chatStrategy;
         if (previous && !previousIsGrounded) {
           const safeSpec = sanitizeArtifactSpecForPrompt(previous.versions.at(-1)?.spec);
           if (safeSpec) req.askArtifactContext = JSON.stringify(safeSpec);
@@ -325,12 +332,38 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       history.at(-1).pluginIds = selection.plugins.map(plugin => plugin.id);
       const existingFileIds = new Set((chat?.messages || []).map((m) => m?.file?.fileId).filter(Boolean));
       activeOwnerId = req.ownerId;
+      let newBinaryUploads = 0;
       for (const message of history) if (message.file) {
         transport.signal.throwIfAborted();
         assertCachedFileReference(message.file, chat);
-        message.file = await prepareUploadedContext(hydrateFile ? await hydrateFile(message.file, req.ownerId) : message.file);
-        if (message.file?.fileId && !existingFileIds.has(message.file.fileId)) {
-          newlyPersistedFileIds.add(message.file.fileId);
+        const hadInlineData = Boolean(message.file.data);
+        if (hadInlineData) {
+          newBinaryUploads += 1;
+          if (newBinaryUploads > 1) {
+            throw Object.assign(new Error("Bir sorğuda yalnız bir fayl yüklənə bilər."), { status: 400, code: "VALIDATION_ERROR" });
+          }
+          message.file = await prepareUploadedContext(message.file);
+        }
+        const hydrated = hydrateFile ? await hydrateFile(message.file, req.ownerId) : message.file;
+        if (hydrated?.fileId && !existingFileIds.has(hydrated.fileId)) {
+          newlyPersistedFileIds.add(hydrated.fileId);
+        }
+        if (hydrated) {
+          message.file = {
+            ...message.file,
+            ...hydrated,
+            fileId: hydrated.fileId || message.file.fileId,
+            data: hydrated.data || message.file.data,
+            textContent: hydrated.textContent || message.file.textContent,
+            ownerId: req.ownerId,
+          };
+        }
+        if (!hadInlineData) {
+          if (message.file.data && !message.file.textContent) {
+            message.file = await prepareUploadedContext(message.file);
+          } else if (!validUploadMetadata(message.file)) {
+            throw Object.assign(new Error("Unsupported upload type"), { status: 400, code: "VALIDATION_ERROR" });
+          }
         }
         if (!message.file.data && !message.file.textContent) {
           throw Object.assign(new Error("Yüklənmiş fayl kontekstinin müddəti bitib; faylı yenidən əlavə edin."), {
@@ -351,10 +384,10 @@ export function createCapabilityRouter({ allowGuestChat = false, registry, workf
       initialChat = await chats.saveChat({ id: allocatedChatId, ownerId: req.ownerId, messages: safeHistory, strategyId, briefId, taskId, mustExist: Boolean(chat), expectedRevision: chat ? expectedRevision : null });
       if (req.securityContext) req.securityContext.assertResources = async () => {
         const [authorizedChat, authorizedStrategy, authorizedBrief, authorizedTasks] = await Promise.all([
-          chats.getById(allocatedChatId, req.ownerId),
-          strategyId ? strategies.getById(strategyId, req.ownerId) : null,
-          briefId ? strategies.getById(briefId, req.ownerId) : null,
-          taskId ? planner.list(req.ownerId) : null,
+          chats.getById(allocatedChatId, req.ownerId, { coalesce: false }),
+          strategyId ? strategies.getById(strategyId, req.ownerId, { coalesce: false }) : null,
+          briefId ? strategies.getById(briefId, req.ownerId, { coalesce: false }) : null,
+          taskId ? planner.list(req.ownerId, { coalesce: false }) : null,
         ]);
         if (!authorizedChat || (strategyId && !authorizedStrategy) ||
             (briefId && !authorizedBrief) ||
@@ -426,7 +459,7 @@ export function createArtifactRouter({ artifacts, chats }) {
     try {
       if (!uuid.safeParse(req.params.id).success || !/^[1-9]\d{0,2}$/.test(req.params.version) || !["download", "preview"].includes(req.params.action)) return res.status(400).json({ error: "Fayl seçimi düzgün deyil." });
       const record = await artifacts.get(req.params.id, req.ownerId);
-      const chat = record ? await chats.getById(record.chatId, req.ownerId) : null;
+      const chat = record ? await chats.getById(record.chatId, req.ownerId, { coalesce: false }) : null;
       const queryRevision = req.query.chatRevision !== undefined ? Number(req.query.chatRevision) : undefined;
       if (chat && queryRevision !== undefined && queryRevision !== (chat.revision || 1)) return res.status(409).json({ code: 'REVISION_CONFLICT', revision: chat.revision || 1 });
       const references = chat?.messages.flatMap(message => message.artifacts || []).filter(artifact => artifact.id === record?.id) || [];

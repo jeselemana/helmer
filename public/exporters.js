@@ -11,7 +11,7 @@ function escapeDocument(value) {
 
 function csvCell(value) {
   let str = String(value ?? "");
-  if (/^[=+\-@\t\r]/.test(str)) {
+  if (/^[\s\u0000-\u001F]*[=+\-@]|^[\t\r]/.test(str)) {
     str = `'${str}`;
   }
   return `"${str.replaceAll('"', '""')}"`;

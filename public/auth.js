@@ -8,14 +8,27 @@ const DEFAULT_GOOGLE_CLIENT_ID =
   "471975374819-mgn2g8auc7q9eko71air922aoo7h963p.apps.googleusercontent.com";
 let runtimeGoogleClientId = DEFAULT_GOOGLE_CLIENT_ID;
 let initializedGoogleClientId = null;
+let runtimeTurnstileSiteKey = "";
+let authConfigPromise = null;
 
 async function loadAuthConfig() {
-  try {
-    const data = await request("/api/auth/config");
-    if (data?.googleClientId) {
-      runtimeGoogleClientId = data.googleClientId;
-    }
-  } catch {}
+  if (!authConfigPromise) {
+    authConfigPromise = (async () => {
+      try {
+        const data = await request("/api/auth/config");
+        if (data?.googleClientId) {
+          runtimeGoogleClientId = data.googleClientId;
+        }
+        if (typeof data?.turnstileSiteKey === "string") {
+          runtimeTurnstileSiteKey = data.turnstileSiteKey.trim();
+        }
+        return data;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return authConfigPromise;
 }
 
 const AUTH_PATHS = new Set([
@@ -69,10 +82,22 @@ function escapeHtml(value) {
 }
 
 function safeInternalPath(value) {
-  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return "/";
+  if (
+    typeof value !== "string" ||
+    /[\u0000-\u001f\u007f]/.test(value) ||
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    value.startsWith("/\\")
+  ) return "/";
   try {
     const url = new URL(value, location.origin);
-    if (url.origin !== location.origin || AUTH_PATHS.has(url.pathname)) return "/";
+    if (
+      url.origin !== location.origin ||
+      !url.pathname.startsWith("/") ||
+      url.pathname.startsWith("//")
+    ) return "/";
+    const normPath = url.pathname.toLowerCase().replace(/\/+$/, "") || "/";
+    if (AUTH_PATHS.has(normPath) || normPath === "/api" || normPath.startsWith("/api/")) return "/";
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
     return "/";
@@ -646,7 +671,59 @@ function renderSignup() {
     : "Ən azı 18 yaşımın olduğunu təsdiqləyirəm, İstifadə Şərtləri və Məxfilik Siyasəti ilə razıyam.";
   ageConsentRow.append(ageCheckbox, ageText);
 
-  form.append(fullName, username, email, password, ageConsentRow, submit);
+  const turnstileWrap = document.createElement("div");
+  turnstileWrap.className = "auth-turnstile-wrap";
+
+  form.append(fullName, username, email, password, ageConsentRow, turnstileWrap, submit);
+
+  let signupTurnstileToken = "";
+  let turnstileWidgetId = null;
+  let turnstileMounting = false;
+
+  const resetTurnstileWidget = () => {
+    signupTurnstileToken = "";
+    if (turnstileWidgetId !== null && window.turnstile?.reset) {
+      try { window.turnstile.reset(turnstileWidgetId); } catch {}
+    }
+  };
+
+  const mountTurnstileWidget = async () => {
+    if (turnstileMounting || turnstileWidgetId !== null || !turnstileWrap.isConnected) return;
+    turnstileMounting = true;
+    try {
+      if (!runtimeTurnstileSiteKey) {
+        await loadAuthConfig();
+      }
+      if (!runtimeTurnstileSiteKey || !turnstileWrap.isConnected) return;
+      if (!window.turnstile?.render) {
+        setTimeout(() => {
+          mountTurnstileWidget();
+        }, 120);
+        return;
+      }
+      turnstileWidgetId = window.turnstile.render(turnstileWrap, {
+        sitekey: runtimeTurnstileSiteKey,
+        action: "signup",
+        theme: document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+        appearance: "interaction-only",
+        callback: (token) => {
+          signupTurnstileToken = token || "";
+        },
+        "expired-callback": () => {
+          signupTurnstileToken = "";
+        },
+        "error-callback": () => {
+          signupTurnstileToken = "";
+        },
+      });
+    } finally {
+      turnstileMounting = false;
+    }
+  };
+
+  requestAnimationFrame(() => {
+    mountTurnstileWidget();
+  });
 
   const divider = authDivider(isEn ? "or" : "və ya");
 
@@ -713,15 +790,38 @@ function renderSignup() {
     }
     setFormError(form, "");
     submitState(submit, true, t("auth.signup.submitBtn"));
-    
+
     try {
-      const formData = Object.fromEntries(new FormData(form));
-      formData.username = String(formData.username || "").trim().replace(/^@+/, "");
-      formData.language = getLanguage();
-      formData.ageConfirmed = true;
+      if (!runtimeTurnstileSiteKey) {
+        await loadAuthConfig();
+      }
+      let turnstileToken = signupTurnstileToken || (turnstileWidgetId !== null ? window.turnstile?.getResponse?.(turnstileWidgetId) : "") || "";
+      if (runtimeTurnstileSiteKey && !turnstileToken) {
+        for (let attempt = 0; attempt < 20 && !turnstileToken; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          turnstileToken = signupTurnstileToken || (turnstileWidgetId !== null ? window.turnstile?.getResponse?.(turnstileWidgetId) : "") || "";
+        }
+      }
+      if (runtimeTurnstileSiteKey && !turnstileToken) {
+        throw new Error(
+          isEn
+            ? "Security verification did not complete. Please wait a moment and try again."
+            : "Təhlükəsizlik yoxlaması (Turnstile) tamamlanmadı. Bir neçə saniyə gözləyib yenidən cəhd edin."
+        );
+      }
+
+      const bodyPayload = {
+        fullName: String(form.fullName.value || ""),
+        username: String(form.username.value || "").trim().replace(/^@+/, ""),
+        email: String(form.email.value || ""),
+        password: String(form.password.value || ""),
+        language: getLanguage(),
+        ageConfirmed: true,
+        ...(turnstileToken ? { turnstileToken } : {}),
+      };
       const data = await request("/api/auth/signup", {
         method: "POST",
-        body: JSON.stringify(formData),
+        body: JSON.stringify(bodyPayload),
       });
       if (data.verificationRequired && data.email) {
         const delivery = data.deliveryPending ? "&delivery=pending" : "";
@@ -732,6 +832,7 @@ function renderSignup() {
       }
       throw new Error(isEn ? "Could not initiate verification process." : "Təsdiq prosesini başlatmaq mümkün olmadı.");
     } catch (error) {
+      resetTurnstileWidget();
       setFormError(form, error.message, error.field);
       submitState(submit, false, t("auth.signup.submitBtn"));
     }

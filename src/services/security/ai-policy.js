@@ -1,10 +1,21 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { BUILD_OUTPUT_RESERVATIONS, isValidBuildOutputReservation } from '../ai/build-config.js';
-import { guestDailyLimit, guestBuildDailyLimit, guestBuildPreflightDailyLimit } from './config.js';
-import { GUEST_EXHAUSTED_MESSAGE, GUEST_BUILD_EXHAUSTED_MESSAGE, GUEST_RESTRICTION_NOTICES, detectGuestFunctionalRestriction } from '../ai/prompts.js';
+import {
+  guestAskPerMinuteLimit,
+  guestAskIpPerMinuteLimit,
+  guestBuildPerMinuteLimit,
+  guestBuildIpPerMinuteLimit,
+} from './config.js';
+import { GUEST_RESTRICTION_NOTICES, detectGuestFunctionalRestriction } from '../ai/prompts.js';
 import { resolveAskThinkingLevel } from '../ai/ask-routing.js';
-import { acquireLocalOwnerExecutionLease, acquireSharedAskLease } from './owner-execution-lease.js';
+import {
+  ASK_BARRIER,
+  LEASE_MS,
+  acquireLocalOwnerExecutionLease,
+  acquireSharedAskLease,
+  createSharedAskLeaseHandle,
+} from './owner-execution-lease.js';
 import { requestFingerprint } from './request-fingerprint.js';
 
 const fail = (code, status = 503) => Object.assign(new Error(code), { code, status });
@@ -16,7 +27,7 @@ const LOCAL_ASK_REPLAY_TTL_MS = 15 * 60 * 1000;
 const LOCAL_ASK_REPLAY_LIMIT = 512;
 const LOCAL_ASK_REPLAY_MAX_BYTES = 32 * 1024;
 
-function reserveAskRate(redis, actor, ip, token) {
+function reserveMinuteRate(redis, keys, limits, token, windowMs = ASK_RATE_WINDOW_MS) {
   return redis.eval(`
     local t = redis.call('TIME')
     local now = t[1] * 1000 + math.floor(t[2] / 1000)
@@ -36,8 +47,76 @@ function reserveAskRate(redis, actor, ip, token) {
     end
     return 0
   `, {
-    keys: [`security:ask-minute:${actor}`, `security:ask-minute-ip:${ip}`],
-    arguments: [token, String(ASK_RATE_WINDOW_MS), String(ASK_REQUESTS_PER_MINUTE), String(ASK_IP_REQUESTS_PER_MINUTE)],
+    keys,
+    arguments: [token, String(windowMs), ...limits.map(String)],
+  });
+}
+
+function reserveAskRate(redis, actor, ip, token) {
+  return reserveMinuteRate(
+    redis,
+    [`security:ask-minute:${actor}`, `security:ask-minute-ip:${ip}`],
+    [ASK_REQUESTS_PER_MINUTE, ASK_IP_REQUESTS_PER_MINUTE],
+    token,
+  );
+}
+
+/**
+ * Atomically verifies the AI kill switch, claims an idempotency key (or returns an existing record),
+ * reserves rolling per-owner and per-IP minute rate limits, and acquires a shared Ask execution lease
+ * in a single Redis RTT without mutating rate or lease keys on any rejection path.
+ */
+function admitSharedAskAtomic(redis, { requestKey, candidate, actor, ip, token }) {
+  const ownerKey = `security:owner-execution:${actor}`;
+  return redis.eval(`
+    if redis.call('get', KEYS[1]) == '1' then return {'PAUSED'} end
+    local existing = redis.call('get', KEYS[2])
+    if existing then return {'EXISTS', existing} end
+    local t = redis.call('TIME')
+    local now = t[1] * 1000 + math.floor(t[2] / 1000)
+    local window = tonumber(ARGV[3])
+    local limits = { tonumber(ARGV[4]), tonumber(ARGV[5]) }
+    local retry = 0
+    for idx = 1, 2 do
+      local rk = KEYS[idx + 2]
+      redis.call('zremrangebyscore', rk, '-inf', now - window)
+      if redis.call('zcard', rk) >= limits[idx] then
+        local oldest = redis.call('zrange', rk, 0, 0, 'WITHSCORES')
+        retry = math.max(retry, tonumber(oldest[2]) + window - now)
+      end
+    end
+    if retry > 0 then return {'RATE_LIMITED', tostring(math.ceil(retry / 1000))} end
+    local owner = redis.call('get', KEYS[5])
+    if owner and owner ~= ARGV[6] then return {'BUSY'} end
+    redis.call('set', KEYS[2], ARGV[1], 'EX', 900)
+    for idx = 3, 4 do
+      redis.call('zadd', KEYS[idx], now, ARGV[2])
+      redis.call('pexpire', KEYS[idx], window)
+    end
+    local leaseMs = tonumber(ARGV[7])
+    redis.call('zremrangebyscore', KEYS[6], '-inf', now)
+    redis.call('zadd', KEYS[6], now + leaseMs, ARGV[2])
+    redis.call('pexpire', KEYS[6], leaseMs)
+    redis.call('set', KEYS[5], ARGV[6], 'PX', leaseMs)
+    return {'OK'}
+  `, {
+    keys: [
+      'security:ai-paused',
+      requestKey,
+      `security:ask-minute:${actor}`,
+      `security:ask-minute-ip:${ip}`,
+      ownerKey,
+      `${ownerKey}:ask-leases`,
+    ],
+    arguments: [
+      candidate,
+      token,
+      String(ASK_RATE_WINDOW_MS),
+      String(ASK_REQUESTS_PER_MINUTE),
+      String(ASK_IP_REQUESTS_PER_MINUTE),
+      ASK_BARRIER,
+      LEASE_MS,
+    ],
   });
 }
 
@@ -86,52 +165,39 @@ export function resolveEffectiveModelPricing(model, env = process.env) {
   };
 }
 
-// The available balance includes this reserved message; remaining is the post-request balance.
-export function guestMessageBalance(req) {
-  const available = req.guestMessagesAvailable;
-  const remaining = req.remainingGuestMessages;
-  if (!Number.isSafeInteger(available) || available <= 0 || !Number.isSafeInteger(remaining) || remaining < 0 || available !== remaining + 1) {
-    throw fail('EXECUTION_UNAVAILABLE');
-  }
-  return { available, remaining };
-}
-
-export function guestBriefBalance(req) {
-  const available = req.guestBriefsAvailable;
-  const remaining = req.remainingGuestBriefs;
-  if (!Number.isSafeInteger(available) || available <= 0 || !Number.isSafeInteger(remaining) || remaining < 0 || (available !== remaining + 1 && available !== remaining)) {
-    throw fail('EXECUTION_UNAVAILABLE');
-  }
-  return { available, remaining };
+function normalizeRequestPath(path) {
+  return String(path || '').replace(/\/{2,}/g, '/');
 }
 
 export function isAiRequest(req) {
+  const reqPath = normalizeRequestPath(req.path);
   return req.method === 'POST' && (
-    /^\/api\/ask(?:\/research)?\/?$/i.test(req.path) ||
-    /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream|refine|[^/]+\/refine)\/?$/i.test(req.path) ||
-    /^\/api\/planner\/(?:summarize|prioritize)\/?$/i.test(req.path) ||
-    /^\/api\/up\/challenges(?:\/[0-9a-f-]{36}\/(?:submit|retry))?\/?$/i.test(req.path)
+    /^\/api\/ask(?:\/research)?\/?$/i.test(reqPath) ||
+    /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream|refine|[^/]+\/refine)\/?$/i.test(reqPath) ||
+    /^\/api\/planner\/(?:summarize|prioritize)\/?$/i.test(reqPath) ||
+    /^\/api\/up\/challenges(?:\/[0-9a-f-]{36}\/(?:submit|retry))?\/?$/i.test(reqPath)
   );
 }
 
 export function aiRequestTimeoutMs(req) {
   if (req.method === 'POST') {
-    if (/^\/api\/strategy\/estimate\/?$/i.test(req.path)) return 45000;
-    if (/^\/api\/strategy\/assess\/?$/i.test(req.path)) return 90000;
-    if (/^\/api\/strategy\/(?:generate|generate-stream|refine|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path)) return 600000;
+    const reqPath = normalizeRequestPath(req.path);
+    if (/^\/api\/strategy\/estimate\/?$/i.test(reqPath)) return 45000;
+    if (/^\/api\/strategy\/assess\/?$/i.test(reqPath)) return 90000;
+    if (/^\/api\/strategy\/(?:generate|generate-stream|refine|[0-9a-f-]{36}\/refine)\/?$/i.test(reqPath)) return 600000;
   }
   return 180000;
 }
 
 function canonicalRequestRoute(path) {
-  return path.toLowerCase().replace(/\/$/, '');
+  return normalizeRequestPath(path).toLowerCase().replace(/\/$/, '');
 }
 
 export function createReplayResourceCheck({ chatRepository, strategyRepository, getResearchJob }) {
   return async (req, result) => {
     const route = canonicalRequestRoute(req.path);
     if (route === '/api/ask' || route === '/api/ask/research') {
-      const chat = result.chatId && await chatRepository.getById(result.chatId, req.ownerId);
+      const chat = result.chatId && await chatRepository.getById(result.chatId, req.ownerId, { coalesce: false });
       if (!chat) return false;
       if (result.jobId) return Boolean(await getResearchJob(result.jobId, req.ownerId));
       return (chat.revision || 1) === result.chatRevision &&
@@ -141,7 +207,7 @@ export function createReplayResourceCheck({ chatRepository, strategyRepository, 
     const generation = route === '/api/strategy/generate' || route === '/api/strategy/generate-stream';
     if (refine || (generation && result.savedId)) {
       const cached = result.savedStrategy || result.strategy;
-      const current = await strategyRepository.getById(refine?.[1] || result.savedId, req.ownerId);
+      const current = await strategyRepository.getById(refine?.[1] || result.savedId, req.ownerId, { coalesce: false });
       return Boolean(current && typeof cached?.updatedAt === 'string' && cached.updatedAt === current.updatedAt &&
         cached.versions?.length === current.versions?.length);
     }
@@ -153,6 +219,7 @@ export class AiPolicy {
   constructor({ redis, env = process.env, fetcher = fetch, allowParallelAskChats = false, canReplay = null }) {
     Object.assign(this, { redis, env, fetcher, allowParallelAskChats, canReplay });
     this.localAskRequests = new Map();
+    this.releasingOwnerLocks = new Map();
   }
   async sendReplay(req, res, result) {
     try {
@@ -205,9 +272,14 @@ export class AiPolicy {
       return json(body);
     };
     const finish = () => {
+      if (context._askBackgroundActive) return;
       if (!context.mutationPending && !context.mutationCommitted && this.localAskRequests.get(key) === entry) {
         this.localAskRequests.delete(key);
       }
+    };
+    context._finishLocalAsk = () => {
+      context._askBackgroundActive = false;
+      finish();
     };
     res.once('finish', finish);
     res.once('close', finish);
@@ -265,8 +337,13 @@ export class AiPolicy {
     try {
       if (this.env.APP_URL) appHost = new URL(this.env.APP_URL).hostname;
     } catch {}
-    const allowedHosts = new Set([appHost, 'helmeros.com', 'www.helmeros.com', 'localhost', '127.0.0.1']);
-    if (!result.success || (result.action && result.action !== 'guest-ai') || (result.hostname && !allowedHosts.has(result.hostname))) throw fail('BOT_VERIFICATION_FAILED', 403);
+    const isProd = this.env.NODE_ENV === 'production';
+    const allowedHosts = isProd
+      ? new Set([appHost, 'helmeros.com', 'www.helmeros.com'])
+      : new Set([appHost, 'helmeros.com', 'www.helmeros.com', 'localhost', '127.0.0.1']);
+    const actionMatches = isProd ? result?.action === 'guest-ai' : (!result?.action || result.action === 'guest-ai');
+    const hostMatches = isProd ? (Boolean(result?.hostname) && allowedHosts.has(result.hostname)) : (!result?.hostname || allowedHosts.has(result.hostname));
+    if (!result?.success || !actionMatches || !hostMatches) throw fail('BOT_VERIFICATION_FAILED', 403);
   }
   ipKey(req) {
     let ip = String(req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
@@ -275,7 +352,8 @@ export class AiPolicy {
   }
   middleware() {
     return async (req, res, next) => {
-      if (!/^\/api\/(?:ask|strategy|planner|up|user|artifacts)(?:\/|$)/i.test(req.path)) return next();
+      const reqPath = normalizeRequestPath(req.path);
+      if (!/^\/api\/(?:ask|strategy|planner|up|user|artifacts)(?:\/|$)/i.test(reqPath)) return next();
       if (req.user?.status && req.user.status !== 'active') return res.status(403).json({ code: 'ACCOUNT_UNAVAILABLE', error: 'Hesab aktiv deyil.' });
       if (req.user && !req.user.emailVerifiedAt) return res.status(403).json({ code: 'EMAIL_VERIFICATION_REQUIRED', error: 'E-poçtunu təsdiqlə.' });
       const previousAuthorization = req.securityContext?.assertAuthorized;
@@ -287,12 +365,12 @@ export class AiPolicy {
           await Promise.all([this.assertEnabled(options), req.securityContext.assertLease?.(options), previousAuthorization?.(options)]);
         };
       }
-      if (guest && (/^\/api\/(?:up|user|artifacts)(?:\/|$)/i.test(req.path) || /^\/api\/ask\/research(?:\/|$)/i.test(req.path))) return res.status(401).json({ code: 'AUTH_REQUIRED' });
+      if (guest && (/^\/api\/(?:up|user|artifacts)(?:\/|$)/i.test(reqPath) || /^\/api\/ask\/research(?:\/|$)/i.test(reqPath))) return res.status(401).json({ code: 'AUTH_REQUIRED' });
       if (guest) {
         let notice;
-        if (/^\/api\/planner(?:\/|$)/i.test(req.path)) notice = GUEST_RESTRICTION_NOTICES.planner;
-        if (/^\/api\/strategy(?:\/|$)/i.test(req.path) && !(req.method === 'POST' && /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path))) notice = GUEST_RESTRICTION_NOTICES.strategy;
-        if (req.method === 'POST' && /^\/api\/ask\/?$/i.test(req.path)) {
+        if (/^\/api\/planner(?:\/|$)/i.test(reqPath)) notice = GUEST_RESTRICTION_NOTICES.planner;
+        if (/^\/api\/strategy(?:\/|$)/i.test(reqPath) && !(req.method === 'POST' && /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(reqPath))) notice = GUEST_RESTRICTION_NOTICES.strategy;
+        if (req.method === 'POST' && /^\/api\/ask\/?$/i.test(reqPath)) {
           const body = req.body || {};
           if (body.thinkingLevel !== undefined && (typeof body.thinkingLevel !== 'string' || !['low', 'medium', 'high', 'off', 'auto'].includes(body.thinkingLevel))) {
             return res.status(400).json({ code: 'VALIDATION_ERROR', error: 'Düşünmə səviyyəsi düzgün deyil.' });
@@ -310,8 +388,8 @@ export class AiPolicy {
         if (notice) return res.status(401).json({ code: 'AUTH_REQUIRED', error: notice, reply: notice });
       }
       if (!isAiRequest(req)) return next();
-      const isAsk = /^\/api\/ask\/?$/i.test(req.path);
-      const isResearch = /^\/api\/ask\/research\/?$/i.test(req.path);
+      const isAsk = /^\/api\/ask\/?$/i.test(reqPath);
+      const isResearch = /^\/api\/ask\/research\/?$/i.test(reqPath);
       const sharedAsk = this.allowParallelAskChats && isAsk && !guest && req.body?.mode !== 'research';
       const endTimedOutRequest = () => {
         if (res.destroyed || res.writableEnded) return;
@@ -324,6 +402,7 @@ export class AiPolicy {
       };
       const token = randomUUID();
       let preClaimedRequest = null;
+      let preAdmittedSharedAsk = null;
       const preId = (!guest && this.redis?.isReady && typeof req.get === 'function') ? req.get('Idempotency-Key') : '';
       const preBodyId = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey.trim() : '';
       const canOverlapEnableAndIdempotency =
@@ -332,8 +411,50 @@ export class AiPolicy {
         preId &&
         /^[A-Za-z0-9_-]{16,100}$/.test(preId) &&
         (!preBodyId || preBodyId === preId);
-      if (canOverlapEnableAndIdempotency) {
-        const key = `security:request:${createHash('sha256').update(`${req.ownerId}:${canonicalRequestRoute(req.path)}:${preId}`).digest('hex')}`;
+      const supportsAtomicLua = Boolean(
+        this.redis?.isReady &&
+        typeof this.redis.eval === 'function' &&
+        (typeof this.redis.sendCommand === 'function' || this.redis.supportsAtomicLua === true)
+      );
+      if (sharedAsk && canOverlapEnableAndIdempotency && supportsAtomicLua && this.env.AI_EXECUTION_DISABLED !== 'true' && !this.releasingOwnerLocks.get(req.ownerId)) {
+        const key = `security:request:${createHash('sha256').update(`${req.ownerId}:${canonicalRequestRoute(reqPath)}:${preId}`).digest('hex')}`;
+        const fp = requestFingerprint(req.body);
+        const candidate = JSON.stringify({ state: 'reserved', fingerprint: fp, token });
+        const actor = req.ownerId;
+        const ip = this.ipKey(req);
+        try {
+          let outcome = await admitSharedAskAtomic(this.redis, { requestKey: key, candidate, actor, ip, token });
+          if (outcome?.[0] === 'BUSY' && !req.aborted && !res.destroyed) {
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            if (!req.aborted && !res.destroyed) {
+              outcome = await admitSharedAskAtomic(this.redis, { requestKey: key, candidate, actor, ip, token });
+            }
+          }
+          const tag = outcome?.[0];
+          if (tag === 'PAUSED') {
+            return res.status(503).json({ code: 'EXECUTION_DISABLED', error: 'Sorğu icra edilə bilmədi.' });
+          }
+          if (tag === 'RATE_LIMITED') {
+            res.setHeader('Retry-After', String(Math.max(1, Number(outcome?.[1]) || 1)));
+            return res.status(429).json({ code: 'RATE_LIMITED', error: this._rateLimitErrorMessage(req) });
+          }
+          if (tag === 'BUSY') {
+            return res.status(429).json({ code: 'EXECUTION_BUSY', error: 'Hazırda başqa tapşırıq icra olunur. Bir az sonra yenidən cəhd edin.' });
+          }
+          this._lastEnabledOkAt = Date.now();
+          if (tag === 'EXISTS') {
+            preClaimedRequest = { key, fp, candidate, nxResult: { ok: true, value: null }, existingValue: outcome?.[1] ?? null };
+          } else if (tag === 'OK') {
+            preClaimedRequest = { key, fp, candidate, nxResult: { ok: true, value: 'OK' } };
+            preAdmittedSharedAsk = { sharedAskLease: createSharedAskLeaseHandle(this.redis, actor, token) };
+          } else {
+            return res.status(503).json({ code: 'EXECUTION_UNAVAILABLE', error: 'Sorğu icra edilə bilmədi.' });
+          }
+        } catch {
+          return res.status(503).json({ code: 'EXECUTION_UNAVAILABLE', error: 'Sorğu icra edilə bilmədi.' });
+        }
+      } else if (canOverlapEnableAndIdempotency) {
+        const key = `security:request:${createHash('sha256').update(`${req.ownerId}:${canonicalRequestRoute(reqPath)}:${preId}`).digest('hex')}`;
         const fp = requestFingerprint(req.body);
         const candidate = JSON.stringify({ state: 'reserved', fingerprint: fp, token });
         const [enabledError, nxResult] = await Promise.all([
@@ -369,7 +490,17 @@ export class AiPolicy {
           return res.status(error.status || 403).json({ code: error.code || 'BOT_VERIFICATION_FAILED', error: 'Sorğu başlana bilmədi.' });
         }
         if ((isAsk || isResearch) && !await this.admitLocalAsk(req, res, askKey)) return;
-        const route = canonicalRequestRoute(req.path);
+        if (guest) {
+          const spec = this._guestMinuteRateSpec(req);
+          const retryAfter = this._reserveLocalMinuteRate(spec.keys, spec.limits);
+          if (retryAfter > 0) {
+            res.setHeader('Retry-After', String(retryAfter));
+            return res.status(429).json({ code: 'RATE_LIMITED', error: this._rateLimitErrorMessage(req) });
+          }
+          req.remainingGuestMessages = null;
+          req.remainingGuestBriefs = null;
+        }
+        const route = canonicalRequestRoute(reqPath);
         const refineKey = /^\/api\/strategy\/(?:[0-9a-f-]{36}\/)?refine$/.test(route) && req.get?.('Idempotency-Key')?.trim();
         const shareKey = /^[A-Za-z0-9_-]{16,100}$/.test(refineKey || '') ? `${route}:${refineKey}` : null;
         let lease;
@@ -379,7 +510,7 @@ export class AiPolicy {
           return res.status(error.status).json({ code: error.code, error: 'Hazırda başqa tapşırıq icra olunur. Bir az sonra yenidən cəhd edin.' });
         }
         controller = new AbortController();
-        req.securityContext.route = req.path;
+        req.securityContext.route = reqPath;
         req.securityContext.controller = controller;
         req.securityContext.signal = controller.signal;
         req.securityContext.assertLease = lease.assertOwned;
@@ -397,6 +528,24 @@ export class AiPolicy {
           }, requestTimeout);
           memoryTimer.unref?.();
         }
+        let askBackgroundActive = false;
+        req.securityContext.enableAskBackgroundCompletion = (timeoutMs = null) => {
+          askBackgroundActive = true;
+          req.securityContext._askBackgroundActive = true;
+          if (timeoutMs && Number.isFinite(Number(timeoutMs))) {
+            clearTimeout(memoryTimer);
+            memoryTimer = setTimeout(() => {
+              controller.abort(fail('EXECUTION_TIMEOUT'));
+              endTimedOutRequest();
+            }, Number(timeoutMs));
+            memoryTimer.unref?.();
+          }
+          return async () => {
+            askBackgroundActive = false;
+            await releaseLease();
+            req.securityContext?._finishLocalAsk?.();
+          };
+        };
         req.securityContext.transferToBackground = () => {
           req.securityContext.isBackgroundJob = true;
           lease.allowSubscribers();
@@ -410,68 +559,18 @@ export class AiPolicy {
           };
         };
         const finishRequest = () => {
-          if (!req.securityContext.isBackgroundJob) void releaseLease();
+          if (!req.securityContext.isBackgroundJob && !askBackgroundActive) void releaseLease();
         };
         res.once('finish', finishRequest);
         res.once('close', finishRequest);
-        if (guest) {
-          try {
-            const isBuildRequest = /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path);
-            const isBuildGenerate = /^\/api\/strategy\/(?:generate|generate-stream)\/?$/i.test(req.path);
-            if (isBuildRequest) {
-              const dailyLimit = guestBuildDailyLimit(this.env);
-              if (isBuildGenerate) {
-                const used = this._trackInMemoryGuestUsage(req, dailyLimit, 'build');
-                req.guestBuildUsageCount = used;
-                req.guestBuildDailyLimit = dailyLimit;
-                req.remainingGuestBriefs = Math.max(0, dailyLimit - used);
-                req.guestBriefsAvailable = req.remainingGuestBriefs + 1;
-              } else {
-                const used = this._getInMemoryGuestUsage(req, 'build');
-                if (used >= dailyLimit) throw fail('GUEST_DAILY_LIMIT', 429);
-                const preflightLimit = guestBuildPreflightDailyLimit(this.env);
-                this._trackInMemoryGuestUsage(req, preflightLimit, 'build-preflight');
-                req.guestBuildUsageCount = used;
-                req.guestBuildDailyLimit = dailyLimit;
-                req.remainingGuestBriefs = Math.max(0, dailyLimit - used);
-                req.guestBriefsAvailable = req.remainingGuestBriefs;
-              }
-            } else {
-              const dailyLimit = guestDailyLimit(this.env);
-              const used = this._trackInMemoryGuestUsage(req, dailyLimit, 'ask');
-              req.guestUsageCount = used;
-              req.guestDailyLimit = dailyLimit;
-              req.remainingGuestMessages = Math.max(0, dailyLimit - used);
-              req.guestMessagesAvailable = req.remainingGuestMessages + 1;
-            }
-            let released = false;
-            const release = () => {
-              if (released) return;
-              released = true;
-              if (!req.securityContext?.providerStarted && !req.securityContext?.guestQuotaExhausted && req.guestMemoryQuotaKeys && this.inMemoryGuestUsage) for (const key of req.guestMemoryQuotaKeys) {
-                this.inMemoryGuestUsage.set(key, Math.max(0, (this.inMemoryGuestUsage.get(key) || 0) - 1));
-              }
-              if (!req.securityContext?.providerStarted && req.guestPreflightQuotaKeys && this.inMemoryGuestBuildPreflight) for (const key of req.guestPreflightQuotaKeys) {
-                this.inMemoryGuestBuildPreflight.set(key, Math.max(0, (this.inMemoryGuestBuildPreflight.get(key) || 0) - 1));
-              }
-            };
-            res.once('finish', release);
-            res.once('close', release);
-          } catch (error) {
-            clearTimeout(memoryTimer);
-            const isBuildRequest = /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path);
-            const exhaustedMsg = isBuildRequest ? GUEST_BUILD_EXHAUSTED_MESSAGE : GUEST_EXHAUSTED_MESSAGE;
-            return res.status(error.status || 429).json({ code: error.code || 'GUEST_DAILY_LIMIT', error: exhaustedMsg, reply: exhaustedMsg });
-          }
-        }
         if (req.aborted || res.destroyed || res.writableEnded) return finishRequest();
         return next();
       }
-      let quotaKeys = [], requestKey, requestRecord, previousRequest, lock, sharedAskLease, fingerprint;
+      let requestKey, requestRecord, previousRequest, lock, sharedAskLease, fingerprint;
       let replayResult;
-      const isUpRequest = /^\/api\/up\/challenges(?:\/|$)/i.test(req.path);
-      const isDurableStrategyRequest = /^\/api\/strategy\/(?:generate|[0-9a-f-]{36}\/refine)\/?$/i.test(req.path);
-      let finished = false, handlerEntered = false;
+      const isUpRequest = /^\/api\/up\/challenges(?:\/|$)/i.test(reqPath);
+      const isDurableStrategyRequest = /^\/api\/strategy\/(?:generate|[0-9a-f-]{36}\/refine)\/?$/i.test(reqPath);
+      let finished = false, handlerEntered = false, idempotentPersisted = false;
       if (req.securityContext) {
         req.securityContext.markMutationPending = () => {
           req.securityContext.mutationPending = true;
@@ -484,7 +583,7 @@ export class AiPolicy {
           req.securityContext.mutationCommitted = true;
           req.securityContext.mutationPending = false;
         };
-        if (/^\/api\/ask(?:\/research)?\/?$/i.test(req.path)) req.securityContext.persistIdempotentResult = async () => {
+        if (/^\/api\/ask(?:\/research)?\/?$/i.test(reqPath)) req.securityContext.persistIdempotentResult = async () => {
           controller.signal.throwIfAborted();
           if (!requestKey || !requestRecord || !replayResult) throw fail('EXECUTION_UNAVAILABLE');
           const completed = JSON.stringify({ state: 'completed', fingerprint, result: replayResult });
@@ -494,6 +593,7 @@ export class AiPolicy {
             });
             if (saved !== 1) throw fail('EXECUTION_UNAVAILABLE');
             requestRecord = completed;
+            idempotentPersisted = true;
           } catch { throw fail('EXECUTION_UNAVAILABLE'); }
         };
       }
@@ -501,11 +601,10 @@ export class AiPolicy {
         if (finished) return; finished = true;
         clearTimeout(timer);
         controller?.abort();
-        if (!req.securityContext?.providerStarted && !req.securityContext?.guestQuotaExhausted && quotaKeys.length) await this.redis.eval("for _,k in ipairs(KEYS) do local n = tonumber(redis.call('get', k) or '0'); if n > 0 then redis.call('decr',k) end end; return 1", { keys: quotaKeys }).catch(() => {});
         const canRetryAfterPreCommitFailure =
           handlerEntered &&
           !replayResult &&
-          (res.statusCode >= 500 || req.securityContext?.preCommitFailure || (isAsk && req.securityContext?.askTerminalFailure)) &&
+          (res.statusCode >= 500 || req.securityContext?.preCommitFailure || req.securityContext?.explicitCancel || (isAsk && (req.securityContext?.askTerminalFailure || res.destroyed || req.aborted))) &&
           !req.securityContext?.mutationPending &&
           !req.securityContext?.mutationCommitted &&
           !req.securityContext?.isBackgroundJob;
@@ -516,9 +615,20 @@ export class AiPolicy {
             : canRetryAfterPreCommitFailure
               ? 'retryable'
               : 'started';
-        if (requestKey && requestRecord) await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; redis.call('set',KEYS[1],ARGV[2],'EX',900); return 1", { keys: [requestKey], arguments: [requestRecord, JSON.stringify({ state: finalState, fingerprint, result: replayResult })] }).catch(() => {});
-        if (lock) await this.redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end; return 0", { keys: [lock], arguments: [token] }).catch(() => {});
-        if (sharedAskLease) await sharedAskLease.release().catch(() => {});
+        if (requestKey && requestRecord && !(idempotentPersisted && replayResult)) await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; redis.call('set',KEYS[1],ARGV[2],'EX',900); return 1", { keys: [requestKey], arguments: [requestRecord, JSON.stringify({ state: finalState, fingerprint, result: replayResult })] }).catch(() => {});
+        const releaseOps = [];
+        if (lock) releaseOps.push(this.redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end; return 0", { keys: [lock], arguments: [token] }).catch(() => {}));
+        if (sharedAskLease) releaseOps.push(sharedAskLease.release().catch(() => {}));
+        if (releaseOps.length) {
+          const ownerKey = req.ownerId;
+          const releasePromise = Promise.all(releaseOps).finally(() => {
+            if (ownerKey && this.releasingOwnerLocks.get(ownerKey) === releasePromise) {
+              this.releasingOwnerLocks.delete(ownerKey);
+            }
+          });
+          if (ownerKey) this.releasingOwnerLocks.set(ownerKey, releasePromise);
+          await releasePromise;
+        }
       };
       let timer;
       try {
@@ -537,14 +647,14 @@ export class AiPolicy {
           if (!id || !/^[A-Za-z0-9_-]{16,100}$/.test(id)) throw fail('IDEMPOTENCY_KEY_REQUIRED', 400);
           const bodyId = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey.trim() : '';
           if (bodyId && bodyId !== id) throw fail('IDEMPOTENCY_CONFLICT', 409);
-          requestKey = `security:request:${createHash('sha256').update(`${req.ownerId}:${canonicalRequestRoute(req.path)}:${id}`).digest('hex')}`;
+          requestKey = `security:request:${createHash('sha256').update(`${req.ownerId}:${canonicalRequestRoute(reqPath)}:${id}`).digest('hex')}`;
           fingerprint = requestFingerprint(req.body);
           candidate = JSON.stringify({ state: 'reserved', fingerprint, token });
           nxClaimed = await this.redis.set(requestKey, candidate, { NX: true, EX: 900 });
         }
         if (nxClaimed) requestRecord = candidate;
         else {
-          previousRequest = await this.redis.get(requestKey);
+          previousRequest = preClaimedRequest?.existingValue ?? await this.redis.get(requestKey);
           const existing = JSON.parse(previousRequest || 'null');
           if (!existing || existing.fingerprint !== fingerprint) { requestKey = null; throw fail('IDEMPOTENCY_CONFLICT', 409); }
           if (existing.state === 'completed' && existing.result) { requestKey = null; return this.sendReplay(req, res, existing.result); }
@@ -561,75 +671,58 @@ export class AiPolicy {
           if (res.statusCode >= 200 && res.statusCode < 300 && !replayResult) replayResult = { status: res.statusCode, body };
           return json(body);
         };
-        const actor = req.ownerId, ip = this.ipKey(req), day = new Date().toISOString().slice(0, 10);
-        if (sharedAsk) {
-          const [rateResult, leaseResult] = await Promise.allSettled([
-            reserveAskRate(this.redis, actor, ip, token),
-            acquireSharedAskLease(this.redis, actor, token),
-          ]);
-          if (leaseResult.status === 'fulfilled') sharedAskLease = leaseResult.value;
-          if (rateResult.status === 'rejected') throw rateResult.reason;
-          if (rateResult.value > 0) {
-            res.setHeader('Retry-After', String(rateResult.value));
-            throw fail('RATE_LIMITED', 429);
-          }
-          if (leaseResult.status === 'rejected') throw leaseResult.reason;
-          if (!sharedAskLease) throw fail('EXECUTION_BUSY', 429);
+        const actor = req.ownerId, ip = this.ipKey(req);
+        if (preAdmittedSharedAsk) {
+          sharedAskLease = preAdmittedSharedAsk.sharedAskLease;
         } else {
-          const keys = [`security:rate:${actor}`, `security:rate-ip:${ip}`];
-          const allowed = await this.redis.eval("for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); if n == 1 then redis.call('expire',k,600) end end; return 1", { keys, arguments: ['60'] });
-          if (!allowed) throw fail('RATE_LIMITED', 429);
-        }
-        if (guest) {
-          const isBuildRequest = /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path);
-          const isBuildGenerate = /^\/api\/strategy\/(?:generate|generate-stream)\/?$/i.test(req.path);
-          if (isBuildRequest) {
-            const dailyLimit = guestBuildDailyLimit(this.env);
-            quotaKeys = [`security:guest-build-day:${day}:${actor}`, `security:guest-build-ip-day:${day}:${ip}`];
-            if (isBuildGenerate) {
-              const admitted = await this.redis.eval(
-                "for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; local res = 0; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); redis.call('expire',k,172800); if n > res then res = n end end; return res",
-                { keys: quotaKeys, arguments: [String(dailyLimit)] }
-              );
-              if (!admitted) { quotaKeys = []; throw fail('GUEST_DAILY_LIMIT', 429); }
-              req.guestBuildUsageCount = admitted;
-              req.guestBuildDailyLimit = dailyLimit;
-              req.remainingGuestBriefs = Math.max(0, dailyLimit - admitted);
-              req.guestBriefsAvailable = req.remainingGuestBriefs + 1;
-            } else {
-              const vals = await this.redis.mGet(quotaKeys);
-              const used = Math.max(0, ...vals.map(v => Number(v || 0)));
-              if (used >= dailyLimit) { quotaKeys = []; throw fail('GUEST_DAILY_LIMIT', 429); }
-              const preflightLimit = guestBuildPreflightDailyLimit(this.env);
-              const preflightKeys = [`security:guest-build-preflight-day:${day}:${actor}`, `security:guest-build-preflight-ip-day:${day}:${ip}`];
-              const preflightAdmitted = await this.redis.eval(
-                "for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; local res = 0; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); redis.call('expire',k,172800); if n > res then res = n end end; return res",
-                { keys: preflightKeys, arguments: [String(preflightLimit)] }
-              );
-              if (!preflightAdmitted) { quotaKeys = []; throw fail('GUEST_DAILY_LIMIT', 429); }
-              quotaKeys = preflightKeys;
-              req.guestBuildUsageCount = used;
-              req.guestBuildDailyLimit = dailyLimit;
-              req.remainingGuestBriefs = Math.max(0, dailyLimit - used);
-              req.guestBriefsAvailable = req.remainingGuestBriefs;
-            }
-          } else {
-            const dailyLimit = guestDailyLimit(this.env);
-            quotaKeys = [`security:guest-day:${day}:${actor}`, `security:guest-ip-day:${day}:${ip}`];
-            const admitted = await this.redis.eval(
-              "for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; local res = 0; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); redis.call('expire',k,172800); if n > res then res = n end end; return res",
-              { keys: quotaKeys, arguments: [String(dailyLimit)] }
-            );
-            if (!admitted) { quotaKeys = []; throw fail('GUEST_DAILY_LIMIT', 429); }
-            req.guestUsageCount = admitted;
-            req.guestDailyLimit = dailyLimit;
-            req.remainingGuestMessages = Math.max(0, dailyLimit - admitted);
-            req.guestMessagesAvailable = req.remainingGuestMessages + 1;
+          const pendingOwnerRelease = this.releasingOwnerLocks.get(actor);
+          if (pendingOwnerRelease && !req.aborted && !res.destroyed) {
+            await Promise.race([pendingOwnerRelease, new Promise((resolve) => setTimeout(resolve, 300))]);
           }
-        }
-        if (!sharedAsk) {
-          lock = `security:owner-execution:${actor}`;
-          if (!await this.redis.set(lock, token, { NX: true, PX: 180000 })) { lock = null; throw fail('EXECUTION_BUSY', 429); }
+          if (sharedAsk) {
+            const [rateResult, leaseResult] = await Promise.allSettled([
+              reserveAskRate(this.redis, actor, ip, token),
+              acquireSharedAskLease(this.redis, actor, token),
+            ]);
+            if (leaseResult.status === 'fulfilled') sharedAskLease = leaseResult.value;
+            if (rateResult.status === 'rejected') throw rateResult.reason;
+            if (rateResult.value > 0) {
+              res.setHeader('Retry-After', String(rateResult.value));
+              throw fail('RATE_LIMITED', 429);
+            }
+            if (leaseResult.status === 'rejected') throw leaseResult.reason;
+            if (!sharedAskLease && !req.aborted && !res.destroyed) {
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              if (!req.aborted && !res.destroyed) {
+                sharedAskLease = await acquireSharedAskLease(this.redis, actor, token);
+              }
+            }
+            if (!sharedAskLease) throw fail('EXECUTION_BUSY', 429);
+          } else if (guest) {
+            const spec = this._guestMinuteRateSpec(req);
+            const retryAfter = await reserveMinuteRate(this.redis, spec.keys, spec.limits, token);
+            if (retryAfter > 0) {
+              res.setHeader('Retry-After', String(retryAfter));
+              throw fail('RATE_LIMITED', 429);
+            }
+            req.remainingGuestMessages = null;
+            req.remainingGuestBriefs = null;
+          } else {
+            const keys = [`security:rate:${actor}`, `security:rate-ip:${ip}`];
+            const allowed = await this.redis.eval("for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); if n == 1 then redis.call('expire',k,600) end end; return 1", { keys, arguments: ['60'] });
+            if (!allowed) throw fail('RATE_LIMITED', 429);
+          }
+          if (!sharedAsk) {
+            lock = `security:owner-execution:${actor}`;
+            let locked = await this.redis.set(lock, token, { NX: true, PX: 180000 });
+            if (!locked && !req.aborted && !res.destroyed) {
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              if (!req.aborted && !res.destroyed) {
+                locked = await this.redis.set(lock, token, { NX: true, PX: 180000 });
+              }
+            }
+            if (!locked) { lock = null; throw fail('EXECUTION_BUSY', 429); }
+          }
         }
         if (previousRequest) {
           const candidate = JSON.stringify({ state: 'reserved', fingerprint, token });
@@ -674,7 +767,7 @@ export class AiPolicy {
           const owned = await inFlightLeaseCheck;
           if (!owned) throw fail('EXECUTION_LOCK_LOST');
         };
-        req.securityContext.route = req.path;
+        req.securityContext.route = reqPath;
         req.securityContext.controller = controller; req.securityContext.signal = controller.signal;
         const renewal = setInterval(async () => {
           try {
@@ -683,7 +776,24 @@ export class AiPolicy {
           } catch { controller.abort(fail('EXECUTION_UNAVAILABLE')); }
         }, 30000); renewal.unref();
         const requestTimeout = aiRequestTimeoutMs(req);
-        if (requestTimeout !== null) timer = setTimeout(() => { clearInterval(renewal); controller.abort(fail('EXECUTION_TIMEOUT')); endTimedOutRequest(); }, requestTimeout);
+        if (requestTimeout !== null) {
+          timer = setTimeout(() => { clearInterval(renewal); controller.abort(fail('EXECUTION_TIMEOUT')); endTimedOutRequest(); }, requestTimeout);
+          timer.unref?.();
+        }
+        let askBackgroundActive = false;
+        req.securityContext.enableAskBackgroundCompletion = (timeoutMs = null) => {
+          askBackgroundActive = true;
+          if (timeoutMs && Number.isFinite(Number(timeoutMs))) {
+            clearTimeout(timer);
+            timer = setTimeout(() => { clearInterval(renewal); controller.abort(fail('EXECUTION_TIMEOUT')); endTimedOutRequest(); }, Number(timeoutMs));
+            timer.unref?.();
+          }
+          return async () => {
+            askBackgroundActive = false;
+            clearInterval(renewal);
+            await finish();
+          };
+        };
         req.securityContext.transferToBackground = () => {
           req.securityContext.isBackgroundJob = true;
           clearTimeout(timer);
@@ -692,7 +802,7 @@ export class AiPolicy {
           return { signal: controller.signal, assertOwned: req.securityContext.assertLease, release: async () => { clearInterval(renewal); await finish(); } };
         };
         const finishRequest = () => {
-          if (!req.securityContext.isBackgroundJob) { clearInterval(renewal); void finish(); }
+          if (!req.securityContext.isBackgroundJob && !askBackgroundActive) { clearInterval(renewal); void finish(); }
         };
         res.once('finish', finishRequest);
         res.once('close', finishRequest);
@@ -701,12 +811,10 @@ export class AiPolicy {
         next();
       } catch (error) {
         await finish();
-        if (sharedAsk && error.code === 'RATE_LIMITED') {
-          return res.status(429).json({ code: 'RATE_LIMITED', error: 'Ask üçün dəqiqəlik sorğu limiti dolub. Bir qədər sonra yenidən cəhd edin.' });
+        if (error.code === 'RATE_LIMITED') {
+          return res.status(429).json({ code: 'RATE_LIMITED', error: this._rateLimitErrorMessage(req) });
         }
-        const isBuild = /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(req.path);
-        const exhaustedMsg = isBuild ? GUEST_BUILD_EXHAUSTED_MESSAGE : GUEST_EXHAUSTED_MESSAGE;
-        res.status(error.status || 503).json({ code: error.code || 'EXECUTION_UNAVAILABLE', error: error.code === 'GUEST_DAILY_LIMIT' ? exhaustedMsg : 'Sorğu başlana bilmədi.', ...(error.code === 'GUEST_DAILY_LIMIT' ? { reply: exhaustedMsg } : {}) });
+        res.status(error.status || 503).json({ code: error.code || 'EXECUTION_UNAVAILABLE', error: 'Sorğu başlana bilmədi.' });
       }
     };
   }
@@ -847,37 +955,58 @@ export class AiPolicy {
     };
     return release;
   }
-  _trackInMemoryGuestUsage(req, limit, modeOrBuild = false) {
-    const scope = typeof modeOrBuild === 'string' ? modeOrBuild : (modeOrBuild ? 'build' : 'ask');
-    const isPreflight = scope === 'build-preflight';
-    const store = isPreflight
-      ? (this.inMemoryGuestBuildPreflight || (this.inMemoryGuestBuildPreflight = new Map()))
-      : (this.inMemoryGuestUsage || (this.inMemoryGuestUsage = new Map()));
+  _guestMinuteRateSpec(req) {
     const actor = req.ownerId || 'guest_unknown';
-    const day = new Date().toISOString().slice(0, 10);
-    const prefix = scope === 'ask' ? day : `${day}:${scope}`;
-    const keys = [`${prefix}:owner:${actor}`, `${prefix}:ip:${this.ipKey(req)}`];
-    const prev = Math.max(...keys.map(key => store.get(key) || 0));
-    if (prev >= limit) throw fail('GUEST_DAILY_LIMIT', 429);
-    for (const key of keys) store.set(key, (store.get(key) || 0) + 1);
-    if (isPreflight) req.guestPreflightQuotaKeys = keys;
-    else req.guestMemoryQuotaKeys = keys;
-    const next = prev + 1;
-    if (store.size > 10000) {
-      for (const [k] of store) {
-        if (!k.startsWith(day)) store.delete(k);
+    const ip = this.ipKey(req);
+    const reqPath = normalizeRequestPath(req.path);
+    const isBuild = /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(reqPath);
+    if (isBuild) {
+      return {
+        isBuild: true,
+        keys: [`security:guest-build-minute:${actor}`, `security:guest-build-minute-ip:${ip}`],
+        limits: [guestBuildPerMinuteLimit(this.env), guestBuildIpPerMinuteLimit(this.env)],
+      };
+    }
+    return {
+      isBuild: false,
+      keys: [`security:guest-ask-minute:${actor}`, `security:guest-ask-minute-ip:${ip}`],
+      limits: [guestAskPerMinuteLimit(this.env), guestAskIpPerMinuteLimit(this.env)],
+    };
+  }
+  _rateLimitErrorMessage(req) {
+    const reqPath = normalizeRequestPath(req.path);
+    if (/^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(reqPath)) {
+      return 'Build üçün dəqiqəlik sorğu limiti dolub. Bir qədər sonra yenidən cəhd edin.';
+    }
+    if (/^\/api\/ask\/?$/i.test(reqPath)) {
+      return 'Ask üçün dəqiqəlik sorğu limiti dolub. Bir qədər sonra yenidən cəhd edin.';
+    }
+    return 'Sorğu limiti dolub. Bir qədər sonra yenidən cəhd edin.';
+  }
+  _reserveLocalMinuteRate(keys, limits, windowMs = ASK_RATE_WINDOW_MS) {
+    if (!this.inMemoryMinuteRates) this.inMemoryMinuteRates = new Map();
+    const now = Date.now();
+    const cutoff = now - windowMs;
+    let retryMs = 0;
+    const activeBuckets = keys.map((key, index) => {
+      const recent = (this.inMemoryMinuteRates.get(key) || []).filter(ts => ts > cutoff);
+      if (recent.length > 0) this.inMemoryMinuteRates.set(key, recent);
+      else this.inMemoryMinuteRates.delete(key);
+      if (recent.length >= limits[index]) {
+        retryMs = Math.max(retryMs, recent[0] + windowMs - now);
+      }
+      return recent;
+    });
+    if (retryMs > 0) return Math.ceil(retryMs / 1000);
+    keys.forEach((key, index) => {
+      this.inMemoryMinuteRates.set(key, [...activeBuckets[index], now]);
+    });
+    if (this.inMemoryMinuteRates.size > 10000) {
+      for (const [k, list] of this.inMemoryMinuteRates) {
+        if (!list.length || list.at(-1) <= cutoff) this.inMemoryMinuteRates.delete(k);
       }
     }
-    return next;
-  }
-  _getInMemoryGuestUsage(req, modeOrBuild = false) {
-    if (!this.inMemoryGuestUsage) return 0;
-    const actor = req.ownerId || 'guest_unknown';
-    const day = new Date().toISOString().slice(0, 10);
-    const scope = typeof modeOrBuild === 'string' ? modeOrBuild : (modeOrBuild ? 'build' : 'ask');
-    const prefix = scope === 'ask' ? day : `${day}:${scope}`;
-    const keys = [`${prefix}:owner:${actor}`, `${prefix}:ip:${this.ipKey(req)}`];
-    return Math.max(...keys.map(key => this.inMemoryGuestUsage.get(key) || 0));
+    return 0;
   }
   guestQuotaHandler() {
     return async (req, res) => {
@@ -892,8 +1021,6 @@ export class AiPolicy {
   }
   async getGuestQuota(req) {
     const isGuest = !req.user;
-    const limit = guestDailyLimit(this.env);
-    const buildLimit = guestBuildDailyLimit(this.env);
     if (!isGuest) {
       return {
         isGuest: false,
@@ -903,42 +1030,21 @@ export class AiPolicy {
         buildLimit: null,
         buildUsed: 0,
         buildRemaining: null,
+        askPerMinuteLimit: null,
+        buildPerMinuteLimit: null,
       };
     }
     this.ready();
-    const actor = req.ownerId || 'guest_unknown';
-    const day = new Date().toISOString().slice(0, 10);
-    let used = 0;
-    let buildUsed = 0;
-    if (this.redis?.isReady) {
-      const ip = this.ipKey(req);
-      const keys = [
-        `security:guest-day:${day}:${actor}`,
-        `security:guest-ip-day:${day}:${ip}`,
-        `security:guest-build-day:${day}:${actor}`,
-        `security:guest-build-ip-day:${day}:${ip}`,
-      ];
-      try {
-        const vals = await this.redis.mGet(keys);
-        if ((vals.length !== 2 && vals.length !== 4) || vals.some(value => value !== null && (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value))))) throw fail('EXECUTION_UNAVAILABLE');
-        used = Math.max(0, ...vals.slice(0, 2).map(value => Number(value || 0)));
-        if (vals.length === 4) {
-          buildUsed = Math.max(0, ...vals.slice(2, 4).map(value => Number(value || 0)));
-        }
-      } catch { throw fail('EXECUTION_UNAVAILABLE'); }
-    } else if (this.inMemoryGuestUsage) {
-      used = Math.max(this.inMemoryGuestUsage.get(`${day}:owner:${actor}`) || 0, this.inMemoryGuestUsage.get(`${day}:ip:${this.ipKey(req)}`) || 0);
-      buildUsed = Math.max(this.inMemoryGuestUsage.get(`${day}:build:owner:${actor}`) || 0, this.inMemoryGuestUsage.get(`${day}:build:ip:${this.ipKey(req)}`) || 0);
-    }
     return {
       isGuest: true,
-      limit,
-      used,
-      remaining: Math.max(0, limit - used),
-      buildLimit,
-      buildUsed,
-      buildRemaining: Math.max(0, buildLimit - buildUsed),
-      resetsAt: new Date(`${day}T00:00:00.000Z`).getTime() + 86400000,
+      limit: null,
+      used: 0,
+      remaining: null,
+      buildLimit: null,
+      buildUsed: 0,
+      buildRemaining: null,
+      askPerMinuteLimit: guestAskPerMinuteLimit(this.env),
+      buildPerMinuteLimit: guestBuildPerMinuteLimit(this.env),
     };
   }
 }

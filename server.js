@@ -1,9 +1,10 @@
 import "dotenv/config";
 import { publicAskErrorCode } from './src/http/ask-errors.js';
 import { sanitizeAskGroundingMetadata } from './src/services/ai/ask-grounding.js';
-import { createAskHandler } from './src/http/ask-handler.js';
+import { createAskHandler, createAskCancelHandler } from './src/http/ask-handler.js';
 import { createAskService } from './src/services/ai/ask-service.js';
-import { createHelmerDecisionRouter } from './src/services/ai/decision-router.js';
+import { createAskRunManager } from './src/services/ai/ask-run-manager.js';
+import { DECISION_MODEL, createHelmerDecisionRouter } from './src/services/ai/decision-router.js';
 import { readTenantObject } from "./src/http/r2-storage.js";
 import { z } from "zod";
 import { EmptyBodySchema } from "./src/domain/strategy.js";
@@ -43,7 +44,13 @@ import { FileTelemetryRepository } from "./src/repositories/file-telemetry-repos
 import { TelemetryService } from "./src/services/telemetry/telemetry-service.js";
 import { createTelemetryAdminRouter, createTelemetryClientRouter } from "./src/http/telemetry-router.js";
 import { createAdminMfaRouter } from "./src/auth/admin-mfa.js";
-import { validateSecurityConfig, ensureStartupRedisConnection, guestDailyLimit, guestBuildDailyLimit } from "./src/services/security/config.js";
+import {
+  validateSecurityConfig,
+  ensureStartupRedisConnection,
+  guestAskPerMinuteLimit,
+  guestAskIpPerMinuteLimit,
+  guestBuildPerMinuteLimit,
+} from "./src/services/security/config.js";
 import { AiPolicy, ASK_REQUESTS_PER_MINUTE, createReplayResourceCheck } from "./src/services/security/ai-policy.js";
 import { configureProviderPolicy } from "./src/services/security/provider-policy.js";
 import { CleanupQueue } from "./src/services/security/cleanup-queue.js";
@@ -83,6 +90,7 @@ redis?.on("error", (err) => console.error("❌ Redis error:", { name: err?.name,
 await ensureStartupRedisConnection(redis, process.env);
 
 const app = express();
+app.disable("x-powered-by");
 app.set("trust proxy", 1);
 // Operational timings contain no account identifiers, prompts or outputs.
 app.use((req, res, next) => {
@@ -151,8 +159,9 @@ app.use((req, res, next) => {
 app.use(maintenanceMiddleware);
 app.use(cors((req, callback) => {
   const origin = req.get("Origin");
+  const exposedHeaders = ["X-Helmer-Ask-Run-Id", "X-Helmer-Ask-Chat-Id"];
   if (!origin || isTrustedRequestOrigin(req, origin)) {
-    return callback(null, { credentials: true, origin: origin || false });
+    return callback(null, { credentials: true, origin: origin || false, exposedHeaders });
   }
   return callback(null, { credentials: false, origin: false });
 }));
@@ -195,12 +204,20 @@ app.get("/manifest.json", (req, res) => {
 app.get("/api/health", (req, res) => {
   const redisRequired = Boolean(process.env.REDIS_URL || process.env.REQUIRE_REDIS === "true");
   if (process.env.NODE_ENV === "production" && redisRequired && !redis?.isReady) res.status(503);
+  const decisionDiag = sharedDecisionRouter.getSyncStatus();
   return res.json({
     status: process.env.NODE_ENV !== "production" || !redisRequired || redis?.isReady ? "ok" : "unavailable",
     app: "Helmer",
     storage: {
       r2Configured: isR2Configured(),
       redisReady: Boolean(redis?.isReady),
+    },
+    decisionRouter: {
+      model: decisionDiag.model,
+      fallbackModel: decisionDiag.fallbackModel,
+      configured: decisionDiag.configured,
+      active: decisionDiag.active,
+      mode: decisionDiag.mode,
     },
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
@@ -256,6 +273,8 @@ const AI_LEARNING_PATH = path.join(DATA_DIR, "ai-learning-v1.json");
 const TELEMETRY_PATH = path.join(DATA_DIR, "telemetry.json");
 const strategyRepository = new FileStrategyRepository(STRATEGIES_PATH, redis);
 const chatRepository = new FileChatRepository(CHATS_PATH, redis);
+const askRunManager = createAskRunManager({ redis });
+const sharedDecisionRouter = createHelmerDecisionRouter({ redis });
 const durableStore = new DurableStore(path.join(DATA_DIR, 'security-v4'));
 const researchJobStore = new ResearchJobStore(path.join(DATA_DIR, 'research-jobs-v1'));
 const artifactRepository = new ArtifactRepository(path.join(DATA_DIR, "artifacts"), redis);
@@ -285,7 +304,6 @@ const staticAdminIds = new Set(
 const resolvedAdminUserIds = new Set();
 const adminUsernames = new Set([
   ...staticAdminIds,
-  ...String(process.env.ADMIN_USERNAMES || '').split(',').map(value => value.trim()).filter(Boolean),
 ]);
 
 async function refreshAdminIdentities() {
@@ -374,6 +392,14 @@ configureProviderPolicy(aiPolicy);
 app.use(guestSession);
 app.use(createIdentityMiddleware({ authStore, userRepository }));
 app.use(privacyPolicy.middleware());
+app.use((req, res, next) => {
+  const rawPath = String(req.path || "");
+  const normalizedPath = rawPath.replace(/\/{2,}/g, "/");
+  if (/^\/api(?:\/|$)/i.test(normalizedPath) && rawPath.includes("//")) {
+    return res.status(400).json({ code: "VALIDATION_ERROR", error: "Sorğu yolu düzgün deyil." });
+  }
+  return next();
+});
 app.use(['/api/ask', '/api/strategy'], (_req, res, next) => {
   res.setHeader('Cache-Control', 'private, no-store');
   next();
@@ -410,7 +436,7 @@ async function askPreParseLoadGuard(req, res, next) {
       });
     }
     const actor = req.user?.id ? `user:${req.user.id}` : `ip:${getClientIp(req)}`;
-    const preLimit = 60;
+    const preLimit = req.user?.id ? 60 : Math.max(guestAskIpPerMinuteLimit(), 25);
     const now = Date.now();
     if (redis?.isReady && typeof redis.eval === 'function') {
       try {
@@ -479,10 +505,16 @@ app.use((req, res, next) => {
 });
 app.use(aiPolicy.middleware());
 app.get('/api/security/config', (req, res) => {
-  const guestLimit = guestDailyLimit();
-  const guestBuildLimit = guestBuildDailyLimit();
   res.set('Cache-Control', 'no-store');
-  res.json({ guest: !req.user, turnstileSiteKey: process.env.TURNSTILE_SITE_KEY || null, guestAiDailyLimit: guestLimit, guestBuildDailyLimit: guestBuildLimit, guestRetentionDays: 7 });
+  res.json({
+    guest: !req.user,
+    turnstileSiteKey: process.env.TURNSTILE_SITE_KEY || process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || null,
+    guestAiDailyLimit: null,
+    guestBuildDailyLimit: null,
+    guestAskPerMinuteLimit: guestAskPerMinuteLimit(),
+    guestBuildPerMinuteLimit: guestBuildPerMinuteLimit(),
+    guestRetentionDays: 7,
+  });
 });
 app.get('/api/auth/guest-status', aiPolicy.guestQuotaHandler());
 app.use("/api/auth", createAuthRouter({
@@ -511,7 +543,7 @@ app.use("/api/auth/admin-mfa", createAdminMfaRouter({
   },
 }));
 app.use("/api/strategy", createStrategyRouter(strategyRepository, learningLoop, {
-  telemetryService, redis, decisionRouter: createHelmerDecisionRouter({ redis }),
+  telemetryService, redis, decisionRouter: sharedDecisionRouter,
   hasActiveJobForOwner: ownerId => researchService.hasActiveJobForOwner(ownerId),
 }));
 app.use("/api/up", createUpRouter(upService));
@@ -524,12 +556,14 @@ app.get("/admin/api/storage-status", requireAuth, requireAdmin, async (req, res)
   const r2Test = await testR2Connection();
   const userStore = await userRepository.readStore();
   const authData = typeof authStore.read === "function" ? await authStore.read() : null;
+  const decisionDiag = await sharedDecisionRouter.getDiagnostics().catch(() => sharedDecisionRouter.getSyncStatus());
   return res.json({
     r2: r2Test,
     redis: {
       configured: Boolean(process.env.REDIS_URL),
       isReady: Boolean(redis?.isReady),
     },
+    decisionRouter: decisionDiag,
     counts: {
       users: userStore?.users?.length || 0,
       activeSessions: Object.keys(authData?.sessions || {}).length,
@@ -543,10 +577,11 @@ async function isLegalReportRateLimited(key) {
   if (redis?.isReady) {
     try {
       const redisKey = `helmer:rate:legal-report:${key}`;
-      const count = await redis.incr(redisKey);
-      if (count === 1) {
-        await redis.expire(redisKey, 600);
-      }
+      const [, rawCount] = await redis.multi()
+        .set(redisKey, "0", { NX: true, EX: 600 })
+        .incr(redisKey)
+        .exec();
+      const count = Number(rawCount);
       return count > 5;
     } catch {
       // Fallback to in-memory rate limiting on Redis error
@@ -592,7 +627,7 @@ async function mutateLegalReports(operation) {
 }
 async function loadLegalReportsFromStore() { return mutateLegalReports(reports => reports); }
 
-const LegalReportSchema = z.object({ issueType: z.string().trim().min(1).max(150), description: z.string().trim().min(5).max(5000), userEmail: z.union([z.string().email().max(254), z.literal('')]).optional(), messageContent: z.string().max(15000).optional(), model: z.string().max(100).optional() }).strict();
+const LegalReportSchema = z.object({ issueType: z.string().trim().min(1).max(150), description: z.string().trim().min(5).max(5000), userEmail: z.union([z.string().email().max(254).refine((v) => !/[?&\u0000-\u001f\u007f]/.test(v)), z.literal('')]).optional(), messageContent: z.string().max(15000).optional(), model: z.string().max(100).optional() }).strict();
 app.post("/api/legal-report", async (req, res) => {
   try {
     const ip = req.ip || req.socket?.remoteAddress || "127.0.0.1";
@@ -629,7 +664,7 @@ app.post("/api/legal-report", async (req, res) => {
     let cleanEmail = "";
     if (userEmail && typeof userEmail === "string" && userEmail.trim()) {
       cleanEmail = userEmail.trim();
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const emailRegex = /^[^\s@?&]+@[^\s@?&]+\.[^\s@?&]+$/;
       if (!emailRegex.test(cleanEmail) || cleanEmail.length > 254) {
         return res.status(400).json({
           error: "Düzgün bir e-poçt ünvanı daxil edin və ya boş buraxın.",
@@ -722,7 +757,8 @@ app.get("/api/usage/stats", async (req, res, next) => {
       plannerRepository.list(req.ownerId).catch(() => []),
     ]);
 
-    const tzOffsetMinutes = Number.isFinite(parseInt(req.query.tzOffset, 10)) ? parseInt(req.query.tzOffset, 10) : 0;
+    const rawTzOffset = Number.parseInt(req.query.tzOffset, 10);
+    const tzOffsetMinutes = Number.isFinite(rawTzOffset) ? Math.max(-840, Math.min(840, rawTzOffset)) : 0;
     const now = Date.now();
     const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -878,9 +914,12 @@ app.get("/api/ask/chats/:id", async (req, res) => {
     if (!/^[0-9a-f-]{36}$/i.test(id)) {
       return res.status(400).json({ error: "Söhbət ID-si düzgün deyil.", code: "VALIDATION_ERROR" });
     }
-    const chat = await chatRepository.getById(id, req.ownerId);
-    if (!chat) return res.status(404).json({ error: "Söhbət tapılmadı." });
-    return res.json({ chat });
+    const [chat, activeRun] = await Promise.all([
+      chatRepository.getById(id, req.ownerId),
+      askRunManager.getActiveRunForChat(req.ownerId, id),
+    ]);
+    if (!chat && !activeRun) return res.status(404).json({ error: "Söhbət tapılmadı." });
+    return res.json({ chat: chat || null, activeRun: activeRun || null });
   } catch (error) {
     console.error("Ask chat get error:", { code: publicAskErrorCode(error) });
     return res.status(500).json({ error: "Söhbəti yükləmək mümkün olmadı." });
@@ -988,11 +1027,16 @@ function askRateLimit(limit = 60, windowMs = 10 * 60 * 1000, scope = "ask") {
 }
 
 const localForegroundAskRateLimit = askRateLimit(ASK_REQUESTS_PER_MINUTE, 60000, "ask-minute");
+const localGuestAskRateLimit = askRateLimit(guestAskPerMinuteLimit(), 60000, "guest-ask-minute");
 const standardAskRateLimit = askRateLimit(60);
 function foregroundAskRateLimit(req, res, next) {
   if (allowParallelAskChats && req.user && req.body?.mode !== "research") {
     if (redis?.isReady) return next();
     return localForegroundAskRateLimit(req, res, next);
+  }
+  if (!req.user) {
+    if (redis?.isReady) return next();
+    return localGuestAskRateLimit(req, res, next);
   }
   return standardAskRateLimit(req, res, next);
 }
@@ -1026,18 +1070,31 @@ app.use("/api/ask/research", requireAuth, createResearchRouter({
   rateLimit: askRateLimit(20),
   readRateLimit: askRateLimit(120, 60000, "research-read"),
 }));
+app.get("/api/ask/runs/active", askRateLimit(120, 60000, "ask-runs-read"), async (req, res) => {
+  try {
+    const runs = await askRunManager.listActiveRuns(req.ownerId);
+    return res.json({ runs });
+  } catch (error) {
+    console.error("Ask active runs error:", { code: publicAskErrorCode(error) });
+    return res.status(500).json({ error: "Aktiv sorğuları yoxlamaq mümkün olmadı." });
+  }
+});
+
+app.post("/api/ask/cancel", askRateLimit(60, 60000, "ask-cancel"), createAskCancelHandler({ askRunManager }));
+
 app.use("/api/ask", createAskExecutionGuard({ redis, allowGuest: true, allowParallelChats: allowParallelAskChats, hasActiveJobForOwner: ownerId => researchService.hasActiveJobForOwner(ownerId) }), createCapabilityRouter({ allowGuestChat: true, registry: pluginRegistry, workflow: capabilityWorkflow, artifacts: artifactRepository, chats: chatRepository, strategies: strategyRepository, planner: plannerRepository, rateLimit: foregroundAskRateLimit, cleanupQueue,
   hydrateFile: (file, ownerId) => geminiFileCache.resolveFileAsync(file, ownerId),
   onComplete: ({ req, result }) => telemetryService.trackAskQuery({ ownerId: req.ownerId, sessionId: req.guestOwnerId, model: result.model, latencyMs: Date.parse(result.execution.completedAt) - Date.parse(result.execution.startedAt), usage: result.usage, groundingActive: Boolean(result.groundingMetadata), status: "success", querySnippet: "", onlyNecessaryData: true, modelImprovement: false }).catch(() => {}),
 }));
-app.use("/api/artifacts", createArtifactRouter({ artifacts: artifactRepository, chats: chatRepository }));
+app.use("/api/artifacts", askRateLimit(60, 60000, "artifact-read"), createArtifactRouter({ artifacts: artifactRepository, chats: chatRepository }));
 
 app.post("/api/ask", foregroundAskRateLimit, createAskHandler({
   chatRepository, strategyRepository, plannerRepository, researchService, learningLoop, telemetryService,
   sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
   generateAsk,
-  decisionRouter: createHelmerDecisionRouter({ redis }),
+  decisionRouter: sharedDecisionRouter,
   cleanupQueue,
+  askRunManager,
 }));
 
 // 🧠 ADMIN PANEL – YALNIZ SƏNİN ÜÇÜN
@@ -1056,7 +1113,7 @@ app.get("/admin/api/legal-reports", requireAuth, requireAdmin, async (req, res) 
       stats: { total, pending, inReview, resolved },
     });
   } catch (err) {
-    console.error("Admin legal-reports xətası:", err.message);
+    console.error("Admin legal-reports xətası:", { name: err?.name, code: err?.code });
     res.status(500).json({ error: "Hüquqi müraciətlər alınmadı" });
   }
 });
@@ -1082,7 +1139,7 @@ app.post("/admin/api/legal-reports/status", requireAuth, requireAdmin, async (re
     if (!target) return res.status(404).json({ code: 'NOT_FOUND' });
     res.json({ success: true, report: target });
   } catch (err) {
-    console.error("Admin legal report status xətası:", err.message);
+    console.error("Admin legal report status xətası:", { name: err?.name, code: err?.code });
     res.status(500).json({ error: "Status yenilənmədi" });
   }
 });
@@ -1104,7 +1161,7 @@ app.post("/admin/api/legal-reports/delete", requireAuth, requireAdmin, async (re
     if (!removed) return res.status(404).json({ code: 'NOT_FOUND' });
     res.json({ success: true });
   } catch (err) {
-    console.error("Admin delete legal report xətası:", err.message);
+    console.error("Admin delete legal report xətası:", { name: err?.name, code: err?.code });
     res.status(500).json({ error: "Müraciət silinmədi" });
   }
 });
@@ -1121,18 +1178,6 @@ app.get(["/admin", "/admin/"], requireAdmin, (req, res) => {
 app.use(authErrorHandler);
 app.use(strategyErrorHandler);
 app.use("/api", (req, res) => res.status(404).json({ error: "API yolu tapılmadı.", code: "NOT_FOUND" }));
-// Last-resort handler: never fall through to Express' default handler, which
-// renders stack traces as HTML outside production.
-app.use((error, req, res, next) => {
-  if (res.headersSent) return next(error);
-  const status = httpStatusOf(error);
-  if (status >= 500) console.error("Unhandled request error", { method: req.method, path: req.path, name: error?.name, code: error?.code });
-  const isSyntaxErr = error instanceof SyntaxError || error?.type === "entity.parse.failed" || error?.name === "SyntaxError";
-  return res.status(status).json({
-    error: publicErrorMessage(error, "Sorğunu tamamlamaq mümkün olmadı."),
-    code: isSyntaxErr ? "INVALID_JSON" : (error?.code && typeof error.code === "string" ? error.code : "INTERNAL_ERROR"),
-  });
-});
 
 // 📜 Standalone Legal & Product Pages
 app.get(["/about", "/haqqimizda"], (req, res) => {
@@ -1158,6 +1203,19 @@ app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+// Last-resort handler: never fall through to Express' default handler, which
+// renders stack traces as HTML outside production.
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  const status = httpStatusOf(error);
+  if (status >= 500) console.error("Unhandled request error", { method: req.method, path: req.path, name: error?.name, code: error?.code });
+  const isSyntaxErr = error instanceof SyntaxError || error?.type === "entity.parse.failed" || error?.name === "SyntaxError";
+  return res.status(status).json({
+    error: publicErrorMessage(error, "Sorğunu tamamlamaq mümkün olmadı."),
+    code: isSyntaxErr ? "INVALID_JSON" : (error?.code && typeof error.code === "string" ? error.code : "INTERNAL_ERROR"),
+  });
+});
+
 const PORT = APP_PORT;
 
 async function startServer() {
@@ -1168,9 +1226,13 @@ async function startServer() {
     console.error("Initial storage initialization failed", { code: err.code });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () =>
-    console.log(`✅ Helmer is live on port ${PORT}`)
-  );
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`✅ Helmer is live on port ${PORT}`);
+    const decisionStatus = sharedDecisionRouter.getSyncStatus();
+    console.info(
+      `[DecisionRouter] model=${DECISION_MODEL} status=${decisionStatus.mode} configured=${decisionStatus.configured} keySource=${decisionStatus.keySource}`
+    );
+  });
 
   // 🔁 Render üçün keep-alive
   const keepAlive = setInterval(() => {
@@ -1186,6 +1248,7 @@ async function startServer() {
     shuttingDown = true;
     console.log(`🛑 ${signal} received, draining connections...`);
     clearInterval(keepAlive);
+    askRunManager.dispose();
     const researchShutdown = researchService.shutdown().catch(error => console.error('Research shutdown failed', { code: error.code }));
     server.close(async () => {
       await researchShutdown;

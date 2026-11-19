@@ -5,11 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
-import { createAskHandler } from '../src/http/ask-handler.js';
+import { createAskHandler, createAskCancelHandler } from '../src/http/ask-handler.js';
+import { createAskRunManager } from '../src/services/ai/ask-run-manager.js';
 import { createAskService } from '../src/services/ai/ask-service.js';
 import { sanitizeAskGroundingMetadata } from '../src/services/ai/ask-grounding.js';
 import { createAskExecutionGuard } from '../src/http/ask-execution-guard.js';
-import { createCapabilityRouter } from '../src/http/capability-router.js';
+import { createCapabilityRouter, askRequestSchema } from '../src/http/capability-router.js';
 import { AiPolicy, createReplayResourceCheck } from '../src/services/security/ai-policy.js';
 import { PrivacyPolicy } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
@@ -78,7 +79,7 @@ class RedisFixture {
     throw new Error('Unexpected fixture Redis operation');
   }
 }
-async function fixture(t, { redis = null, limits, parallel = false } = {}) {
+async function fixture(t, { redis = null, limits, parallel = false, env = {} } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-ask-http-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const ownerA = randomUUID(), ownerB = randomUUID();
@@ -95,7 +96,7 @@ async function fixture(t, { redis = null, limits, parallel = false } = {}) {
     setBackgroundOwner: value => { backgroundOwner = value; },
   };
   const policy = new AiPolicy({
-    redis, allowParallelAskChats: parallel, env: { GUEST_AI_DAILY_LIMIT: '5' },
+    redis, allowParallelAskChats: parallel, env: { GUEST_ASK_RATE_LIMIT_PER_MINUTE: '10', ...env },
     canReplay: createReplayResourceCheck({ chatRepository }),
   });
   configureProviderPolicy({ assertEnabled: () => policy.assertEnabled(), reserveProvider: async (context, params) => {
@@ -119,6 +120,23 @@ async function fixture(t, { redis = null, limits, parallel = false } = {}) {
   });
   app.use(new PrivacyPolicy({ findById: async id => users.get(id) }).middleware());
   app.use(policy.middleware());
+  const askRunManager = createAskRunManager({ redis, cancelPollIntervalMs: 30 });
+  t.after(() => askRunManager.dispose());
+  f.askRunManager = askRunManager;
+
+  app.get('/api/ask/runs/active', async (req, res) => {
+    return res.json({ runs: await askRunManager.listActiveRuns(req.ownerId) });
+  });
+  app.get('/api/ask/chats/:id', async (req, res) => {
+    const [chat, activeRun] = await Promise.all([
+      chatRepository.getById(req.params.id, req.ownerId),
+      askRunManager.getActiveRunForChat(req.ownerId, req.params.id),
+    ]);
+    if (!chat && !activeRun) return res.status(404).json({ code: 'NOT_FOUND' });
+    return res.json({ chat: chat || null, activeRun: activeRun || null });
+  });
+  app.post('/api/ask/cancel', createAskCancelHandler({ askRunManager }));
+
   const guards = Array.from({ length: 2 }, () => createAskExecutionGuard({
     redis, allowGuest: true, allowParallelChats: parallel, hasActiveJobForOwner: owner => owner === backgroundOwner,
   }));
@@ -132,13 +150,20 @@ async function fixture(t, { redis = null, limits, parallel = false } = {}) {
     telemetryService: { trackAskQuery: async data => { telemetry.push(data); } },
     sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
     generateAsk: createAskService({ getClient: () => client }),
+    askRunManager,
   }));
   const server = app.listen(0, '127.0.0.1'); await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  f.url = `http://127.0.0.1:${server.address().port}/api/ask`;
+  f.baseUrl = `http://127.0.0.1:${server.address().port}`;
+  f.url = `${f.baseUrl}/api/ask`;
   f.ask = (body = {}, owner = ownerA, options = {}) => fetch(f.url, {
     ...options, method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Test-Owner': owner, 'Idempotency-Key': randomUUID(), ...options.headers },
     body: JSON.stringify({ messages: [{ role: 'user', content: 'Salam' }], ...body }),
+  });
+  f.cancel = (body = {}, owner = ownerA) => fetch(`${f.baseUrl}/api/ask/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Test-Owner': owner },
+    body: JSON.stringify(body),
   });
   return f;
 }
@@ -315,26 +340,27 @@ test('Ask HTTP: strict payload, UUID, revision, verification and disabled-accoun
   assert.equal(f.calls.length, 0);
 });
 
-test('Ask HTTP: guest restrictions, exact CTA and exhaustion remain enforced on the new handler', async t => {
-  const f = await fixture(t), guest = 'guest_fixture';
+test('Ask HTTP: guest restrictions remain enforced, daily CTA/exhaustion removed, and per-minute rate limit enforced', async t => {
+  const f = await fixture(t, { env: { GUEST_ASK_RATE_LIMIT_PER_MINUTE: '6' } });
+  const guest = 'guest_fixture';
   for (const [body, expected] of [[{ thinkingLevel: 'high' }, GUEST_RESTRICTION_NOTICES.thinking], [{ thinkingLevel: 'low' }, GUEST_RESTRICTION_NOTICES.thinking], [{ strategyId: f.strategyId }, GUEST_RESTRICTION_NOTICES.strategy], [{ taskId: f.taskId }, GUEST_RESTRICTION_NOTICES.planner]]) {
     const response = await f.ask(body, guest); assert.equal(response.status, 401); assert.equal((await response.json()).reply, expected);
   }
-  for (let remaining = 4; remaining >= 0; remaining--) {
+  for (let i = 0; i < 6; i++) {
     const response = await f.ask({ stream: true }, guest);
     assert.equal(response.status, 200);
     const final = sse(await response.text()).at(-1);
-    assert.equal(final.remainingGuestMessages, remaining); assert.equal(final.done, true);
-    if (remaining === 0) assert.equal(final.reply, GUEST_EXHAUSTED_MESSAGE);
-    else {
-      assert.match(final.reply, /Tam cavab\./);
-      assert.ok(final.reply.includes(getGuestCtaNotice(remaining)));
-    }
+    assert.equal(final.remainingGuestMessages, null); assert.equal(final.done, true);
+    assert.equal(final.reply, 'Tam cavab.');
   }
-  assert.equal((await f.ask({}, guest)).status, 429); assert.equal(f.calls.length, 4);
+  const limited = await f.ask({}, guest);
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+  assert.equal((await limited.json()).code, 'RATE_LIMITED');
+  assert.equal(f.calls.length, 6);
 });
 
-test('Ask HTTP: first text arrives while generation is pending, concurrent same-owner request is denied, disconnect releases lease and saves nothing', async t => {
+test('Ask HTTP: first text arrives while generation is pending, concurrent same-owner request is denied, explicit Stop cancels lease and saves nothing; cross-tenant cancel rejected', async t => {
   const f = await fixture(t), gate = deferred(), cancelled = deferred();
   f.stream = async function* ({ config }) {
     yield { text: 'First words' }; gate.resolve();
@@ -346,11 +372,20 @@ test('Ask HTTP: first text arrives while generation is pending, concurrent same-
   };
   const controller = new AbortController();
   const response = await f.ask({ stream: true }, f.ownerA, { signal: controller.signal });
+  const runId = response.headers.get('X-Helmer-Ask-Run-Id');
+  const chatId = response.headers.get('X-Helmer-Ask-Chat-Id');
+  assert.ok(runId && chatId);
   const reader = response.body.getReader(); const first = await reader.read();
   assert.match(new TextDecoder().decode(first.value), /First words/); await gate.promise;
   assert.equal((await f.ask()).status, 429);
+  // Owner B cannot cancel Owner A's run
+  await f.cancel({ runId, chatId }, f.ownerB);
+  assert.equal(f.releases(), 0);
+  // Owner A explicitly cancels via Stop -> aborts generation and releases lease
+  const cancelRes = await f.cancel({ runId, chatId }, f.ownerA);
+  assert.equal(cancelRes.status, 200);
   controller.abort(); await reader.cancel().catch(() => {}); await cancelled.promise;
-  for (let i = 0; i < 20 && f.releases() === 0; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  for (let i = 0; i < 40 && f.releases() === 0; i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(f.releases(), 1); assert.equal((await f.chatRepository.list(f.ownerA)).length, 0);
 });
 
@@ -963,4 +998,274 @@ test('Ask handler forwards personalizationContext separately from referenceConte
   assert.match(captured[0].personalizationContext, /<user_personalization_context>/);
   assert.match(captured[0].personalizationContext, /NovaPay/);
   assert.match(captured[0].personalizationContext, /Həmişə AZN büdcə ilə cavab ver\./);
+});
+
+test('askRequestSchema accepts 35k assistant history while rejecting >10k trailing user prompt', () => {
+  const longHistoryOk = askRequestSchema.safeParse({
+    messages: [
+      { role: 'user', content: 'Analiz et' },
+      { role: 'assistant', content: 'A'.repeat(35000) },
+      { role: 'user', content: 'Qısa nəticə ver' },
+    ],
+  });
+  assert.equal(longHistoryOk.success, true);
+
+  const oversizedUserRejected = askRequestSchema.safeParse({
+    messages: [
+      { role: 'user', content: 'U'.repeat(10001) },
+    ],
+  });
+  assert.equal(oversizedUserRejected.success, false);
+});
+
+test('Ask post-abort immediate resend awaits/retries release instead of returning 429 EXECUTION_BUSY', async t => {
+  const redis = new RedisFixture();
+  const baseEval = redis.eval.bind(redis);
+  redis.eval = async (script, opts) => {
+    if (script.includes("redis.call('del'") && opts?.keys?.[0]?.includes('ask-lock:')) {
+      await new Promise(resolve => setTimeout(resolve, 60));
+    }
+    return baseEval(script, opts);
+  };
+  const f = await fixture(t, { redis, parallel: true });
+  const initialChat = await f.chatRepository.saveChat({
+    ownerId: f.ownerA,
+    messages: [{ role: 'user', content: 'İlk sual' }, { role: 'assistant', content: 'İlk cavab' }],
+  });
+
+  const providerEntered = deferred();
+  const waitStop = deferred();
+  f.stream = async function* ({ config }) {
+    providerEntered.resolve();
+    await new Promise(resolve => {
+      if (config.abortSignal?.aborted) return resolve();
+      config.abortSignal?.addEventListener('abort', resolve, { once: true });
+      waitStop.promise.then(resolve);
+    });
+    yield { text: 'Dayandırıldı', candidates: [{}] };
+  };
+
+  const abort1 = new AbortController();
+  const req1 = f.ask({ chatId: initialChat.id, chatRevision: 1, stream: true }, f.ownerA, { signal: abort1.signal });
+  await providerEntered.promise;
+  await f.cancel({ chatId: initialChat.id }, f.ownerA);
+  abort1.abort();
+  await req1.catch(() => null);
+
+  f.stream = async function* () { yield { text: 'Yenilənmiş cavab.', candidates: [{}] }; };
+  const resend = await f.ask({ chatId: initialChat.id, chatRevision: 1, stream: true }, f.ownerA, {
+    headers: { 'X-Test-Replica': '2' },
+  });
+  waitStop.resolve();
+  assert.equal(resend.status, 200);
+  const events = sse(await resend.text());
+  assert.equal(events.at(-1).done, true);
+  assert.equal(events.at(-1).reply, 'Yenilənmiş cavab.');
+});
+
+test('Ask mid-stream REVISION_CONFLICT returns current revision and marks idempotency record retryable', async t => {
+  const redis = new RedisFixture();
+  const f = await fixture(t, { redis, parallel: true });
+  const chat = await f.chatRepository.saveChat({
+    ownerId: f.ownerA,
+    messages: [{ role: 'user', content: 'Başlanğıc' }],
+  });
+
+  const firstChunkSent = deferred();
+  const releaseSecondChunk = deferred();
+  f.stream = async function* () {
+    yield { text: 'Birinci hissə ', candidates: [{}] };
+    firstChunkSent.resolve();
+    await releaseSecondChunk.promise;
+    yield { text: 'ikinci hissə.', candidates: [{}] };
+  };
+
+  const idempotencyKey = `retry-rev-conflict-${randomUUID()}`;
+  const reqPromise = f.ask({ chatId: chat.id, chatRevision: 1, stream: true }, f.ownerA, {
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
+  await firstChunkSent.promise;
+  // Concurrent write bumps chat revision from 1 -> 2 before saveChat runs at stream end
+  await f.chatRepository.saveChat({
+    id: chat.id,
+    ownerId: f.ownerA,
+    expectedRevision: 1,
+    appendMessages: [{ role: 'user', content: 'Başqa tab' }],
+  });
+  releaseSecondChunk.resolve();
+
+  const response = await reqPromise;
+  assert.equal(response.status, 200);
+  const events = sse(await response.text());
+  const errEvent = events.find(e => e.error);
+  assert.ok(errEvent, 'SSE stream must emit sanitized error event');
+  assert.equal(errEvent.code, 'REVISION_CONFLICT');
+  assert.equal(errEvent.revision, 2);
+
+  await new Promise(resolve => setImmediate(resolve));
+  const idempEntry = [...redis.values.entries()].find(([k]) => k.startsWith('security:request:'));
+  assert.ok(idempEntry);
+  assert.equal(JSON.parse(idempEntry[1]).state, 'retryable');
+});
+
+test('Passive client disconnect (page refresh / tab close) completes Ask in background, persists saveChat, marks completed, and recovers via active status', async t => {
+  const redis = new RedisFixture();
+  const f = await fixture(t, { redis, parallel: true });
+  const firstChunk = deferred();
+  const finishGeneration = deferred();
+  t.after(() => finishGeneration.resolve());
+
+  f.stream = async function* () {
+    yield { text: 'Birinci hissə — ', candidates: [{}] };
+    firstChunk.resolve();
+    await finishGeneration.promise;
+    yield { text: 'tam arxa plan cavabı.', candidates: [{}] };
+  };
+
+  const controller = new AbortController();
+  const idemKey = `bg-disconnect-${randomUUID()}`;
+  const response = await f.ask(
+    { stream: true, messages: [{ role: 'user', content: 'Uzun analiz et' }] },
+    f.ownerA,
+    { signal: controller.signal, headers: { 'Idempotency-Key': idemKey } }
+  );
+  const allocatedChatId = response.headers.get('X-Helmer-Ask-Chat-Id');
+  const runId = response.headers.get('X-Helmer-Ask-Run-Id');
+  assert.ok(allocatedChatId && runId);
+
+  const reader = response.body.getReader();
+  await reader.read();
+  await firstChunk.promise;
+
+  // Simulate passive page reload / tab leave WITHOUT calling POST /api/ask/cancel
+  controller.abort();
+  await reader.cancel().catch(() => {});
+  await new Promise(resolve => setTimeout(resolve, 25));
+
+  // While still generating, GET /api/ask/chats/:id reports activeRun so reloaded UI can show loading state
+  const inProgressRes = await fetch(`${f.baseUrl}/api/ask/chats/${allocatedChatId}`, {
+    headers: { 'X-Test-Owner': f.ownerA },
+  });
+  assert.equal(inProgressRes.status, 200);
+  const inProgressBody = await inProgressRes.json();
+  assert.equal(inProgressBody.activeRun?.runId, runId);
+  assert.equal(inProgressBody.activeRun?.status, 'running');
+
+  const activeRunsRes = await fetch(`${f.baseUrl}/api/ask/runs/active`, {
+    headers: { 'X-Test-Owner': f.ownerA },
+  });
+  const activeRunsBody = await activeRunsRes.json();
+  assert.ok(activeRunsBody.runs.some(r => r.runId === runId && r.chatId === allocatedChatId));
+
+  // Cross-tenant GET must NOT see Owner A's in-progress run
+  const crossTenantRes = await fetch(`${f.baseUrl}/api/ask/chats/${allocatedChatId}`, {
+    headers: { 'X-Test-Owner': f.ownerB },
+  });
+  assert.equal(crossTenantRes.status, 404);
+
+  // Let background generation finish and wait for activeRun cleanup to commit
+  finishGeneration.resolve();
+  for (let i = 0; i < 60 && f.releases() === 0; i++) {
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  assert.equal(f.releases(), 1, 'detached provider slot and lease must release after background save');
+
+  // Reloaded client polls / fetches chat and receives full persisted history + cleared activeRun
+  let recovered = null;
+  for (let i = 0; i < 60; i++) {
+    const recoveredRes = await fetch(`${f.baseUrl}/api/ask/chats/${allocatedChatId}`, {
+      headers: { 'X-Test-Owner': f.ownerA },
+    });
+    assert.equal(recoveredRes.status, 200);
+    recovered = await recoveredRes.json();
+    if (recovered.activeRun === null && recovered.chat) break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(recovered.activeRun, null);
+  assert.ok(recovered.chat);
+  assert.equal(recovered.chat.messages[0].content, 'Uzun analiz et');
+  assert.equal(recovered.chat.messages[1].content, 'Birinci hissə — tam arxa plan cavabı.');
+
+  const idempEntry = [...redis.values.entries()].find(([k]) => k.startsWith('security:request:'));
+  assert.ok(idempEntry);
+  assert.equal(JSON.parse(idempEntry[1]).state, 'completed');
+
+  // Follow-up turn on the recovered chat succeeds immediately without leftover lock
+  f.stream = async function* () { yield { text: 'Növbəti sual cavabı.', candidates: [{}] }; };
+  const followUp = await f.ask({
+    chatId: allocatedChatId,
+    chatRevision: recovered.chat.revision,
+    messages: [{ role: 'user', content: 'Davam et' }],
+    stream: true,
+  });
+  assert.equal(followUp.status, 200);
+  assert.equal(sse(await followUp.text()).at(-1).done, true);
+});
+
+test('Cross-replica POST /api/ask/cancel aborts detached background Ask via Redis and enforces Zod strict validation', async t => {
+  const redis = new RedisFixture();
+  const f = await fixture(t, { redis, parallel: true });
+  const replica2CancelManager = createAskRunManager({ redis, cancelPollIntervalMs: 25 });
+  t.after(() => replica2CancelManager.dispose());
+
+  // 1. Validate strict Zod rejection on invalid payloads
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { req.ownerId = f.ownerA; req.user = f.users.get(f.ownerA); next(); });
+  app.post('/api/ask/cancel', createAskCancelHandler({ askRunManager: replica2CancelManager }));
+  const cancelServer = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => cancelServer.once('listening', resolve));
+  t.after(() => new Promise(resolve => { cancelServer.close(resolve); cancelServer.closeAllConnections(); }));
+  const replica2Url = `http://127.0.0.1:${cancelServer.address().port}/api/ask/cancel`;
+
+  for (const badBody of [{}, { chatId: 'invalid-uuid' }, { runId: randomUUID(), extraField: true }]) {
+    const badRes = await fetch(replica2Url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(badBody),
+    });
+    assert.equal(badRes.status, 400);
+    assert.equal((await badRes.json()).code, 'VALIDATION_ERROR');
+  }
+
+  // 2. Run on Replica 1 -> disconnect client passively -> explicitly cancel via Replica 2
+  const entered = deferred();
+  const abortedOnReplica1 = deferred();
+  f.stream = async function* ({ config }) {
+    yield { text: 'Başladı...', candidates: [{}] };
+    entered.resolve();
+    await new Promise(resolve => {
+      if (config.abortSignal.aborted) resolve();
+      else config.abortSignal.addEventListener('abort', resolve, { once: true });
+    });
+    abortedOnReplica1.resolve();
+    config.abortSignal.throwIfAborted();
+  };
+
+  const tcpAbort = new AbortController();
+  const res1 = await f.ask({ stream: true }, f.ownerA, { signal: tcpAbort.signal });
+  const runId = res1.headers.get('X-Helmer-Ask-Run-Id');
+  const reader = res1.body.getReader();
+  await reader.read();
+  await entered.promise;
+
+  // Passive TCP drop does NOT cancel
+  tcpAbort.abort();
+  await reader.cancel().catch(() => {});
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(f.releases(), 0);
+
+  // Explicit Stop hits Replica 2
+  const stopRes = await fetch(replica2Url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runId }),
+  });
+  assert.equal(stopRes.status, 200);
+  await abortedOnReplica1.promise;
+  for (let i = 0; i < 40 && f.releases() === 0; i++) {
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  assert.equal(f.releases(), 1);
+  assert.equal((await f.chatRepository.list(f.ownerA)).length, 0);
 });

@@ -13362,6 +13362,16 @@ html.dark .auth-field input:focus {
   color: var(--theme-blue-ink, #1d4ed8);
 }
 
+.auth-turnstile-wrap {
+  display: flex;
+  justify-content: center;
+  min-height: 0;
+}
+
+.auth-turnstile-wrap:empty {
+  display: none;
+}
+
 .auth-submit {
   display: flex;
   width: 100%;

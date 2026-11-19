@@ -56,7 +56,8 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
       const authorizationTimer = setInterval(async () => {
         if (checking) return;
         checking = true;
-        try { await Promise.all([enabled(), authorize()]); }
+        const timerOptions = { maxStaleMs: 2500 };
+        try { await Promise.all([enabled(), authorize(timerOptions)]); }
         catch (error) { context.controller?.abort(error); }
         finally { checking = false; }
       }, 1000);
@@ -235,7 +236,8 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
           }
           finally { await finish(); }
         })();
-        await Promise.all([enabled(), authorize()]);
+        const postCheckOptions = type === 'decision' ? { maxStaleMs: 2500 } : undefined;
+        await Promise.all([enabled(postCheckOptions), authorize(postCheckOptions)]);
         completedSuccessfully = true;
         await finish(); return value;
       } catch (error) {

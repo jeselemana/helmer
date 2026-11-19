@@ -230,7 +230,13 @@ function syncHeaderControls(lang) {
   const btnAz = document.getElementById("btnAz");
   const btnEn = document.getElementById("btnEn");
 
-  if (navAbout) navAbout.textContent = isEn ? "About" : "Haqqımızda";
+  if (navAbout) {
+    navAbout.textContent = isEn ? "About" : "Haqqımızda";
+    navAbout.hidden = true;
+    navAbout.setAttribute("aria-hidden", "true");
+    navAbout.setAttribute("tabindex", "-1");
+    navAbout.setAttribute("inert", "");
+  }
   if (navTerms) navTerms.textContent = isEn ? "Terms of Service" : "İstifadə Şərtləri";
   if (navPrivacy) navPrivacy.textContent = isEn ? "Privacy Policy" : "Məxfilik Siyasəti";
   if (navHome) navHome.textContent = isEn ? "Workspace" : "İş Sahəsi";

@@ -30,7 +30,7 @@ const formula = z.string().max(1000).refine(value => {
   if (/[\[\]{}|;\\\r\n]/.test(value) || /(?:https?:|file:|DDE|WEBSERVICE|HYPERLINK|IMPORT|RTD|EXEC|CALL|REGISTER|INDIRECT)/i.test(value)) return false;
   const withoutStrings = value.replace(/"[^"]*"|'[^']*'/g, "");
   const allowed = new Set(["SUM", "AVERAGE", "MIN", "MAX", "IF", "IFERROR", "ROUND", "ROUNDUP", "ROUNDDOWN", "COUNT", "COUNTA", "COUNTIF", "SUMIF", "SUMIFS", "NPV", "IRR", "PMT", "PV", "FV", "POWER", "ABS", "AND", "OR", "SQRT", "FORECAST", "FORECAST.LINEAR", "TREND", "SLOPE", "INTERCEPT", "XLOOKUP", "VLOOKUP", "INDEX", "MATCH"]);
-  return [...withoutStrings.matchAll(/([A-Z][A-Z0-9.]*)\s*\(/gi)].every(match => allowed.has(match[1].toUpperCase()));
+  return [...withoutStrings.matchAll(/([A-Z_][A-Z0-9._]*)\s*\(/gi)].every(match => allowed.has(match[1].toUpperCase()));
 }, "Unsafe spreadsheet formula");
 export const cellSchema = z.object({
   type: z.enum(["text", "number", "formula", "blank"]), value: text,

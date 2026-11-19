@@ -28,7 +28,12 @@ export function resolveGeminiClientOptions(env = process.env, existsSync = fs.ex
   const apiKey = env.GEMINI_API_KEY?.trim();
   const isVertexKey = Boolean(apiKey?.startsWith("AQ."));
   const project = (env.GOOGLE_CLOUD_PROJECT || env.GCP_PROJECT)?.trim() || "";
-  const location = env.GOOGLE_CLOUD_LOCATION?.trim() || "global";
+  const location = (
+    env.GOOGLE_CLOUD_LOCATION?.trim() ||
+    env.GOOGLE_CLOUD_REGION?.trim() ||
+    env.BUILD_VERTEX_LOCATION?.trim() ||
+    "us-central1"
+  ).toLowerCase();
   const hasServiceAccount = Boolean(hasValidCredFile || project);
   const isVertex = env.GEMINI_USE_VERTEX === "true" ||
     isVertexKey ||
@@ -37,6 +42,7 @@ export function resolveGeminiClientOptions(env = process.env, existsSync = fs.ex
   // Vertex AI with ADC / Service Account / GCP Project must not simultaneously pass a non-Vertex Developer API key
   const useVertexProjectAuth = Boolean(isVertex && !isVertexKey && hasServiceAccount);
   const passApiKey = Boolean(apiKey && !useVertexProjectAuth);
+  const vertexBaseUrl = isVertex && !isVertexKey ? resolveVertexBaseUrl(location) : null;
 
   return {
     credPath,
@@ -46,7 +52,11 @@ export function resolveGeminiClientOptions(env = process.env, existsSync = fs.ex
       ...(isVertex ? { vertexai: true } : {}),
       ...(isVertex && !isVertexKey ? { location } : {}),
       ...(isVertex && !isVertexKey && project ? { project } : {}),
-      httpOptions: { timeout: 180000 },
+      httpOptions: {
+        ...(vertexBaseUrl ? { baseUrl: vertexBaseUrl } : {}),
+        timeout: 180000,
+        retryOptions: { attempts: 1 },
+      },
     },
   };
 }
@@ -153,11 +163,32 @@ export function getBuildVertexClient(location = null) {
 
 const decisionVertexClients = new Map();
 
-export function hasDecisionApiConfiguration(env = process.env) {
-  const decisionKey = env?.GEMINI_DECISION_API_KEY?.trim() || "";
-  if (decisionKey) return true;
+export function resolveDecisionApiKey(env = process.env) {
+  const decisionKey = (env?.GEMINI_DECISION_API_KEY || env?.DECISIONS_API_KEY || "").trim();
+  if (decisionKey) return decisionKey;
   const apiKey = env?.GEMINI_API_KEY?.trim() || "";
-  return Boolean(apiKey && !apiKey.startsWith("AQ."));
+  return apiKey && !apiKey.startsWith("AQ.") ? apiKey : "";
+}
+
+export function getDecisionsApiStatus(env = process.env) {
+  const dedicatedKey = (env?.GEMINI_DECISION_API_KEY || "").trim();
+  const aliasKey = (env?.DECISIONS_API_KEY || "").trim();
+  const resolved = resolveDecisionApiKey(env);
+  return {
+    model: "gemini-decision-1",
+    fallbackModel: "gemini-3.5-flash-lite",
+    configured: Boolean(resolved),
+    keySource: dedicatedKey
+      ? "GEMINI_DECISION_API_KEY"
+      : aliasKey
+        ? "DECISIONS_API_KEY"
+        : (resolved ? "GEMINI_API_KEY" : "none"),
+    endpoint: "https://generativelanguage.googleapis.com/v1beta/decisions",
+  };
+}
+
+export function hasDecisionApiConfiguration(env = process.env) {
+  return Boolean(resolveDecisionApiKey(env));
 }
 
 export function resolveDecisionVertexConfig(env = process.env, existsSync = fs.existsSync, locationOverride = null) {
@@ -194,12 +225,14 @@ export function resolveDecisionVertexConfig(env = process.env, existsSync = fs.e
 
   if (isVertexKey || env?.GEMINI_USE_VERTEX === "true" || hasGeminiConfiguration(env)) {
     const { options } = resolveGeminiClientOptions(env, existsSync);
+    const vertexBaseUrl = options.vertexai && !isVertexKey ? resolveVertexBaseUrl(location) : null;
     return {
       ...options,
       vertexai: true,
       ...(options.vertexai && !isVertexKey ? { location } : {}),
       httpOptions: {
         ...(options.httpOptions || {}),
+        ...(vertexBaseUrl ? { baseUrl: vertexBaseUrl } : {}),
         timeout: 10000,
       },
     };
@@ -230,9 +263,7 @@ export async function callDecisionsApi({
   fetcher = fetch,
   env = process.env,
 } = {}) {
-  const decisionKey = env?.GEMINI_DECISION_API_KEY?.trim() || "";
-  const rawApiKey = env?.GEMINI_API_KEY?.trim() || "";
-  const apiKey = decisionKey || (!rawApiKey.startsWith("AQ.") ? rawApiKey : "");
+  const apiKey = resolveDecisionApiKey(env);
   if (!apiKey) {
     throw Object.assign(new Error("Decisions API developer key is not configured."), {
       code: "AI_NOT_CONFIGURED",

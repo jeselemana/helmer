@@ -680,14 +680,15 @@ function renderLegalReports() {
     const userDisplay = rep.userName || "Anonim istifadəçi";
     const encodedSubjectFull = encodeURIComponent(`Helmer Hüquqi Müraciətiniz Barədə [${rep.id || ""}]`);
     const encodedSubjectShort = encodeURIComponent(`Helmer Hüquqi Müraciətiniz [${rep.id || ""}]`);
-    const emailDisplay = rep.userEmail ? `<a href="mailto:${escapeHtml(rep.userEmail)}?subject=${escapeHtml(encodedSubjectFull)}" class="legal-email-link" title="E-poçt göndər">✉️ ${escapeHtml(rep.userEmail)}</a>` : '<span class="text-muted">E-poçt qeyd olunmayıb</span>';
+    const encodedEmail = rep.userEmail ? encodeURIComponent(rep.userEmail) : "";
+    const emailDisplay = rep.userEmail ? `<a href="mailto:${escapeHtml(encodedEmail)}?subject=${escapeHtml(encodedSubjectFull)}" class="legal-email-link" title="E-poçt göndər">✉️ ${escapeHtml(rep.userEmail)}</a>` : '<span class="text-muted">E-poçt qeyd olunmayıb</span>';
     const modelBadge = rep.model ? `<span class="model-badge">${escapeHtml(rep.model)}</span>` : "";
 
     card.innerHTML = `
       <div class="legal-card-header">
         <div class="legal-card-type-row">
           <span class="issue-badge">${escapeHtml(rep.issueType || "Ümumi")}</span>
-          <span class="status-badge ${statusClasses[currentStatus]}">${statusLabels[currentStatus] || currentStatus}</span>
+          <span class="status-badge ${statusClasses[currentStatus] || ""}">${escapeHtml(statusLabels[currentStatus] || currentStatus)}</span>
           ${modelBadge}
         </div>
         <div class="legal-card-date" title="${escapeHtml(rep.createdAt || "")}">${dateStr}</div>
@@ -724,7 +725,7 @@ function renderLegalReports() {
 
         <div class="action-buttons">
           ${rep.userEmail ? `
-            <a href="mailto:${escapeHtml(rep.userEmail)}?subject=${escapeHtml(encodedSubjectShort)}" class="btn btn-email">
+            <a href="mailto:${escapeHtml(encodedEmail)}?subject=${escapeHtml(encodedSubjectShort)}" class="btn btn-email">
               ✉️ Cavab yaz
             </a>
           ` : ""}

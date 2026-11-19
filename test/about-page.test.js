@@ -132,15 +132,21 @@ test("about.js powers editorial telemetry switching, vector diagrams, and Gemini
   }
 });
 
-test("workspace rail, sidebar navigation, legal pages header, and i18n expose /about", async () => {
+test("workspace rail, sidebar navigation, legal pages header keep /about hidden while keeping /about route and translations intact", async () => {
   const indexHtml = await fs.readFile(path.join(publicDir, "index.html"), "utf8");
   const privacyHtml = await fs.readFile(path.join(publicDir, "privacy.html"), "utf8");
   const termsHtml = await fs.readFile(path.join(publicDir, "terms.html"), "utf8");
+  const aboutHtml = await fs.readFile(path.join(publicDir, "about.html"), "utf8");
+  const legalPageJs = await fs.readFile(path.join(publicDir, "legal-page.js"), "utf8");
+  const scriptJs = await fs.readFile(path.join(publicDir, "script.js"), "utf8");
 
-  assert.match(indexHtml, /<a[^>]+id="railAboutButton"[^>]+href="\/about"/);
-  assert.match(indexHtml, /<a[^>]+id="aboutNav"[^>]+href="\/about"/);
-  assert.match(privacyHtml, /<a[^>]+href="\/about"[^>]+id="navAbout"/);
-  assert.match(termsHtml, /<a[^>]+href="\/about"[^>]+id="navAbout"/);
+  assert.match(indexHtml, /<a[^>]+id="railAboutButton"[^>]+hidden[^>]+aria-hidden="true"[^>]+inert/);
+  assert.match(indexHtml, /<a[^>]+id="aboutNav"[^>]+hidden[^>]+aria-hidden="true"[^>]+inert/);
+  assert.match(privacyHtml, /<a[^>]+href="\/about"[^>]+id="navAbout"[^>]+hidden[^>]+aria-hidden="true"[^>]+inert/);
+  assert.match(termsHtml, /<a[^>]+href="\/about"[^>]+id="navAbout"[^>]+hidden[^>]+aria-hidden="true"[^>]+inert/);
+  assert.ok(aboutHtml.includes('href="https://helmeros.com/about"'), "about.html remains intact");
+  assert.ok(legalPageJs.includes("navAbout.hidden = true"), "legal-page.js keeps navAbout hidden");
+  assert.ok(scriptJs.includes("railAboutButton.hidden = true") && scriptJs.includes("aboutNav.hidden = true"), "script.js keeps railAboutButton and aboutNav hidden");
 
   assert.equal(t("nav.about", {}, "az"), "Haqqımızda");
   assert.equal(t("nav.about", {}, "en"), "About");

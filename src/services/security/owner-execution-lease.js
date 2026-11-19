@@ -1,27 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
 // Keep the existing owner mutex as a barrier against exclusive work.
-const ASK_BARRIER = 'ask-shared-v2';
-const LEASE_MS = '180000';
+export const ASK_BARRIER = 'ask-shared-v2';
+export const LEASE_MS = '180000';
 const localOwners = new Map();
 const redisNow = `local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)`;
 
-export async function acquireSharedAskLease(redis, ownerId, token) {
+export function createSharedAskLeaseHandle(redis, ownerId, token) {
   const ownerKey = `security:owner-execution:${ownerId}`;
   const keys = [ownerKey, `${ownerKey}:ask-leases`];
   const args = [ASK_BARRIER, token, LEASE_MS];
-  const admitted = await redis.eval(`
-    ${redisNow}
-    local owner = redis.call('get', KEYS[1])
-    if owner and owner ~= ARGV[1] then return 0 end
-    redis.call('zremrangebyscore', KEYS[2], '-inf', now)
-    redis.call('zadd', KEYS[2], now + tonumber(ARGV[3]), ARGV[2])
-    redis.call('pexpire', KEYS[2], ARGV[3])
-    redis.call('set', KEYS[1], ARGV[1], 'PX', ARGV[3])
-    return 1
-  `, { keys, arguments: args });
-  if (!admitted) return null;
   const verify = `
     ${redisNow}
     local expires = redis.call('zscore', KEYS[2], ARGV[2])
@@ -45,6 +34,24 @@ export async function acquireSharedAskLease(redis, ownerId, token) {
       return 1
     `, { keys, arguments: args }),
   };
+}
+
+export async function acquireSharedAskLease(redis, ownerId, token) {
+  const ownerKey = `security:owner-execution:${ownerId}`;
+  const keys = [ownerKey, `${ownerKey}:ask-leases`];
+  const args = [ASK_BARRIER, token, LEASE_MS];
+  const admitted = await redis.eval(`
+    ${redisNow}
+    local owner = redis.call('get', KEYS[1])
+    if owner and owner ~= ARGV[1] then return 0 end
+    redis.call('zremrangebyscore', KEYS[2], '-inf', now)
+    redis.call('zadd', KEYS[2], now + tonumber(ARGV[3]), ARGV[2])
+    redis.call('pexpire', KEYS[2], ARGV[3])
+    redis.call('set', KEYS[1], ARGV[1], 'PX', ARGV[3])
+    return 1
+  `, { keys, arguments: args });
+  if (!admitted) return null;
+  return createSharedAskLeaseHandle(redis, ownerId, token);
 }
 
 // Uses the same tenant key as HTTP admission; recovery cannot bypass active requests.

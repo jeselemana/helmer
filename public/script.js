@@ -2435,35 +2435,6 @@ function buildProfileMenuItems() {
   const divider1 = element("div", "profile-menu-divider");
   divider1.setAttribute("role", "separator");
 
-  // Guest Limits Section (Minimalist daily limits for unregistered guests)
-  let limitsSection = null;
-  let dividerLimits = null;
-  if (!user) {
-    limitsSection = element("div", "profile-menu-limits");
-
-    const limitsHeader = element("div", "profile-menu-limits-header");
-    const limitsTitle = element("span", "profile-menu-limits-title", isEn ? "Limits" : "Limitlər");
-    limitsHeader.appendChild(limitsTitle);
-
-    const askRemaining = Number.isInteger(state.remainingGuestMessages) ? Math.max(0, state.remainingGuestMessages) : 5;
-    const buildRemaining = Number.isInteger(state.remainingGuestBriefs) ? Math.max(0, state.remainingGuestBriefs) : 3;
-
-    const askRow = element("div", "profile-menu-limit-row");
-    const askLabel = element("span", "profile-menu-limit-name", isEn ? "Ask mode" : "Ask rejimi");
-    const askVal = element("span", "profile-menu-limit-val", `${askRemaining} / 5 ${isEn ? "messages" : "mesaj"}`);
-    askRow.append(askLabel, askVal);
-
-    const buildRow = element("div", "profile-menu-limit-row");
-    const buildLabel = element("span", "profile-menu-limit-name", isEn ? "Build mode" : "Build rejimi");
-    const buildVal = element("span", "profile-menu-limit-val", `${buildRemaining} / 3 ${isEn ? "briefs" : "brif"}`);
-    buildRow.append(buildLabel, buildVal);
-
-    limitsSection.append(limitsHeader, askRow, buildRow);
-
-    dividerLimits = element("div", "profile-menu-divider");
-    dividerLimits.setAttribute("role", "separator");
-  }
-
   // Section 1: Settings sections (Profile, Personalization, Security, Legal)
   const section1 = element("div", "profile-menu-section profile-menu-section-1");
 
@@ -2571,41 +2542,11 @@ function buildProfileMenuItems() {
   });
   section2.append(helpItem, logoutItem);
 
-  const items = [headerBtn, divider1];
-  if (limitsSection && dividerLimits) {
-    items.push(limitsSection, dividerLimits);
-  }
-  items.push(section1, divider2, section2);
+  const items = [headerBtn, divider1, section1, divider2, section2];
   return items;
 }
 
 function openUserProfileMenu(triggerEl) {
-  if (!state.currentUser && !Number.isInteger(state.remainingGuestMessages) && !window._fetchingGuestQuota) {
-    window._fetchingGuestQuota = true;
-    const quotaVersion = state.guestQuotaVersion;
-    fetch("/api/auth/guest-status")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (quotaVersion !== state.guestQuotaVersion || state.currentUser) return;
-        if (!data || !Number.isInteger(data.remaining)) return;
-        state.remainingGuestMessages = data.remaining;
-        if (Number.isInteger(data.buildRemaining)) {
-          state.remainingGuestBriefs = data.buildRemaining;
-        }
-        const askValEl = document.querySelector(".profile-menu-limits .profile-menu-limit-row:first-of-type .profile-menu-limit-val");
-        const buildValEl = document.querySelector(".profile-menu-limits .profile-menu-limit-row:last-of-type .profile-menu-limit-val");
-        const isEn = getLanguage() === "en";
-        if (askValEl) askValEl.textContent = `${state.remainingGuestMessages} / 5 ${isEn ? "messages" : "mesaj"}`;
-        if (buildValEl && Number.isInteger(state.remainingGuestBriefs)) {
-          buildValEl.textContent = `${state.remainingGuestBriefs} / 3 ${isEn ? "briefs" : "brif"}`;
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        window._fetchingGuestQuota = false;
-      });
-  }
-
   const isMobile = window.innerWidth <= 767;
 
   if (isMobile) {
@@ -3050,9 +2991,10 @@ function formatBriefContextLabel(entryOrText, maxLen = 48) {
 
 function sanitizeAskMessageForApi(message) {
   if (!message || typeof message !== "object") return message;
+  const rawContent = typeof message.content === "string" ? message.content : "";
   const clean = {
     role: message.role,
-    content: typeof message.content === "string" ? message.content : "",
+    content: rawContent.length > 32000 ? rawContent.slice(0, 32000) : rawContent,
   };
   if (message.file) {
     if (message.file.fileId) {
@@ -3430,6 +3372,15 @@ let currentAbortController = null;
 const detachedBuildAbortControllers = new Set();
 const backgroundResumeAbortControllers = new Set();
 let currentAskAbortController = null;
+let activeAskRunMeta = null;
+let activeAskPollController = null;
+
+function stopAskRunPolling() {
+  if (activeAskPollController) {
+    try { activeAskPollController.abort(); } catch { }
+    activeAskPollController = null;
+  }
+}
 let activeAskReader = null;
 let activeAskTypewriter = null;
 
@@ -3549,6 +3500,32 @@ async function cancelResearchJob(message, surface = getActiveConversationSurface
 
 function abortAskMessage() {
   const targetSurface = arguments[0] || null;
+  const cancelTarget = activeAskRunMeta && (!targetSurface || targetSurface === activeAskRunMeta.surface)
+    ? { ...activeAskRunMeta }
+    : null;
+  if (!targetSurface || targetSurface === "ask") {
+    stopAskRunPolling();
+    activeAskRunMeta = null;
+  }
+  if (cancelTarget && (cancelTarget.runId || cancelTarget.chatId || cancelTarget.idempotencyKey)) {
+    const cancelPayload = {};
+    if (cancelTarget.runId && /^[0-9a-f-]{36}$/i.test(cancelTarget.runId)) cancelPayload.runId = cancelTarget.runId;
+    if (cancelTarget.chatId && /^[0-9a-f-]{36}$/i.test(cancelTarget.chatId)) cancelPayload.chatId = cancelTarget.chatId;
+    if (cancelTarget.idempotencyKey && /^[A-Za-z0-9_-]{16,100}$/.test(cancelTarget.idempotencyKey)) {
+      cancelPayload.idempotencyKey = cancelTarget.idempotencyKey;
+    }
+    if (Object.keys(cancelPayload).length > 0) {
+      fetch("/api/ask/cancel", {
+        method: "POST",
+        keepalive: true,
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+        },
+        body: JSON.stringify(cancelPayload),
+      }).catch(() => { });
+    }
+  }
   if (currentAskAbortController) {
     try {
       currentAskAbortController.abort();
@@ -3946,12 +3923,21 @@ function syncNav() {
     whatsNewNav.setAttribute("aria-label", t("nav.whatsNew"));
     whatsNewNav.setAttribute("data-tooltip", t("nav.whatsNew"));
   }
+  const railAboutButton = document.querySelector("#railAboutButton");
+  if (railAboutButton) {
+    railAboutButton.hidden = true;
+    railAboutButton.setAttribute("aria-hidden", "true");
+    railAboutButton.inert = true;
+  }
   const aboutNav = document.querySelector("#aboutNav");
   const aboutNavLabel = aboutNav?.querySelector(".about-nav-label");
   if (aboutNavLabel) {
     aboutNavLabel.textContent = t("nav.about");
   }
   if (aboutNav) {
+    aboutNav.hidden = true;
+    aboutNav.setAttribute("aria-hidden", "true");
+    aboutNav.inert = true;
     aboutNav.setAttribute("aria-label", t("nav.about"));
     aboutNav.setAttribute("data-tooltip", t("nav.about"));
   }
@@ -4407,6 +4393,9 @@ function setMode(mode, { persistDefault = false } = {}) {
 
 function startNewChat() {
   clearInterval(progressTimer);
+  stopAskRunPolling();
+  activeAskRunMeta = null;
+  state.askLoading = false;
   state.mode = "ask";
   state.view = "home";
   state.askChatId = null;
@@ -9342,6 +9331,9 @@ async function thinkDeeperWithHigh(messageIndex) {
 
   recordLearningSignal(assistantMsg.interactionId, { regenerated: true });
 
+  const previousContent = assistantMsg.content;
+  const previousModel = assistantMsg.model;
+  const previousGrounding = assistantMsg.groundingMetadata;
   assistantMsg.content = "";
   assistantMsg.model = "gemini-4-hydrogen";
   assistantMsg.isStreaming = true;
@@ -9364,10 +9356,18 @@ async function thinkDeeperWithHigh(messageIndex) {
   const expectedUserId = state.currentUser?.id || null;
 
   currentAskAbortController?.abort();
+  stopAskRunPolling();
   const controller = new AbortController();
   currentAskAbortController = controller;
   activeAskReader = null;
   activeAskTypewriter = null;
+  let deepIdemKey = window.helmerSecurity?.idempotencyKey?.() || crypto.randomUUID();
+  activeAskRunMeta = {
+    runId: null,
+    chatId: state.askChatId || null,
+    idempotencyKey: deepIdemKey,
+    surface: "ask",
+  };
 
   try {
     let response = await fetch("/api/ask", {
@@ -9376,6 +9376,7 @@ async function thinkDeeperWithHigh(messageIndex) {
       headers: {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
+        "Idempotency-Key": deepIdemKey,
         "X-Helmer-Model-Improvement": String(isModelImprovementActive()),
       },
       body: JSON.stringify({
@@ -9393,32 +9394,79 @@ async function thinkDeeperWithHigh(messageIndex) {
 
     if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
 
-    if (!response.ok && response.status === 409) {
+    if (!response.ok && (response.status === 409 || response.status === 429)) {
       const errData = await response.clone().json().catch(() => ({}));
       if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
-      if (errData.code === "REVISION_CONFLICT" && state.askChatId && errData.revision) {
-        window.helmerSecurity?.revisions.set(state.askChatId, errData.revision);
-        response = await fetch("/api/ask", {
-          method: "POST",
-          signal: controller.signal,
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "X-Helmer-Model-Improvement": String(isModelImprovementActive()),
-          },
-          body: JSON.stringify({
-            messages: historyMessages.map(sanitizeAskMessageForApi),
-            model: "gemini-4-hydrogen",
-            thinkingLevel: "high",
-            strategyId: state.askStrategyId || undefined,
-            briefId: state.askBriefId || undefined,
-            taskId: state.askTaskId || undefined,
-            chatId: state.askChatId || undefined,
-            chatRevision: errData.revision,
-            stream: true,
-          }),
-        });
+      if (response.status === 429 && errData.code === "EXECUTION_BUSY" && !controller.signal.aborted) {
+        await new Promise((resolve) => setTimeout(resolve, 650));
+        if (!controller.signal.aborted && !isIdentityStale(epoch, expectedUserId)) {
+          response = await fetch("/api/ask", {
+            method: "POST",
+            signal: controller.signal,
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "text/event-stream",
+              "Idempotency-Key": deepIdemKey,
+              "X-Helmer-Model-Improvement": String(isModelImprovementActive()),
+            },
+            body: JSON.stringify({
+              messages: historyMessages.map(sanitizeAskMessageForApi),
+              model: "gemini-4-hydrogen",
+              thinkingLevel: "high",
+              strategyId: state.askStrategyId || undefined,
+              briefId: state.askBriefId || undefined,
+              taskId: state.askTaskId || undefined,
+              chatId: state.askChatId || undefined,
+              chatRevision: state.askChatId ? (window.helmerSecurity?.getRevision(state.askChatId) || 1) : undefined,
+              stream: true,
+            }),
+          });
+          if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
+        }
+      }
+      if (!response.ok && response.status === 409) {
+        const conflictData = await response.clone().json().catch(() => ({}));
         if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
+        if (conflictData.code === "REVISION_CONFLICT" && state.askChatId && conflictData.revision) {
+          window.helmerSecurity?.revisions.set(state.askChatId, conflictData.revision);
+          deepIdemKey = window.helmerSecurity?.idempotencyKey?.() || crypto.randomUUID();
+          if (activeAskRunMeta) activeAskRunMeta.idempotencyKey = deepIdemKey;
+          response = await fetch("/api/ask", {
+            method: "POST",
+            signal: controller.signal,
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "text/event-stream",
+              "Idempotency-Key": deepIdemKey,
+              "X-Helmer-Model-Improvement": String(isModelImprovementActive()),
+            },
+            body: JSON.stringify({
+              messages: historyMessages.map(sanitizeAskMessageForApi),
+              model: "gemini-4-hydrogen",
+              thinkingLevel: "high",
+              strategyId: state.askStrategyId || undefined,
+              briefId: state.askBriefId || undefined,
+              taskId: state.askTaskId || undefined,
+              chatId: state.askChatId || undefined,
+              chatRevision: conflictData.revision,
+              stream: true,
+            }),
+          });
+          if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
+        }
+      }
+    }
+
+    if (response.ok) {
+      const headerRunId = response.headers?.get?.("X-Helmer-Ask-Run-Id");
+      const headerChatId = response.headers?.get?.("X-Helmer-Ask-Chat-Id");
+      if (activeAskRunMeta) {
+        if (headerRunId) activeAskRunMeta.runId = headerRunId;
+        if (headerChatId && /^[0-9a-f-]{36}$/i.test(headerChatId)) activeAskRunMeta.chatId = headerChatId;
+      }
+      if (headerChatId && /^[0-9a-f-]{36}$/i.test(headerChatId) && !state.askChatId) {
+        state.askChatId = headerChatId;
+        rememberActiveAskChat(headerChatId);
       }
     }
 
@@ -9546,14 +9594,12 @@ async function thinkDeeperWithHigh(messageIndex) {
   } catch (error) {
     const isAborted = error?.name === "AbortError" || currentAskAbortController?.signal?.aborted || controller.signal.aborted || isIdentityStale(epoch, expectedUserId);
     if (!isAborted) {
-      const isGuestLimit = error.message?.includes("Qonaq mesaj limitiniz bitdi") || error.message?.includes("GUEST_DAILY_LIMIT");
-      if (isGuestLimit) {
-        state.guestQuotaVersion += 1;
-        state.remainingGuestMessages = 0;
-        state.askError = "";
-      } else {
-        state.askError = error.message;
-      }
+      state.askError = error.message;
+    }
+    if (!isIdentityStale(epoch, expectedUserId) && !accumulatedFullText && !assistantMsg.content && previousContent) {
+      assistantMsg.content = previousContent;
+      assistantMsg.model = previousModel;
+      assistantMsg.groundingMetadata = previousGrounding;
     }
   } finally {
     clearAskWaitStages(assistantMsg);
@@ -9562,6 +9608,9 @@ async function thinkDeeperWithHigh(messageIndex) {
     if (currentAskAbortController === controller) {
       currentAskAbortController = null;
       activeAskReader = null;
+    }
+    if (activeAskRunMeta?.idempotencyKey === deepIdemKey) {
+      activeAskRunMeta = null;
     }
     if (!isIdentityStale(epoch, expectedUserId)) {
       if (accumulatedFullText && (!assistantMsg.content || assistantMsg.content.length < accumulatedFullText.length)) {
@@ -9583,6 +9632,7 @@ function createAskRequestOperation(payload) {
   const body = JSON.stringify(payload);
   const key = window.helmerSecurity?.idempotencyKey?.() || crypto.randomUUID();
   return {
+    idempotencyKey: key,
     send(signal) {
       return fetch('/api/ask', {
         method: 'POST', signal,
@@ -9615,6 +9665,9 @@ async function consumeAskEventStream(reader, onEvent, { maxFrameChars = 8 * 1024
     try { data = JSON.parse(dataText); } catch { throw protocolError(); }
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw protocolError();
     if (data.error) {
+      if (data.code === 'REVISION_CONFLICT' && data.revision && typeof state !== 'undefined' && state?.askChatId && typeof window !== 'undefined') {
+        window.helmerSecurity?.revisions?.set?.(state.askChatId, data.revision);
+      }
       const isEn = getLanguage() === 'en';
       if (['ASK_TIMEOUT', 'ASK_PROVIDER_TIMEOUT', 'EXECUTION_TIMEOUT'].includes(data.code)) {
         throw new Error(isEn ? 'The response timed out. Please retry.' : 'Cavab üçün gözləmə müddəti bitdi. Yenidən cəhd edin.');
@@ -9912,6 +9965,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
   let typewriter = null;
   let accumulatedFullText = "";
   let finalEventReceived = false;
+  let askResponseSaved = false;
 
   currentAskAbortController?.abort();
   const controller = new AbortController();
@@ -9936,6 +9990,13 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
     artifactId,
     stream: true,
   });
+  stopAskRunPolling();
+  activeAskRunMeta = {
+    runId: null,
+    chatId: state.askChatId || null,
+    idempotencyKey: askOperation?.idempotencyKey || null,
+    surface: "ask",
+  };
   try {
     let response = await askOperation.send(controller.signal);
     if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
@@ -9956,9 +10017,23 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
         if (conflictData.code === "REVISION_CONFLICT" && state.askChatId && conflictData.revision) {
           window.helmerSecurity?.revisions.set(state.askChatId, conflictData.revision);
           askOperation = askOperation.withRevision(conflictData.revision);
+          if (activeAskRunMeta) activeAskRunMeta.idempotencyKey = askOperation?.idempotencyKey || null;
           response = await askOperation.send(controller.signal);
           if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
         }
+      }
+    }
+
+    if (response.ok) {
+      const headerRunId = response.headers?.get?.("X-Helmer-Ask-Run-Id");
+      const headerChatId = response.headers?.get?.("X-Helmer-Ask-Chat-Id");
+      if (activeAskRunMeta) {
+        if (headerRunId) activeAskRunMeta.runId = headerRunId;
+        if (headerChatId && /^[0-9a-f-]{36}$/i.test(headerChatId)) activeAskRunMeta.chatId = headerChatId;
+      }
+      if (headerChatId && /^[0-9a-f-]{36}$/i.test(headerChatId) && !state.askChatId) {
+        state.askChatId = headerChatId;
+        rememberActiveAskChat(headerChatId);
       }
     }
 
@@ -10060,6 +10135,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
 
         if (data.done) {
           finalEventReceived = true;
+          askResponseSaved = true;
           assistantMsg.artifacts = data.artifacts || [];
           assistantMsg.execution = data.execution;
           clearAskWaitStages(assistantMsg);
@@ -10098,6 +10174,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
     } else {
       const data = await response.json();
       if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
+      askResponseSaved = true;
       assistantMsg.artifacts = data.artifacts || [];
       assistantMsg.execution = data.execution;
       assistantMsg.content = data.reply;
@@ -10143,12 +10220,15 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
       currentAskAbortController = null;
       activeAskReader = null;
     }
+    if (activeAskRunMeta?.idempotencyKey && activeAskRunMeta.idempotencyKey === (askOperation?.idempotencyKey || null)) {
+      activeAskRunMeta = null;
+    }
     if (!isIdentityStale(epoch, expectedUserId)) {
       if (accumulatedFullText && (!assistantMsg.content || assistantMsg.content.length < accumulatedFullText.length)) {
         assistantMsg.content = accumulatedFullText;
       }
       for (const msg of state.askMessages) {
-        if (msg && msg.file && (msg.file.data || msg.file.textContent)) {
+        if (msg && msg.file && (msg.file.data || msg.file.textContent) && (askResponseSaved || Boolean(msg.file.fileId))) {
           delete msg.file.data;
           delete msg.file.textContent;
         }
@@ -14338,18 +14418,84 @@ async function loadSavedChats() {
   }
 }
 
+async function pollActiveAskRun(chatId, runId, epoch, expectedUserId) {
+  stopAskRunPolling();
+  const pollController = new AbortController();
+  activeAskPollController = pollController;
+  const isEn = getLanguage() === "en";
+
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (isIdentityStale(epoch, expectedUserId) || pollController.signal.aborted || state.askChatId !== chatId || state.mode !== "ask") {
+      return;
+    }
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 1500);
+      pollController.signal.addEventListener("abort", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
+    if (isIdentityStale(epoch, expectedUserId) || pollController.signal.aborted || state.askChatId !== chatId || state.mode !== "ask") {
+      return;
+    }
+
+    try {
+      const data = await api(`/api/ask/chats/${chatId}`, { signal: pollController.signal });
+      if (isIdentityStale(epoch, expectedUserId) || pollController.signal.aborted || state.askChatId !== chatId) {
+        return;
+      }
+      if (!data?.activeRun || (runId && data.activeRun.runId && data.activeRun.runId !== runId && !data.chat)) {
+        if (activeAskPollController === pollController) activeAskPollController = null;
+        if (activeAskRunMeta?.chatId === chatId) activeAskRunMeta = null;
+        state.askLoading = false;
+        if (data?.chat) {
+          state.askMessages = Array.isArray(data.chat.messages) ? data.chat.messages : [];
+          rememberSavedAskChat(data.chat);
+          if (state.currentUser) loadSavedChats().catch(() => { });
+        } else {
+          state.askMessages = state.askMessages.filter((m) => m && !m.isStreaming);
+        }
+        render();
+        scrollToLatestAskTurn();
+        return;
+      }
+    } catch (error) {
+      if (error?.name === "AbortError" || pollController.signal.aborted || isIdentityStale(epoch, expectedUserId)) {
+        return;
+      }
+      if (activeAskPollController === pollController) activeAskPollController = null;
+      if (activeAskRunMeta?.chatId === chatId) activeAskRunMeta = null;
+      state.askLoading = false;
+      state.askMessages = state.askMessages.filter((m) => m && !m.isStreaming);
+      state.askError = isEn ? "The background response could not be recovered." : "Arxa planda tamamlanan cavabı yükləmək mümkün olmadı.";
+      render();
+      return;
+    }
+  }
+}
+
 async function openSavedChat(chatId) {
   const isEn = getLanguage() === "en";
   const epoch = state.identityEpoch;
   const expectedUserId = state.currentUser?.id || null;
+  if (typeof stopAskRunPolling === "function") stopAskRunPolling();
   try {
     const data = await api(`/api/ask/chats/${chatId}`);
     if (epoch !== state.identityEpoch || (state.currentUser?.id || null) !== expectedUserId) return;
-    if (!data.chat) return;
-    rememberSavedAskChat(data.chat);
-    const msgs = data.chat.messages || [];
+    if (!data.chat && !data.activeRun) return;
+    if (data.chat) {
+      rememberSavedAskChat(data.chat);
+    } else if (data.activeRun?.chatId) {
+      state.askChatId = data.activeRun.chatId;
+      rememberActiveAskChat(data.activeRun.chatId);
+    }
+    const msgs = Array.isArray(data.chat?.messages) ? [...data.chat.messages] : [];
+    const activeRun = data.activeRun && data.activeRun.status === "running" ? data.activeRun : null;
+    if (!data.chat && activeRun?.promptPreview) {
+      msgs.push({ role: "user", content: activeRun.promptPreview });
+    }
     const isResearchChat = msgs.length > 0 && msgs.some((m) => m && (m.type === "research" || m.jobId)) && !msgs.some((m) => m && m.role === "assistant" && m.type !== "research" && !m.jobId);
-    state.currentChatId = data.chat.id;
+    state.currentChatId = data.chat?.id || chatId;
     if (isResearchChat) {
       state.view = "deep-research";
       state.deepResearchChatId = data.chat.id;
@@ -14363,16 +14509,48 @@ async function openSavedChat(chatId) {
     } else {
       state.mode = "ask";
       state.view = "home";
-      state.askChatId = data.chat.id;
-      state.askMessages = msgs;
+      state.askChatId = data.chat?.id || chatId;
       state.askPluginIds = [];
       state.askArtifactId = null;
       state.askArtifactName = "";
       state.askRetry = null;
-      state.askStrategyId = data.chat.strategyId || "";
-      state.askBriefId = data.chat.briefId || "";
-      state.askTaskId = data.chat.taskId || "";
+      state.askStrategyId = data.chat?.strategyId || "";
+      state.askBriefId = data.chat?.briefId || "";
+      state.askTaskId = data.chat?.taskId || "";
       state.askError = "";
+      if (activeRun) {
+        const pendingAssistant = {
+          role: "assistant",
+          content: "",
+          model: activeRun.model || "gemini-4-hydrogen",
+          isStreaming: true,
+          status: "thinking",
+          statusText: isEn ? "Generating response..." : "Cavab hazırlanır...",
+        };
+        msgs.push(pendingAssistant);
+        state.askMessages = msgs;
+        state.askLoading = true;
+        if (typeof activeAskRunMeta !== "undefined") {
+          activeAskRunMeta = {
+            runId: activeRun.runId,
+            chatId: state.askChatId,
+            idempotencyKey: null,
+            surface: "ask",
+          };
+        }
+        if (typeof syncWorkspaceRoute === "function") syncWorkspaceRoute("home");
+        syncMode();
+        syncNav();
+        render();
+        closeSidebar();
+        startAskWaitStages(pendingAssistant);
+        if (typeof pollActiveAskRun === "function") {
+          pollActiveAskRun(state.askChatId, activeRun.runId, epoch, expectedUserId).catch(() => { });
+        }
+        return;
+      }
+      state.askMessages = msgs;
+      state.askLoading = false;
       if (typeof syncWorkspaceRoute === "function") syncWorkspaceRoute("home");
     }
     syncMode();
@@ -14512,6 +14690,10 @@ function clearUserScopedWorkspaceState() {
   state.askFileReadController = null;
   window.HelmerArtifacts?.closePreviews?.();
   closeSearchModal();
+  if (typeof closeLegalModal === "function") closeLegalModal();
+  if (typeof closeUserProfileMenu === "function") closeUserProfileMenu();
+  if (typeof closePlannerNotificationSheet === "function") closePlannerNotificationSheet();
+  if (typeof hideRailArchivePopover === "function") hideRailArchivePopover(true);
   if (typeof stopBuildCountdown === "function") stopBuildCountdown();
   if (typeof stopBuildIntelligence === "function") stopBuildIntelligence();
   if (typeof stopAskPlaceholderAnimation === "function") stopAskPlaceholderAnimation();
@@ -14544,6 +14726,8 @@ function clearUserScopedWorkspaceState() {
     try { currentAskAbortController.abort(); } catch {}
     currentAskAbortController = null;
   }
+  if (typeof stopAskRunPolling === "function") stopAskRunPolling();
+  if (typeof activeAskRunMeta !== "undefined") activeAskRunMeta = null;
   if (activeAskReader) {
     try { activeAskReader.cancel().catch(() => {}); } catch {}
     activeAskReader = null;
@@ -14570,7 +14754,7 @@ function clearUserScopedWorkspaceState() {
     document.querySelectorAll(".planner-modal-overlay").forEach((el) => el._closeModal ? el._closeModal() : el.remove());
     document.querySelector(".analysis-history-overlay")?.remove();
     document.querySelectorAll(".ask-sources-drawer-overlay").forEach(node => node._closeSources ? node._closeSources() : node.remove());
-    document.querySelectorAll(".planner-visit-toast").forEach(node => node.remove());
+    document.querySelectorAll(".planner-visit-toast, .planner-notif-popover, .archive-modal-overlay").forEach(node => node.remove());
   } catch {}
 
   // Clear Build state
@@ -14665,6 +14849,13 @@ function clearUserScopedWorkspaceState() {
 
   try {
     localStorage.removeItem("helmer_bg_jobs");
+    localStorage.removeItem("helmer_model_improvement");
+    localStorage.removeItem("helmer_personal_intelligence");
+    localStorage.removeItem("helmer_auto_save_strategies");
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("helmer_brief_fb_")) localStorage.removeItem(k);
+    }
   } catch {}
   try {
     sessionStorage.removeItem("helmer_active_ask_chat");
@@ -14683,10 +14874,9 @@ window.addEventListener("helmer:logout", () => {
 });
 
 window.addEventListener("helmer:auth-required", () => {
-  if (state.currentUser) {
-    state.currentUser = null;
-    clearUserScopedWorkspaceState();
-  }
+  state.currentUser = null;
+  clearUserScopedWorkspaceState();
+  render();
 });
 
 window.addEventListener("helmer:user-changed", (event) => {
@@ -19653,9 +19843,8 @@ function openDeleteAccountModal() {
     confirmBtn.textContent = isEn ? "Requesting deletion…" : "Silinmə tələb edilir…";
     try {
       const deletionProof = await window.helmerSecurity.reauthenticate();
-      await authRequest("/api/auth/account/delete-request", { method: "POST", body: deletionProof });
+      await authRequest("/api/auth/account/delete-request", { method: "POST", body: JSON.stringify(deletionProof) });
       closeLegalModal();
-      state.currentUser = null;
       showToast(isEn ? "Your account has entered the 14-day deletion grace period." : "Hesabınız 14 günlük silinmə rejiminə keçirildi. 14 gün ərzində daxil olmasanız, hesabınız birdəfəlik silinəcək.", "info");
       window.dispatchEvent(new CustomEvent("helmer:auth-required"));
     } catch (err) {
@@ -21376,6 +21565,14 @@ initializeAuthentication(async (user) => {
   if (expectedUserId && previousAskChat?.ownerId === expectedUserId &&
       /^[0-9a-f-]{36}$/i.test(previousAskChat.chatId) && state.mode === "ask" && state.view === "home" && !state.askMessages.length) {
     openSavedChat(previousAskChat.chatId).catch(() => { });
+  } else if (expectedUserId && state.mode === "ask" && state.view === "home" && !state.askMessages.length) {
+    api("/api/ask/runs/active").then((res) => {
+      if (isIdentityStale(epoch, expectedUserId) || state.askMessages.length || state.askChatId) return;
+      const activeChatId = res?.runs?.find((r) => r && /^[0-9a-f-]{36}$/i.test(r.chatId))?.chatId;
+      if (activeChatId) {
+        openSavedChat(activeChatId).catch(() => { });
+      }
+    }).catch(() => { });
   }
   if (user) {
     resumeBackgroundJobs();

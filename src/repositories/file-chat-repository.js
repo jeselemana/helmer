@@ -14,9 +14,9 @@ import {
 } from "../http/r2-storage.js";
 import { TenantLockManager } from "./tenant-lock.js";
 import { storageCorruption, writeJsonAtomically } from "./atomic-json-store.js";
-import { invalidateUserContextCache } from "../services/ai/personal-context.js";
+import { invalidateUserContextCache, syncCachedTenantChats } from "../services/ai/personal-context.js";
 
-import { isWithinGroundedRetention, pruneExpiredGroundedResults } from "../services/ai/grounded-chat-retention.js";
+import { isWithinGroundedRetention, isGroundedAssistantMessage, pruneExpiredGroundedResults } from "../services/ai/grounded-chat-retention.js";
 
 export class FileChatRepository {
   /**
@@ -190,7 +190,7 @@ export class FileChatRepository {
     const isCloud = this.cloud ?? isR2Configured();
     for (const [ownerId, records] of byOwner.entries()) {
       const tenantKey = this.tenantKey(ownerId);
-      const { records: existing, etag, tombstone } = await this.readTenantDataWithEtag(ownerId, tenantKey).catch(() => ({ records: [], etag: null, tombstone: false }));
+      const { records: existing, etag, tombstone } = await this.readTenantDataWithEtag(ownerId, tenantKey, { coalesce: false }).catch(() => ({ records: [], etag: null, tombstone: false }));
       if (tombstone) {
         continue;
       }
@@ -226,13 +226,16 @@ export class FileChatRepository {
         let currentMerged = merged;
         for (let attempt = 0; attempt < 5; attempt++) {
           try {
+            this.inFlightTenantReads.delete(tenantKey);
             const success = await this.writeCloud(tenantKey, currentMerged, currentEtag);
+            this.inFlightTenantReads.delete(tenantKey);
             if (success) {
               merged = currentMerged;
               committed = true;
               break;
             }
           } catch (err) {
+            this.inFlightTenantReads.delete(tenantKey);
             console.error(`Failed to migrate shard to R2 for tenant ${tenantKey}:`, err?.message || err);
             break;
           }
@@ -339,9 +342,13 @@ export class FileChatRepository {
    * @param {string} tenantKey
    * @returns {Promise<{ records: any[], etag: string | null, tombstone?: boolean, deletedAt?: string }>}
    */
-  async readCloudSnapshot(tenantKey, { clone = true } = {}) {
+  async readCloudSnapshot(tenantKey, { clone = true, coalesce = true } = {}) {
     // Coalesce only the remote read, never the following local mirror writes.
     // A later authorization must not join a snapshot already received from R2.
+    if (!coalesce) {
+      const res = await this.readCloud(tenantKey, { force: true, clone: false });
+      return clone ? structuredClone(res) : res;
+    }
     let pending = this.inFlightTenantReads.get(tenantKey);
     if (!pending) {
       pending = Promise.resolve().then(() => this.readCloud(tenantKey, { force: true, clone: false }));
@@ -368,20 +375,22 @@ export class FileChatRepository {
           return { records: [], etag, tombstone: true, deletedAt: record?.deletedAt };
         }
         if (record && Array.isArray(record)) {
-          const tagKey = etag
-            ? `${etag}:${record.length}:${record[0]?.id || ""}:${record[0]?.updatedAt || ""}:${record.at(-1)?.id || ""}:${record.at(-1)?.updatedAt || ""}`
-            : createHash("sha256").update(JSON.stringify(record)).digest("hex");
-          if (this.syncedShardTags.get(tenantKey) !== tagKey) {
-            const cached = record.map(chat => {
-              const view = { ...chat };
-              pruneExpiredGroundedResults(view);
-              return view;
-            });
-            await this.writeLocalTenant(tenantKey, cached).catch(() => {});
-            if (this.redis?.isReady) {
-              await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(cached)).catch(() => {});
+          if (options.syncMirrors !== false) {
+            const tagKey = etag
+              ? `${etag}:${record.length}:${record[0]?.id || ""}:${record[0]?.updatedAt || ""}:${record.at(-1)?.id || ""}:${record.at(-1)?.updatedAt || ""}`
+              : createHash("sha256").update(JSON.stringify(record)).digest("hex");
+            if (this.syncedShardTags.get(tenantKey) !== tagKey) {
+              const cached = record.map(chat => {
+                const view = { ...chat };
+                pruneExpiredGroundedResults(view);
+                return view;
+              });
+              await this.writeLocalTenant(tenantKey, cached).catch(() => {});
+              if (this.redis?.isReady) {
+                await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(cached)).catch(() => {});
+              }
+              this.syncedShardTags.set(tenantKey, tagKey);
             }
-            this.syncedShardTags.set(tenantKey, tagKey);
           }
           return { records: record, etag, tombstone: false };
         }
@@ -410,7 +419,7 @@ export class FileChatRepository {
       }
       if (!Array.isArray(parsed)) throw storageCorruption("Invalid tenant shard structure.");
       const records = parsed;
-      if (records.length > 0 && this.redis?.isReady) {
+      if (records.length > 0 && this.redis?.isReady && options.syncMirrors !== false) {
         const digest = createHash("sha256").update(raw).digest("hex");
         if (this.syncedShardTags.get(tenantKey) !== digest) {
           await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(records)).catch(() => {});
@@ -461,7 +470,7 @@ export class FileChatRepository {
    * @param {(records: any[]) => { updated?: any[], result?: any } | { records?: any[], result?: any } | any} mutator
    * @returns {Promise<any>}
    */
-  async mutateTenant(ownerId, mutator, { retentionTime = Date.now() } = {}) {
+  async mutateTenant(ownerId, mutator, { retentionTime = Date.now(), syncContextCache = false, onCommitted = null } = {}) {
     await this.ensureMigrated();
 
     return this.runInTenantLock(ownerId, async (tenantKey) => {
@@ -470,7 +479,7 @@ export class FileChatRepository {
       const mutationStartedAt = Date.now();
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const { records, etag, tombstone, deletedAt } = await this.readTenantDataWithEtag(ownerId, tenantKey);
+        const { records, etag, tombstone, deletedAt } = await this.readTenantDataWithEtag(ownerId, tenantKey, { coalesce: false, syncMirrors: false });
 
         if (tombstone) {
           return null;
@@ -491,11 +500,18 @@ export class FileChatRepository {
           for (const chat of records) {
             if (chat.ownerId !== ownerId) continue;
             for (const message of chat.messages || []) {
-              if (message.type !== "research" || !message.jobId ||
-                  isWithinGroundedRetention(message.createdAt || chat.createdAt, retentionTime)) continue;
-              const jobId = message.jobId;
-              const artifacts = (message.artifacts || []).map(({ id }) => ({ id }));
-              await this.cleanupQueue.enqueue(ownerId, `research-expiry:${jobId}`, "expired-research", { chatId: chat.id, jobId, artifacts });
+              if (!isGroundedAssistantMessage(message) ||
+                  isWithinGroundedRetention(message.groundedAt ?? (message.createdAt || chat.createdAt), retentionTime)) {
+                continue;
+              }
+              const artifacts = (message.artifacts || []).filter((a) => a?.id).map(({ id }) => ({ id }));
+              if (message.type === "research" && message.jobId) {
+                const jobId = message.jobId;
+                await this.cleanupQueue.enqueue(ownerId, `research-expiry:${jobId}`, "expired-research", { chatId: chat.id, jobId, artifacts });
+              } else if (artifacts.length > 0) {
+                const msgKey = message.id || artifacts[0].id;
+                await this.cleanupQueue.enqueue(ownerId, `grounded-artifacts-expiry:${chat.id}:${msgKey}`, "expired-research", { chatId: chat.id, jobId: null, artifacts });
+              }
             }
           }
         }
@@ -505,7 +521,9 @@ export class FileChatRepository {
 
         // Perform R2 conditional PUT with OCC ETag
         if (isCloud) {
+          this.inFlightTenantReads.delete(tenantKey);
           const success = await this.writeCloud(tenantKey, nextRecords, etag);
+          this.inFlightTenantReads.delete(tenantKey);
           if (!success) {
             // Precondition failed (412/409): wait with exponential jitter and retry
             await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 40) + attempt * 25));
@@ -513,18 +531,31 @@ export class FileChatRepository {
           }
         }
 
-        // Commit to local filesystem and Redis
+        // Commit to local filesystem, Redis mirror, and optional post-commit hook
+        this.inFlightTenantReads.delete(tenantKey);
         this.syncedShardTags.delete(tenantKey);
-        invalidateUserContextCache(ownerId);
-        await this.writeLocalTenant(tenantKey, nextRecords);
-
-        if (this.redis?.isReady) {
-          try {
-            await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(nextRecords));
-          } catch (err) {
-            console.error(`Redis chat write error (${ownerId}):`, err?.message || err);
+        if (syncContextCache) syncCachedTenantChats(ownerId, nextRecords);
+        else invalidateUserContextCache(ownerId);
+        const syncRedisMirror = async () => {
+          if (this.redis?.isReady) {
+            try {
+              await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(nextRecords));
+            } catch (err) {
+              console.error(`Redis chat write error (${ownerId}):`, err?.message || err);
+            }
           }
+        };
+        if (!isCloud) {
+          await this.writeLocalTenant(tenantKey, nextRecords);
         }
+        const postCommitTasks = [
+          ...(isCloud ? [this.writeLocalTenant(tenantKey, nextRecords)] : []),
+          syncRedisMirror(),
+          ...(typeof onCommitted === "function" ? [Promise.resolve().then(() => onCommitted(returnValue))] : []),
+        ];
+        const settled = await Promise.allSettled(postCommitTasks);
+        const rejected = settled.find((item) => item.status === "rejected");
+        if (rejected) throw rejected.reason;
 
         return returnValue;
       }
@@ -774,9 +805,9 @@ export class FileChatRepository {
    * @param {string} ownerId
    * @returns {Promise<any | null>}
    */
-  async getById(id, ownerId) {
+  async getById(id, ownerId, options = {}) {
     if (!id || !ownerId) return null;
-    const records = await this.readTenant(ownerId, { clone: false });
+    const records = await this.readTenant(ownerId, { clone: false, ...options });
     const found = records.find((record) => record.id === id && record.ownerId === ownerId) || null;
     return found ? structuredClone(found) : null;
   }
@@ -804,41 +835,66 @@ export class FileChatRepository {
     if (!chatId || !/^[0-9a-f-]{36}$/i.test(chatId) || !ownerId) return true;
     const ownerHash = this.tenantKey(ownerId);
     const isCloud = this.cloud ?? isR2Configured();
+    const canCloud = isCloud && typeof this.writeChatOwnerIndex === "function";
+    const canRedis = Boolean(this.redis?.isReady && typeof this.redis.set === "function");
 
-    if (isCloud && typeof this.writeChatOwnerIndex === "function") {
-      if (overwrite && typeof this.readChatOwnerIndex === "function") {
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const existing = await this.readChatOwnerIndex(chatId).catch(() => null);
-          if (existing?.record?.ownerHash === ownerHash) break;
-          const written = await this.writeChatOwnerIndex(chatId, { ownerHash }, existing?.etag || null).catch(() => false);
-          if (written) break;
-        }
-      } else {
-        const written = await this.writeChatOwnerIndex(chatId, { ownerHash }, null).catch(() => false);
-        if (!written && typeof this.readChatOwnerIndex === "function") {
-          const existing = await this.readChatOwnerIndex(chatId).catch(() => null);
-          if (existing?.record?.ownerHash && existing.record.ownerHash !== ownerHash) {
-            return false;
+    if (!overwrite && canCloud && canRedis) {
+      const [cloudOutcome, redisOutcome] = await Promise.all([
+        this.writeChatOwnerIndex(chatId, { ownerHash }, null).catch(() => false),
+        this.redis.set(this.chatOwnerRedisKey(chatId), ownerHash, { NX: true }).catch(() => "REDIS_ERR"),
+      ]);
+      if (!cloudOutcome && typeof this.readChatOwnerIndex === "function") {
+        const existing = await this.readChatOwnerIndex(chatId).catch(() => null);
+        const existingOwnerHash = existing?.record?.ownerHash;
+        if (existingOwnerHash && existingOwnerHash !== ownerHash) {
+          if (redisOutcome && redisOutcome !== "REDIS_ERR") {
+            await this.redis.set(this.chatOwnerRedisKey(chatId), existingOwnerHash).catch(() => {});
           }
+          return false;
         }
       }
-    }
-
-    if (this.redis?.isReady && typeof this.redis.set === "function") {
-      try {
-        if (overwrite) {
-          await this.redis.set(this.chatOwnerRedisKey(chatId), ownerHash);
+      if (!redisOutcome && typeof this.redis.get === "function") {
+        const existingOwner = await this.redis.get(this.chatOwnerRedisKey(chatId)).catch(() => null);
+        if (existingOwner && existingOwner !== ownerHash) {
+          return false;
+        }
+      }
+    } else {
+      if (canCloud) {
+        if (overwrite && typeof this.readChatOwnerIndex === "function") {
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const existing = await this.readChatOwnerIndex(chatId).catch(() => null);
+            if (existing?.record?.ownerHash === ownerHash) break;
+            const written = await this.writeChatOwnerIndex(chatId, { ownerHash }, existing?.etag || null).catch(() => false);
+            if (written) break;
+          }
         } else {
-          const ok = await this.redis.set(this.chatOwnerRedisKey(chatId), ownerHash, { NX: true });
-          if (!ok && typeof this.redis.get === "function") {
-            const existingOwner = await this.redis.get(this.chatOwnerRedisKey(chatId));
-            if (existingOwner && existingOwner !== ownerHash) {
+          const written = await this.writeChatOwnerIndex(chatId, { ownerHash }, null).catch(() => false);
+          if (!written && typeof this.readChatOwnerIndex === "function") {
+            const existing = await this.readChatOwnerIndex(chatId).catch(() => null);
+            if (existing?.record?.ownerHash && existing.record.ownerHash !== ownerHash) {
               return false;
             }
           }
         }
-      } catch {
-        // Fall back cleanly on transient Redis error
+      }
+
+      if (canRedis) {
+        try {
+          if (overwrite) {
+            await this.redis.set(this.chatOwnerRedisKey(chatId), ownerHash);
+          } else {
+            const ok = await this.redis.set(this.chatOwnerRedisKey(chatId), ownerHash, { NX: true });
+            if (!ok && typeof this.redis.get === "function") {
+              const existingOwner = await this.redis.get(this.chatOwnerRedisKey(chatId));
+              if (existingOwner && existingOwner !== ownerHash) {
+                return false;
+              }
+            }
+          }
+        } catch {
+          // Fall back cleanly on transient Redis error
+        }
       }
     }
 
@@ -886,29 +942,18 @@ export class FileChatRepository {
       // Index entry absent locally
     }
 
-    if (this.redis?.isReady && typeof this.redis.get === "function") {
-      try {
-        const indexedOwner = await this.redis.get(this.chatOwnerRedisKey(validId));
-        if (typeof indexedOwner === "string" && indexedOwner.length > 0) {
-          if (!excludeTenantKey || indexedOwner !== excludeTenantKey) {
-            return true;
-          }
-        }
-      } catch {
-        // Ignore transient Redis error
-      }
+    const canRedis = Boolean(this.redis?.isReady && typeof this.redis.get === "function");
+    const canCloud = Boolean((this.cloud ?? isR2Configured()) && typeof this.readChatOwnerIndex === "function");
+    const [indexedOwner, cloudSnap] = await Promise.all([
+      canRedis ? this.redis.get(this.chatOwnerRedisKey(validId)).catch(() => null) : Promise.resolve(null),
+      canCloud ? this.readChatOwnerIndex(validId).catch(() => null) : Promise.resolve(null),
+    ]);
+    if (typeof indexedOwner === "string" && indexedOwner.length > 0 && (!excludeTenantKey || indexedOwner !== excludeTenantKey)) {
+      return true;
     }
-
-    if ((this.cloud ?? isR2Configured()) && typeof this.readChatOwnerIndex === "function") {
-      try {
-        const snap = await this.readChatOwnerIndex(validId);
-        const ownerHash = snap?.record?.ownerHash;
-        if (ownerHash && (!excludeTenantKey || ownerHash !== excludeTenantKey)) {
-          return true;
-        }
-      } catch {
-        // Ignore transient R2 index error
-      }
+    const ownerHash = cloudSnap?.record?.ownerHash;
+    if (ownerHash && (!excludeTenantKey || ownerHash !== excludeTenantKey)) {
+      return true;
     }
 
     return false;
@@ -917,9 +962,10 @@ export class FileChatRepository {
   /**
    * Save or update a chat for a tenant.
    */
-  async saveChat({ id, ownerId, title, messages, appendMessages, strategyId, briefId, taskId, mustExist = false, expectedRevision = null }) {
+  async saveChat({ id, ownerId, title, messages, appendMessages, strategyId, briefId, taskId, mustExist = false, expectedRevision = null, onCommitted = null }) {
     if (!ownerId) throw new Error("ownerId is required to save chat");
     await this.ensureMigrated();
+    const isCloud = this.cloud ?? isR2Configured();
 
     return this.mutateTenant(ownerId, async (records) => {
       const now = new Date().toISOString();
@@ -927,7 +973,13 @@ export class FileChatRepository {
       if (existingIndex < 0) guestQuota(records, ownerId, 10, 1);
       if (existingIndex >= 0 && !guestVisible(records[existingIndex], ownerId)) throw Object.assign(new Error("Conversation expired"), { status: 404 });
       if (existingIndex >= 0 && records[existingIndex].deleted) throw Object.assign(new Error("Conversation removed"), { status: 404, code: "NOT_FOUND" });
-      if (existingIndex >= 0 && expectedRevision !== null && (records[existingIndex].revision || 1) !== expectedRevision) throw Object.assign(new Error("Conversation changed"), { status: 409, code: "REVISION_CONFLICT" });
+      if (existingIndex >= 0 && expectedRevision !== null && (records[existingIndex].revision || 1) !== expectedRevision) {
+        throw Object.assign(new Error("Conversation changed"), {
+          status: 409,
+          code: "REVISION_CONFLICT",
+          revision: records[existingIndex].revision || 1,
+        });
+      }
       if (mustExist && existingIndex < 0) {
         throw new Error("Conversation was removed during execution");
       }
@@ -954,9 +1006,12 @@ export class FileChatRepository {
 
       const validId = id && /^[0-9a-f-]{36}$/i.test(id) ? id : null;
       let chatId = null;
-      if (validId && !records.some((r) => r.id === validId) && !(await this.hasChatIdInOtherShards(validId, ownerId))) {
-        const reserved = await this.reserveChatOwnerIndex(validId, ownerId);
-        if (reserved) chatId = validId;
+      if (validId && !records.some((r) => r.id === validId)) {
+        const needsExplicitCheck = (!isCloud && !this.redis?.isReady) || Object.hasOwn(this, "hasChatIdInOtherShards");
+        if (!needsExplicitCheck || !(await this.hasChatIdInOtherShards(validId, ownerId))) {
+          const reserved = await this.reserveChatOwnerIndex(validId, ownerId);
+          if (reserved) chatId = validId;
+        }
       }
       if (!chatId) {
         chatId = randomUUID();
@@ -980,7 +1035,7 @@ export class FileChatRepository {
       pruneExpiredGroundedResults(newRecord);
       records.push(newRecord);
       return { updated: records, result: newRecord };
-    });
+    }, { syncContextCache: true, onCommitted });
   }
 
   /**
@@ -1052,7 +1107,7 @@ export class FileChatRepository {
 
     return this.withTenantLocks(previousOwnerId, ownerId, async () => {
       // 1. Read guest records with ETag
-      const guestData = await this.readTenantDataWithEtag(previousOwnerId, guestKey);
+      const guestData = await this.readTenantDataWithEtag(previousOwnerId, guestKey, { coalesce: false });
       const guestRecords = Array.isArray(guestData.records)
         ? guestData.records
             .filter(record => !record.deleted && guestVisible(record, previousOwnerId))
@@ -1073,7 +1128,7 @@ export class FileChatRepository {
       let committed = false;
 
       for (let attempt = 0; attempt < maxRetries; attempt++) {
-        const destData = await this.readTenantDataWithEtag(ownerId, userKey);
+        const destData = await this.readTenantDataWithEtag(ownerId, userKey, { coalesce: false });
         if (destData.tombstone) {
           throw new Error("Cannot migrate to a tombstoned/deleted tenant account");
         }
@@ -1105,19 +1160,23 @@ export class FileChatRepository {
 
         if (isCloud) {
           try {
+            this.inFlightTenantReads.delete(userKey);
             const success = await this.writeCloud(userKey, userRecords, destData.etag);
+            this.inFlightTenantReads.delete(userKey);
             if (!success) {
               // OCC conflict on destination shard! Wait and retry
               await new Promise((r) => setTimeout(r, 20 * Math.pow(2, attempt) + Math.random() * 20));
               continue;
             }
           } catch (err) {
+            this.inFlightTenantReads.delete(userKey);
             console.error(`Failed to write migrated shard to R2 for tenant ${userKey}:`, err?.message || err);
             throw err;
           }
         }
 
         // Commit updated user shard locally and to Redis AFTER authoritative cloud write
+        this.inFlightTenantReads.delete(userKey);
         this.syncedShardTags.delete(userKey);
         await this.writeLocalTenant(userKey, userRecords);
 
@@ -1137,29 +1196,64 @@ export class FileChatRepository {
       }
 
       // 3. Purge/cleanup old guest shard ONLY after destination is confirmed written!
-      // Check if parallel writes added new unmigrated records to guest shard
-      const freshGuestData = await this.readTenantDataWithEtag(previousOwnerId, guestKey).catch(() => ({ records: [] }));
-      const freshGuestRecords = Array.isArray(freshGuestData.records) ? freshGuestData.records : [];
+      // Check with OCC retry if parallel writes added new unmigrated records to guest shard.
       const migratedIds = new Set(guestRecords.map((r) => r.id));
-      const unmigratedGuestRecords = freshGuestRecords.filter((r) => !migratedIds.has(r.id));
-
-      if (unmigratedGuestRecords.length > 0) {
-        // Parallel write added new records to guest shard: preserve unmigrated records!
-        await this.writeLocalTenant(guestKey, unmigratedGuestRecords);
-        if (isCloud) {
-          await this.writeCloud(guestKey, unmigratedGuestRecords, freshGuestData.etag).catch(() => {});
+      if (isCloud) {
+        const cleanupMaxRetries = 5;
+        let guestRemaining = [];
+        let guestCleaned = false;
+        for (let attempt = 0; attempt < cleanupMaxRetries; attempt++) {
+          const freshGuestData = await this.readTenantDataWithEtag(previousOwnerId, guestKey, { coalesce: false }).catch(() => null);
+          if (!freshGuestData || freshGuestData.tombstone || (freshGuestData.etag === null && (!Array.isArray(freshGuestData.records) || freshGuestData.records.length === 0))) {
+            guestRemaining = [];
+            guestCleaned = true;
+            break;
+          }
+          const freshGuestRecords = Array.isArray(freshGuestData.records) ? freshGuestData.records : [];
+          const unmigrated = freshGuestRecords.filter((r) => !migratedIds.has(r.id));
+          guestRemaining = unmigrated;
+          this.inFlightTenantReads.delete(guestKey);
+          const written = await this.writeCloud(guestKey, unmigrated, freshGuestData.etag).catch(() => false);
+          this.inFlightTenantReads.delete(guestKey);
+          if (written) {
+            guestCleaned = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 20 * Math.pow(2, attempt) + Math.random() * 20));
         }
-        if (this.redis?.isReady) {
-          await this.redis.set(this.tenantRedisKey(previousOwnerId), JSON.stringify(unmigratedGuestRecords)).catch(() => {});
+        if (guestCleaned) {
+          this.syncedShardTags.delete(guestKey);
+          if (guestRemaining.length > 0) {
+            await this.writeLocalTenant(guestKey, guestRemaining);
+            if (this.redis?.isReady) {
+              await this.redis.set(this.tenantRedisKey(previousOwnerId), JSON.stringify(guestRemaining)).catch(() => {});
+            }
+          } else {
+            await fs.rm(this.tenantFilePath(guestKey), { force: true }).catch(() => {});
+            if (this.redis?.isReady) {
+              await this.redis.del(this.tenantRedisKey(previousOwnerId)).catch(() => {});
+            }
+          }
         }
       } else {
-        // Safely remove guest shard
-        await fs.rm(this.tenantFilePath(guestKey), { force: true }).catch(() => {});
-        if (this.redis?.isReady) {
-          await this.redis.del(this.tenantRedisKey(previousOwnerId)).catch(() => {});
-        }
-        if (isCloud) {
-          await this.deleteCloud(guestKey).catch(() => {});
+        const freshGuestData = await this.readTenantDataWithEtag(previousOwnerId, guestKey, { coalesce: false }).catch(() => ({ records: [] }));
+        const freshGuestRecords = Array.isArray(freshGuestData.records) ? freshGuestData.records : [];
+        const unmigratedGuestRecords = freshGuestRecords.filter((r) => !migratedIds.has(r.id));
+
+        if (unmigratedGuestRecords.length > 0) {
+          // Parallel write added new records to guest shard: preserve unmigrated records!
+          this.syncedShardTags.delete(guestKey);
+          await this.writeLocalTenant(guestKey, unmigratedGuestRecords);
+          if (this.redis?.isReady) {
+            await this.redis.set(this.tenantRedisKey(previousOwnerId), JSON.stringify(unmigratedGuestRecords)).catch(() => {});
+          }
+        } else {
+          // Safely remove guest shard
+          this.syncedShardTags.delete(guestKey);
+          await fs.rm(this.tenantFilePath(guestKey), { force: true }).catch(() => {});
+          if (this.redis?.isReady) {
+            await this.redis.del(this.tenantRedisKey(previousOwnerId)).catch(() => {});
+          }
         }
       }
 
@@ -1181,7 +1275,7 @@ export class FileChatRepository {
     await this.ensure();
 
     return this.runInTenantLock(ownerId, async (tenantKey) => {
-      const { records, etag } = await this.readTenantDataWithEtag(ownerId, tenantKey);
+      const { records, etag } = await this.readTenantDataWithEtag(ownerId, tenantKey, { coalesce: false });
       const count = Array.isArray(records) ? records.length : 0;
       const now = new Date().toISOString();
 
@@ -1214,15 +1308,18 @@ export class FileChatRepository {
 
         for (let attempt = 0; attempt < maxRetries; attempt++) {
           try {
+            this.inFlightTenantReads.delete(tenantKey);
             written = await this.writeCloud(tenantKey, tombstoneRecord, currentEtag);
+            this.inFlightTenantReads.delete(tenantKey);
             if (written) break;
           } catch (err) {
+            this.inFlightTenantReads.delete(tenantKey);
             console.error(`Failed to write tombstone to R2 for chat tenant ${tenantKey}:`, err?.message || err);
             throw err;
           }
 
           // Conflict: re-read to get fresh ETag
-          const fresh = await this.readTenantDataWithEtag(ownerId, tenantKey);
+          const fresh = await this.readTenantDataWithEtag(ownerId, tenantKey, { coalesce: false });
           if (fresh.tombstone) {
             written = true;
             break;

@@ -598,7 +598,7 @@ export class FileUserRepository {
           }
           successfullyPurgedIds.add(userId);
         } catch (err) {
-          console.error(`Error cascading data deletion for expired user ${userId}:`, err);
+          console.error(`Error cascading data deletion for expired user ${userId}:`, { name: err?.name, code: err?.code });
         }
       }
 
