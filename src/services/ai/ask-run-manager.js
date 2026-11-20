@@ -1,7 +1,9 @@
+import { resolveAskModelRoute } from './ask-routing.js';
 import { createHash } from "node:crypto";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOCAL_CANCEL_TOMBSTONE_TTL_MS = 30 * 1000;
+const FAILED_RUN_TTL_SECONDS = 120;
 
 function hashIdempotencyKey(value) {
   if (!value || typeof value !== "string") return "";
@@ -14,9 +16,22 @@ function sanitizeRunMetadata(record) {
     runId: record.runId,
     chatId: record.chatId || null,
     status: record.status || "running",
-    model: record.model || "gemini-4-hydrogen",
-    promptPreview: typeof record.promptPreview === "string" ? record.promptPreview : "",
+    model: record.model || resolveAskModelRoute(),
+    promptPreview: "",
     startedAt: record.startedAt,
+  };
+}
+
+function sanitizeFailedRunMetadata(record) {
+  if (!record || typeof record !== "object") return null;
+  return {
+    runId: record.runId || null,
+    chatId: record.chatId || null,
+    status: "failed",
+    code: typeof record.code === "string" && record.code ? record.code : "ASK_ERROR",
+    error: typeof record.error === "string" && record.error ? record.error : "Sorğunu tamamlamaq mümkün olmadı.",
+    promptPreview: "",
+    failedAt: record.failedAt || null,
   };
 }
 
@@ -35,6 +50,15 @@ async function safeRedisGet(redis, key) {
     return await redis.get(key);
   } catch {
     return null;
+  }
+}
+
+async function safeRedisDel(redis, key) {
+  if (!redis?.isReady || !key || typeof redis.del !== "function") return;
+  try {
+    await redis.del(key);
+  } catch {
+    // Best-effort cleanup; TTL bounds lifetime
   }
 }
 
@@ -60,17 +84,26 @@ async function safeRedisDelIfEqual(redis, key, expectedValue) {
 export function createAskRunManager({ redis = null, cancelPollIntervalMs = 500 } = {}) {
   const runsById = new Map();
   const recentCancels = new Map(); // key -> { ts: number, expiresAt: number }
+  const failedRunsByChat = new Map(); // `${ownerId}:${chatId}` -> { record, expiresAt }
 
-  const activeRunKey = (ownerId, runId) => `helmer:ask:run:${ownerId}:${runId}`;
-  const activeChatKey = (ownerId, chatId) => `helmer:ask:active-chat:${ownerId}:${chatId}`;
-  const latestRunKey = (ownerId) => `helmer:ask:latest-run:${ownerId}`;
-  const cancelRunKey = (ownerId, runId) => `helmer:ask:cancel:${ownerId}:${runId}`;
-  const cancelChatKey = (ownerId, chatId) => `helmer:ask:cancel-chat:${ownerId}:${chatId}`;
-  const cancelIdemKey = (ownerId, idemHash) => `helmer:ask:cancel-idem:${ownerId}:${idemHash}`;
+  const keyTag = (ownerId) => `{helmer:ask:${ownerId}}`;
+  const activeRunKey = (ownerId, runId) => `${keyTag(ownerId)}:run:${runId}`;
+  const activeChatKey = (ownerId, chatId) => `${keyTag(ownerId)}:active-chat:${chatId}`;
+  const latestRunKey = (ownerId) => `${keyTag(ownerId)}:latest-run`;
+  const cancelRunKey = (ownerId, runId) => `${keyTag(ownerId)}:cancel:${runId}`;
+  const cancelChatKey = (ownerId, chatId) => `${keyTag(ownerId)}:cancel-chat:${chatId}`;
+  const cancelIdemKey = (ownerId, idemHash) => `${keyTag(ownerId)}:cancel-idem:${idemHash}`;
+  const failedChatKey = (ownerId, chatId) => `${keyTag(ownerId)}:failed-chat:${chatId}`;
 
   const pruneRecentCancels = (now = Date.now()) => {
     for (const [k, entry] of recentCancels.entries()) {
       if (!entry || entry.expiresAt <= now) recentCancels.delete(k);
+    }
+  };
+
+  const pruneFailedRuns = (now = Date.now()) => {
+    for (const [k, entry] of failedRunsByChat.entries()) {
+      if (!entry || entry.expiresAt <= now) failedRunsByChat.delete(k);
     }
   };
 
@@ -123,8 +156,7 @@ export function createAskRunManager({ redis = null, cancelPollIntervalMs = 500 }
       ownerId,
       chatId = null,
       idempotencyKey = "",
-      prompt = "",
-      model = "gemini-4-hydrogen",
+      model = resolveAskModelRoute(),
       requestTimeoutMs = 180000,
       requestStartedAt = Date.now(),
       onCancel = null,
@@ -161,50 +193,78 @@ export function createAskRunManager({ redis = null, cancelPollIntervalMs = 500 }
         ownerId,
         chatId: normalizedChatId,
         status: "running",
-        model: String(model || "gemini-4-hydrogen").slice(0, 100),
-        promptPreview: String(prompt || "").trim().slice(0, 2000),
+        model: String(model || resolveAskModelRoute()).slice(0, 100),
         startedAt: new Date(requestStartedAt).toISOString(),
       };
       const serialized = JSON.stringify(metadata);
 
+      if (normalizedChatId) {
+        failedRunsByChat.delete(`${ownerId}:${normalizedChatId}`);
+      }
+
+      let luaRegistered = false;
       if (supportsAtomicLua) {
         try {
-          const keys = [
-            runCancel,
-            idemCancel || "",
-            chatCancel || "",
+          const exactCancelKeys = [runCancel, ...(idemCancel ? [idemCancel] : [])];
+          const chatCancelKeys = chatCancel ? [chatCancel] : [];
+          const writeKeys = [
             activeRunKey(ownerId, runId),
             latestRunKey(ownerId),
             ...(normalizedChatId ? [activeChatKey(ownerId, normalizedChatId)] : []),
           ];
+          const clearKeys = normalizedChatId ? [failedChatKey(ownerId, normalizedChatId)] : [];
+          const keys = [...exactCancelKeys, ...chatCancelKeys, ...writeKeys, ...clearKeys];
           const registered = await redis.eval(`
-            if redis.call('get', KEYS[1]) then return 0 end
-            if KEYS[2] ~= '' and redis.call('get', KEYS[2]) then return 0 end
-            if KEYS[3] ~= '' then
-              local raw = redis.call('get', KEYS[3])
+            local exactCount = tonumber(ARGV[4])
+            local chatCount = tonumber(ARGV[5])
+            local writeCount = tonumber(ARGV[6])
+            local clearCount = tonumber(ARGV[7])
+            local idx = 1
+            for i = 1, exactCount do
+              if redis.call('get', KEYS[idx]) then return 0 end
+              idx = idx + 1
+            end
+            for i = 1, chatCount do
+              local raw = redis.call('get', KEYS[idx])
               if raw then
                 local ts = tonumber(string.match(raw, '"ts"%s*:%s*(%d+)'))
                 if ts and ts >= tonumber(ARGV[1]) then return 0 end
               end
+              idx = idx + 1
             end
-            redis.call('set', KEYS[4], ARGV[2], 'EX', tonumber(ARGV[3]))
-            redis.call('set', KEYS[5], ARGV[2], 'EX', tonumber(ARGV[3]))
-            if KEYS[6] then
-              redis.call('set', KEYS[6], ARGV[2], 'EX', tonumber(ARGV[3]))
+            for i = 1, writeCount do
+              redis.call('set', KEYS[idx], ARGV[2], 'EX', tonumber(ARGV[3]))
+              idx = idx + 1
+            end
+            for i = 1, clearCount do
+              redis.call('del', KEYS[idx])
+              idx = idx + 1
             end
             return 1
           `, {
             keys,
-            arguments: [String(requestStartedAt), serialized, String(effectiveTtl)],
+            arguments: [
+              String(requestStartedAt),
+              serialized,
+              String(effectiveTtl),
+              String(exactCancelKeys.length),
+              String(chatCancelKeys.length),
+              String(writeKeys.length),
+              String(clearKeys.length),
+            ],
           });
           if (registered === 0) {
             onCancel?.();
             return { runId, chatId: normalizedChatId, alreadyCancelled: true, checkCancelled: async () => true, finish: async () => {} };
           }
-        } catch {
-          // Non-fatal: in-process tracking still handles the active replica
+          if (registered === 1) {
+            luaRegistered = true;
+          }
+        } catch (err) {
+          console.warn("AskRunManager Lua registration fallback:", { code: err?.code });
         }
-      } else if (await hasCancelSignal({
+      }
+      if (!luaRegistered && await hasCancelSignal({
         ownerId,
         runId,
         chatId: normalizedChatId,
@@ -246,13 +306,14 @@ export function createAskRunManager({ redis = null, cancelPollIntervalMs = 500 }
       };
       runsById.set(runId, entry);
 
-      if (!supportsAtomicLua) {
+      if (!luaRegistered) {
         const writes = [
           safeRedisSet(redis, activeRunKey(ownerId, runId), serialized, ttlSeconds),
           safeRedisSet(redis, latestRunKey(ownerId), serialized, ttlSeconds),
         ];
         if (normalizedChatId) {
           writes.push(safeRedisSet(redis, activeChatKey(ownerId, normalizedChatId), serialized, ttlSeconds));
+          writes.push(safeRedisDel(redis, failedChatKey(ownerId, normalizedChatId)));
         }
         await Promise.all(writes);
       }
@@ -278,21 +339,44 @@ export function createAskRunManager({ redis = null, cancelPollIntervalMs = 500 }
         pollTimer.unref?.();
       }
 
-      const finish = async () => {
+      const finish = async (outcome = {}) => {
         if (finished) return;
         finished = true;
         clearInterval(pollTimer);
         pollTimer = null;
         runsById.delete(runId);
 
-        const deletes = [
+        const ops = [
           safeRedisDelIfEqual(redis, activeRunKey(ownerId, runId), serialized),
           safeRedisDelIfEqual(redis, latestRunKey(ownerId), serialized),
         ];
         if (normalizedChatId) {
-          deletes.push(safeRedisDelIfEqual(redis, activeChatKey(ownerId, normalizedChatId), serialized));
+          ops.push(safeRedisDelIfEqual(redis, activeChatKey(ownerId, normalizedChatId), serialized));
+          const errorInfo = outcome?.error;
+          if (errorInfo && !cancelTriggered) {
+            const failRecord = {
+              runId,
+              ownerId,
+              chatId: normalizedChatId,
+              status: "failed",
+              code: typeof errorInfo.code === "string" && errorInfo.code.trim() ? errorInfo.code.trim().slice(0, 64) : "ASK_ERROR",
+              error: typeof errorInfo.error === "string" && errorInfo.error.trim()
+                ? errorInfo.error.trim().slice(0, 500)
+                : "Sorğunu tamamlamaq mümkün olmadı.",
+              failedAt: new Date().toISOString(),
+            };
+            pruneFailedRuns();
+            failedRunsByChat.set(`${ownerId}:${normalizedChatId}`, {
+              record: failRecord,
+              expiresAt: Date.now() + FAILED_RUN_TTL_SECONDS * 1000,
+            });
+            ops.push(safeRedisSet(redis, failedChatKey(ownerId, normalizedChatId), JSON.stringify(failRecord), FAILED_RUN_TTL_SECONDS));
+          } else {
+            failedRunsByChat.delete(`${ownerId}:${normalizedChatId}`);
+            ops.push(safeRedisDel(redis, failedChatKey(ownerId, normalizedChatId)));
+          }
         }
-        await Promise.all(deletes);
+        await Promise.all(ops);
         resolveDone();
       };
 
@@ -403,6 +487,36 @@ export function createAskRunManager({ redis = null, cancelPollIntervalMs = 500 }
       return null;
     },
 
+    async getLastRunErrorForChat(ownerId, chatId) {
+      if (!ownerId || !chatId || !UUID_RE.test(chatId)) return null;
+      const normalizedChatId = chatId.toLowerCase();
+      pruneFailedRuns();
+      const localKey = `${ownerId}:${normalizedChatId}`;
+      const local = failedRunsByChat.get(localKey);
+
+      if (redis?.isReady && typeof redis.get === "function") {
+        try {
+          const raw = await redis.get(failedChatKey(ownerId, normalizedChatId));
+          if (!raw) {
+            failedRunsByChat.delete(localKey);
+            return null;
+          }
+          const parsed = JSON.parse(raw);
+          if (parsed && parsed.ownerId === ownerId && String(parsed.chatId || "").toLowerCase() === normalizedChatId) {
+            return sanitizeFailedRunMetadata(parsed);
+          }
+          return null;
+        } catch {
+          // Fall back to local failed-run cache if Redis read transiently fails
+        }
+      }
+
+      if (local && local.record?.ownerId === ownerId && String(local.record?.chatId || "").toLowerCase() === normalizedChatId) {
+        return sanitizeFailedRunMetadata(local.record);
+      }
+      return null;
+    },
+
     async listActiveRuns(ownerId) {
       if (!ownerId) return [];
       const result = new Map();
@@ -434,6 +548,7 @@ export function createAskRunManager({ redis = null, cancelPollIntervalMs = 500 }
       }
       runsById.clear();
       recentCancels.clear();
+      failedRunsByChat.clear();
     },
   };
 }

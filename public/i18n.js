@@ -384,8 +384,8 @@ export const TRANSLATIONS = {
       },
       modelSheet: {
         title: "Model seçimi",
-        autoTitle: "Auto",
-        autoDesc: "Avtomatik intellektual rejim",
+        autoTitle: "Default",
+        autoDesc: "GPT-6.1 Terra",
         newBadge: "Yeni",
         flashTitle: "Flash",
         flashDesc: "Gündəlik işlər, veb axtarış və sürətli cavablar",
@@ -1571,8 +1571,8 @@ export const TRANSLATIONS = {
       },
       modelSheet: {
         title: "Select Model",
-        autoTitle: "Auto",
-        autoDesc: "Automatic routing",
+        autoTitle: "Default",
+        autoDesc: "GPT-6.1 Terra",
         newBadge: "New",
         flashTitle: "Flash",
         flashDesc: "For daily workflows, search & fast replies",

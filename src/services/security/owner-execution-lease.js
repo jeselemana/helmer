@@ -7,12 +7,15 @@ const localOwners = new Map();
 const redisNow = `local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)`;
 
-export function createSharedAskLeaseHandle(redis, ownerId, token) {
+export function createSharedAskLeaseHandle(redis, ownerId, token, { build = false } = {}) {
   const ownerKey = `security:owner-execution:${ownerId}`;
   const keys = [ownerKey, `${ownerKey}:ask-leases`];
+  if (build) keys.push(`${ownerKey}:build`);
   const args = [ASK_BARRIER, token, LEASE_MS];
+  const verifyBuild = build ? "if redis.call('get', KEYS[3]) ~= ARGV[2] then return 0 end" : '';
   const verify = `
     ${redisNow}
+    ${verifyBuild}
     local expires = redis.call('zscore', KEYS[2], ARGV[2])
     if redis.call('get', KEYS[1]) ~= ARGV[1] or not expires or tonumber(expires) <= now then return 0 end
   `;
@@ -21,6 +24,7 @@ export function createSharedAskLeaseHandle(redis, ownerId, token) {
       return redis.isReady && await redis.eval(verify + 'return 1', { keys, arguments: args }) === 1;
     },
     renew: () => redis.eval(verify + `
+      ${build ? "redis.call('pexpire', KEYS[3], ARGV[3])" : ''}
       redis.call('zadd', KEYS[2], now + tonumber(ARGV[3]), ARGV[2])
       redis.call('pexpire', KEYS[2], ARGV[3])
       return redis.call('pexpire', KEYS[1], ARGV[3])
@@ -28,6 +32,7 @@ export function createSharedAskLeaseHandle(redis, ownerId, token) {
     release: () => redis.eval(`
       ${redisNow}
       if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end
+      ${build ? "if redis.call('get', KEYS[3]) == ARGV[2] then redis.call('del', KEYS[3]) end" : ''}
       redis.call('zrem', KEYS[2], ARGV[2])
       redis.call('zremrangebyscore', KEYS[2], '-inf', now)
       if redis.call('zcard', KEYS[2]) == 0 then redis.call('del', KEYS[1]) end
@@ -54,18 +59,42 @@ export async function acquireSharedAskLease(redis, ownerId, token) {
   return createSharedAskLeaseHandle(redis, ownerId, token);
 }
 
+export async function acquireBuildLease(redis, ownerId, token) {
+  const ownerKey = `security:owner-execution:${ownerId}`;
+  const keys = [ownerKey, `${ownerKey}:ask-leases`, `${ownerKey}:build`];
+  const args = [ASK_BARRIER, token, LEASE_MS];
+  // Use the same barrier and member set as Ask, including during a rolling deploy.
+  const admitted = await redis.eval(`
+    ${redisNow}
+    local owner = redis.call('get', KEYS[1])
+    if owner and owner ~= ARGV[1] then return 0 end
+    if not redis.call('set', KEYS[3], ARGV[2], 'NX', 'PX', ARGV[3]) then return 0 end
+    redis.call('zremrangebyscore', KEYS[2], '-inf', now)
+    redis.call('zadd', KEYS[2], now + tonumber(ARGV[3]), ARGV[2])
+    redis.call('pexpire', KEYS[2], ARGV[3])
+    redis.call('set', KEYS[1], ARGV[1], 'PX', ARGV[3])
+    return 1
+  `, { keys, arguments: args });
+  return admitted === 1 ? createSharedAskLeaseHandle(redis, ownerId, token, { build: true }) : null;
+}
+
 // Uses the same tenant key as HTTP admission; recovery cannot bypass active requests.
-export function acquireLocalOwnerExecutionLease(ownerId, shareKey = null) {
-  const existing = localOwners.get(ownerId);
-  if (existing && (!shareKey || existing.shareKey !== shareKey || !existing.acceptingSubscribers)) {
+export function acquireLocalOwnerExecutionLease(ownerId, shareKey = null, lane = 'exclusive') {
+  const lanes = localOwners.get(ownerId) || new Map();
+  const existing = lanes.get(lane);
+  const conflicts = lane === 'exclusive' ? lanes.size > Number(Boolean(existing)) : lanes.has('exclusive');
+  if (conflicts || (existing && (!shareKey || existing.shareKey !== shareKey || !existing.acceptingSubscribers))) {
     throw Object.assign(new Error('Execution busy'), { code: 'EXECUTION_BUSY', status: 429 });
   }
   const record = existing || { shareKey, acceptingSubscribers: false };
-  if (!existing) localOwners.set(ownerId, record);
+  if (!existing) {
+    lanes.set(lane, record);
+    localOwners.set(ownerId, lanes);
+  }
   let released = false;
   return {
     assertOwned: async () => {
-      if (released || localOwners.get(ownerId) !== record) {
+      if (released || localOwners.get(ownerId)?.get(lane) !== record) {
         throw Object.assign(new Error('Execution lease lost'), { code: 'EXECUTION_LOCK_LOST' });
       }
     },
@@ -75,7 +104,10 @@ export function acquireLocalOwnerExecutionLease(ownerId, shareKey = null) {
     release: async () => {
       if (released) return;
       released = true;
-      if (!existing) localOwners.delete(ownerId);
+      if (!existing) {
+        lanes.delete(lane);
+        if (lanes.size === 0) localOwners.delete(ownerId);
+      }
     },
   };
 }

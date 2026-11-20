@@ -257,14 +257,14 @@ test("provider schemas retain nullable fields and avoid unsupported URI formats"
   assert.doesNotMatch(JSON.stringify(zodTextFormat(registry.get("word").schemas.spec, "artifact_specification")), /"format":"uri"/);
 });
 
-test("binary attachments fail closed when the multimodal provider is unavailable", async () => {
-  const previousKey = process.env.GEMINI_API_KEY, previousVertex = process.env.GEMINI_USE_VERTEX;
-  process.env.GEMINI_API_KEY = ""; process.env.GEMINI_USE_VERTEX = "false";
+test("binary attachments fail closed when OpenAI is unconfigured", async () => {
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "";
   try {
-    await assert.rejects(routeStructuredGeneration({ schema: registry.get("word").schemas.spec, name: "artifact_specification", askRoute: "gemini-3.8-flash", input: "Attached PDF", attachments: [{ type: "application/pdf", data: "JVBERi0=" }] }), error => error.code === "AI_ATTACHMENT_UNAVAILABLE");
+    await assert.rejects(routeStructuredGeneration({ schema: registry.get("word").schemas.spec, name: "artifact_specification", askRoute: "default", input: "Attached PDF", attachments: [{ type: "application/pdf", data: "JVBERi0=" }] }), error => error.code === "AI_NOT_CONFIGURED");
   } finally {
-    process.env.GEMINI_API_KEY = previousKey;
-    if (previousVertex === undefined) delete process.env.GEMINI_USE_VERTEX; else process.env.GEMINI_USE_VERTEX = previousVertex;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
   }
 });
 
@@ -279,10 +279,10 @@ test("uploaded DOCX and XLSX become source context without executing file conten
   await assert.rejects(prepareUploadedContext({ name: "report.pdf", size: 3, type: "application/pdf", data: "YWJj" }), /Invalid PDF/);
 });
 
-test("Web research enforces Google-only grounding and does not fall back to another search provider", async () => {
+test("Web research enforces OpenAI-only grounding and does not fall back to another search provider", async () => {
   let parameters;
   const client = { responses: { create: async params => { parameters = params; return { output_text: "Grounded facts.", model: "test", output: [{ type: "web_search_call", status: "completed", action: { sources: [{ url: "https://example.com/report", title: "Report" }, { url: "javascript:alert(1)" }] } }, { type: "message", content: [{ type: "output_text", text: "Grounded facts.", annotations: [{ type: "url_citation", url: "https://example.com/report", title: "Report" }] }] }] }; } } };
-  const research = createWebResearch({ geminiResearch: async () => { throw new Error("Permission denied"); }, openAIClient: client });
+  const research = createWebResearch({ openaiResearch: async () => { throw new Error("Permission denied"); }, openAIClient: client });
   await assert.rejects(research({ messages: [{ role: "user", content: "Research market" }], instructions: "Build context" }), /Permission denied/);
   assert.equal(parameters, undefined);
   const missing = createWebResearch({ openAIClient: { responses: { create: async () => ({ output_text: "Invented citation", output: [{ type: "message", content: [] }] }) } } });

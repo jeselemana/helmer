@@ -39,7 +39,7 @@ These directives are MANDATORY and NON-NEGOTIABLE across all coding, refactoring
 
 ### 4. AI Execution & Concurrency Control (All Generation Routes)
 - **Universal Scope**: Mandatory for `/api/ask`, `/api/strategy`, `/api/up`, and any future generation or streaming endpoints.
-- **Per-Tenant Execution Limits**: With Redis admission available, authenticated foreground `POST /api/ask` requests may run in parallel across separate chats. Limit submissions to 15 per owner and 60 per IP in a rolling minute, returning 429 `RATE_LIMITED` with `Retry-After`. Keep one writer per existing chat. Guests, other AI routes, and background research retain exclusive owner admission. An exclusive execution cannot overlap with active Ask work. Reject execution conflicts with 429 `EXECUTION_BUSY`. Keep the execution guard, background-job check, and atomic Redis leases across replicas.
+- **Per-Tenant Execution Limits**: With Redis admission available, authenticated foreground `POST /api/ask` requests may run in parallel across separate chats. Limit submissions to 15 per owner and 60 per IP in a rolling minute, returning 429 `RATE_LIMITED` with `Retry-After`. Keep one writer per existing chat. One authenticated Build execution per owner may overlap with foreground Ask through the shared owner barrier and a separate atomic Build lease. Guests, other AI routes, and background research retain exclusive owner admission and cannot overlap with active Ask or Build work. Reject execution conflicts with 429 `EXECUTION_BUSY`. Keep the execution guard, background-job check, and atomic Redis leases across replicas.
 - **Platform-Wide Capacity & Heartbeats**: Enforce global concurrent execution limits and Redis provider slots via atomic Lua scripts and heartbeat lease renewals.
 - **Idempotency & Fingerprinting**: All mutating generation endpoints require an `Idempotency-Key` header (`^[A-Za-z0-9_-]{16,100}$`). In Build mode, always compute canonical payload fingerprints (`computePayloadFingerprint`) and reject parameter mismatches with 409 `IDEMPOTENCY_CONFLICT`.
 - **Budget Tracking**: Every AI model call must be reserved through `AiPolicy.reserveProvider()` to enforce daily per-user (`AI_USER_DAILY_USD`) and platform (`AI_PLATFORM_DAILY_USD`) micro-dollar spend ceilings.
@@ -61,13 +61,13 @@ These directives are MANDATORY and NON-NEGOTIABLE across all coding, refactoring
 
 ### 6. Research Boundaries, Grounding & Source Chips (Zero SSRF)
 - **No Arbitrary Fetch / Scraping**: The server must NEVER perform direct HTTP requests (`fetch`, `axios`) to arbitrary user-supplied URLs.
-- **Grounding Exclusivity**: Real-time web research must ONLY be conducted via the official Google Search Grounding tool through the `@google/genai` SDK.
+- **Grounding Exclusivity**: Real-time web research must ONLY be conducted via the official OpenAI Responses API Web Search tool (`web_search`). Preserve provider-independent URL and source verification and never expose unrestricted tools to the model.
 - **Source Filtering & Sanitization**:
   - Filter all search results against `LOW_QUALITY_DOMAINS` and prioritize `HIGH_SIGNAL_DOMAINS`.
   - All web source URLs must be strictly sanitized (`https?://` only) to protect against malicious URL schemes (`javascript:`, `data:`).
   - Linked sources MUST be rendered in a compact chip format directly at the end of the response. Titles and domains must be safely rendered without raw `innerHTML`.
 - **Grounding Data Isolation & 2-Year Retention**:
-  - Responses grounded with Google Search must NEVER be forwarded to learning loops, telemetry, cross-chat personalization, or Build/Strategy/Artifact generation (`isRestricted = true`). Telemetry and learning loop entries for grounded queries must redact interaction content (`onlyNecessaryData: true`). In Ask mode, synthesized assistant reply text may remain in the active conversation's chat context (without raw grounding metadata/sources) for multi-turn continuity.
+  - Responses grounded with web search must NEVER be forwarded to learning loops, telemetry, cross-chat personalization, or Build/Strategy/Artifact generation (`isRestricted = true`). Telemetry and learning loop entries for grounded queries must redact interaction content (`onlyNecessaryData: true`). In Ask mode, synthesized assistant reply text may remain in the active conversation's chat context (without raw grounding metadata/sources) for multi-turn continuity.
   - Grounded assistant turns stored in user chat history have a strict maximum retention of 2 years (`MAX_GROUNDED_CHAT_RETENTION_MS`). Stored records older than 2 years must be pruned during store sanitization and tenant maintenance.
 
 ---

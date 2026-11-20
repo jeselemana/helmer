@@ -65,6 +65,11 @@ test('release: production config validation flags missing secrets and invalid MF
     ADMIN_MFA_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString('base64'),
     APP_URL: 'https://helmer.example.com',
     REDIS_URL: 'redis://127.0.0.1:6379',
+    OPENAI_API_KEY: 'fixture',
+    R2_ENDPOINT: 'https://fixture.r2.example.test',
+    R2_BUCKET_NAME: 'fixture',
+    R2_ACCESS_KEY_ID: 'fixture',
+    R2_SECRET_ACCESS_KEY: 'fixture',
   }));
 });
 

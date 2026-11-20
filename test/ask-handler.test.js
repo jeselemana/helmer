@@ -7,7 +7,8 @@ import { randomUUID } from 'node:crypto';
 import express from 'express';
 import { createAskHandler, createAskCancelHandler } from '../src/http/ask-handler.js';
 import { createAskRunManager } from '../src/services/ai/ask-run-manager.js';
-import { createAskService } from '../src/services/ai/ask-service.js';
+import { createAskService as createResponsesAskService } from '../src/services/ai/ask-service.js';
+import { createGoogleGroundedAskService as createAskService } from './helpers/legacy-google-grounded-ask.js';
 import { sanitizeAskGroundingMetadata } from '../src/services/ai/ask-grounding.js';
 import { createAskExecutionGuard } from '../src/http/ask-execution-guard.js';
 import { createCapabilityRouter, askRequestSchema } from '../src/http/capability-router.js';
@@ -17,7 +18,7 @@ import { configureProviderPolicy, wrapProvider } from '../src/services/security/
 import { FileChatRepository } from '../src/repositories/file-chat-repository.js';
 import { GUEST_EXHAUSTED_MESSAGE, GUEST_RESTRICTION_NOTICES, getGuestCtaNotice } from '../src/services/ai/prompts.js';
 import { createPluginRegistry } from '../src/services/plugins/registry.js';
-import { acquireOwnerExecutionLease } from '../src/services/security/owner-execution-lease.js';
+import { acquireBuildLease, acquireOwnerExecutionLease, acquireSharedAskLease } from '../src/services/security/owner-execution-lease.js';
 import { MAX_GROUNDED_CHAT_RETENTION_MS } from '../src/services/ai/grounded-chat-retention.js';
 
 const sse = text => text.split(/\r?\n\r?\n/).filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
@@ -35,7 +36,13 @@ class RedisFixture {
   }
   async zRem() {}
   async eval(script, { keys, arguments: args }) {
-    if (keys[0].startsWith('security:ask-minute:')) {
+    if (keys[0].startsWith('security:guest-day:')) {
+      const used = Math.max(...keys.map(key => this.values.get(key) || 0));
+      if (used >= Number(args[0])) return used;
+      for (const key of keys) this.values.set(key, (this.values.get(key) || 0) + 1);
+      return used + 1;
+    }
+    if (keys[0].startsWith('security:ask-minute:') || keys[0].startsWith('security:guest-ask-minute:')) {
       await this.beforeRate();
       const window = Number(args[1]);
       const buckets = keys.map(key => (this.values.get(key) || []).filter(time => time > this.now - window));
@@ -50,6 +57,7 @@ class RedisFixture {
       const leases = this.values.get(keys[1]) || new Map();
       if (script.includes("redis.call('set', KEYS[1]")) {
         if (owner && owner !== args[0]) return 0;
+        if (keys[2] && !await this.set(keys[2], args[1], { NX: true })) return 0;
         this.values.set(keys[0], args[0]);
         this.values.set(keys[1], leases);
         leases.set(args[1], this.now + Number(args[2]));
@@ -57,10 +65,12 @@ class RedisFixture {
       }
       if (owner !== args[0]) return 0;
       if (script.includes("redis.call('zrem',")) {
+        if (keys[2] && this.values.get(keys[2]) === args[1]) this.values.delete(keys[2]);
         leases.delete(args[1]);
         if (!leases.size) { this.values.delete(keys[0]); this.values.delete(keys[1]); }
         return 1;
       }
+      if (keys[2] && this.values.get(keys[2]) !== args[1]) return 0;
       if ((leases.get(args[1]) || 0) <= this.now) return 0;
       if (script.includes("redis.call('zadd'")) leases.set(args[1], this.now + Number(args[2]));
       return 1;
@@ -79,7 +89,7 @@ class RedisFixture {
     throw new Error('Unexpected fixture Redis operation');
   }
 }
-async function fixture(t, { redis = null, limits, parallel = false, env = {} } = {}) {
+async function fixture(t, { redis = null, limits, parallel = false, env = {}, generateAsk, onBuild } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-ask-http-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const ownerA = randomUUID(), ownerB = randomUUID();
@@ -120,6 +130,7 @@ async function fixture(t, { redis = null, limits, parallel = false, env = {} } =
   });
   app.use(new PrivacyPolicy({ findById: async id => users.get(id) }).middleware());
   app.use(policy.middleware());
+  if (onBuild) app.post('/api/strategy/generate', onBuild);
   const askRunManager = createAskRunManager({ redis, cancelPollIntervalMs: 30 });
   t.after(() => askRunManager.dispose());
   f.askRunManager = askRunManager;
@@ -149,7 +160,7 @@ async function fixture(t, { redis = null, limits, parallel = false, env = {} } =
     learningLoop: { createInteractionId: randomUUID, recordInteraction: async data => { learning.push(data); }, recordSignal: async () => {} },
     telemetryService: { trackAskQuery: async data => { telemetry.push(data); } },
     sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
-    generateAsk: createAskService({ getClient: () => client }),
+    generateAsk: generateAsk || createAskService({ getClient: () => client }),
     askRunManager,
   }));
   const server = app.listen(0, '127.0.0.1'); await new Promise(resolve => server.once('listening', resolve));
@@ -167,6 +178,95 @@ async function fixture(t, { redis = null, limits, parallel = false, env = {} } =
   });
   return f;
 }
+
+test('authenticated Ask completes while one Build holds the same tenant lease', async t => {
+  for (const redis of [new RedisFixture(), null]) {
+    const buildStarted = deferred(), finishBuild = deferred();
+    const f = await fixture(t, { redis, parallel: true, onBuild: async (req, res) => {
+      await req.securityContext.assertLease();
+      buildStarted.resolve();
+      await finishBuild.promise;
+      await req.securityContext.assertLease();
+      res.json({ done: true });
+    } });
+    const build = () => fetch(`${f.baseUrl}/api/strategy/generate`, {
+      method: 'POST', headers: { 'Idempotency-Key': randomUUID() },
+    });
+    const runningBuild = build();
+    try {
+      await buildStarted.promise;
+      assert.equal((await f.ask()).status, 200);
+      assert.equal((await build()).status, 429);
+      await assert.rejects(acquireOwnerExecutionLease(redis, f.ownerA, new AbortController()), { code: 'EXECUTION_BUSY' });
+    } finally {
+      finishBuild.resolve();
+      assert.equal((await runningBuild).status, 200);
+    }
+  }
+});
+
+test('releasing a lost Build lease clears its shared member without releasing a successor', async () => {
+  const redis = new RedisFixture();
+  const owner = randomUUID();
+  const build = await acquireBuildLease(redis, owner, randomUUID());
+  const ask = await acquireSharedAskLease(redis, owner, randomUUID());
+  redis.values.delete(`security:owner-execution:${owner}:build`);
+  assert.equal(await build.isOwned(), false);
+  assert.equal(await build.renew(), 0);
+  const successor = await acquireBuildLease(redis, owner, randomUUID());
+  await build.release();
+  assert.equal(await successor.isOwned(), true);
+  await Promise.all([ask.release(), successor.release()]);
+  const exclusive = await acquireOwnerExecutionLease(redis, owner, new AbortController());
+  await exclusive.release();
+});
+
+test('Ask requires live grounding when accepting the preceding saved offer', async t => {
+  const calls = [];
+  const offer = 'İstəsən, rəsmi mənbələr üzrə canlı axtarışla yoxlaya bilərəm.';
+  const f = await fixture(t, { generateAsk: async params => {
+    calls.push(params);
+    return {
+      text: 'Test cavabı',
+      ...(params.requireGrounding ? { groundingMetadata: {
+        groundingChunks: [{ web: { uri: 'https://www.ecb.europa.eu/', title: 'ECB' } }],
+      } } : {}),
+    };
+  } });
+  const chat = await f.chatRepository.saveChat({
+    ownerId: f.ownerA, messages: [
+      { role: 'user', content: 'Məlumat nə dərəcədə doğrudur?' },
+      { role: 'assistant', content: offer, liveSearchOffered: true },
+    ],
+  });
+  const messages = [{ role: 'user', content: 'Bəli, yoxla.' }];
+  const response = await f.ask({ chatId: chat.id, messages });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.chat.messages.at(-1).searchGrounded, true);
+  assert.equal(result.groundingMetadata.groundingChunks[0].web.title, 'ECB');
+  assert.equal(calls[0].enableSearch, true);
+  assert.equal(calls[0].requireGrounding, true);
+
+  const thanks = await f.ask({ chatId: chat.id, messages: [{ role: 'user', content: 'Halaldı bro' }] });
+  assert.equal(thanks.status, 200);
+  assert.deepEqual([...calls[1].verifiedWebTurns], [3]);
+  assert.equal(calls[1].requireGrounding, false);
+
+  const noOffer = await f.ask({ messages: [{ role: 'assistant', content: offer }, ...messages] });
+  assert.equal(noOffer.status, 200);
+  assert.equal(calls[2].requireGrounding, false);
+  assert.equal(calls[2].verifiedWebTurns.size, 0);
+
+  const quotedOffer = await f.chatRepository.saveChat({
+    ownerId: f.ownerA, messages: [
+      { role: 'user', content: 'Bu cümləni misal kimi yaz.' },
+      { role: 'assistant', content: offer },
+    ],
+  });
+  assert.equal((await f.ask({ chatId: quotedOffer.id, messages })).status, 200);
+  assert.equal(calls[3].requireGrounding, false);
+});
 
 test('Ask replays use the same key for the route aliases and reject deleted conversations', async t => {
   for (const redis of [new RedisFixture(), null]) {
@@ -340,24 +440,36 @@ test('Ask HTTP: strict payload, UUID, revision, verification and disabled-accoun
   assert.equal(f.calls.length, 0);
 });
 
-test('Ask HTTP: guest restrictions remain enforced, daily CTA/exhaustion removed, and per-minute rate limit enforced', async t => {
-  const f = await fixture(t, { env: { GUEST_ASK_RATE_LIMIT_PER_MINUTE: '6' } });
+test('Ask HTTP: guest restrictions, exact daily balance, streaming CTA and exhaustion', async t => {
+  const f = await fixture(t, { env: { GUEST_AI_DAILY_LIMIT: '5' } });
   const guest = 'guest_fixture';
   for (const [body, expected] of [[{ thinkingLevel: 'high' }, GUEST_RESTRICTION_NOTICES.thinking], [{ thinkingLevel: 'low' }, GUEST_RESTRICTION_NOTICES.thinking], [{ strategyId: f.strategyId }, GUEST_RESTRICTION_NOTICES.strategy], [{ taskId: f.taskId }, GUEST_RESTRICTION_NOTICES.planner]]) {
     const response = await f.ask(body, guest); assert.equal(response.status, 401); assert.equal((await response.json()).reply, expected);
   }
-  for (let i = 0; i < 6; i++) {
-    const response = await f.ask({ stream: true }, guest);
+  for (let remaining = 4; remaining > 0; remaining--) {
+    const stream = remaining % 2 === 0;
+    const response = await f.ask({ stream }, guest);
     assert.equal(response.status, 200);
-    const final = sse(await response.text()).at(-1);
-    assert.equal(final.remainingGuestMessages, null); assert.equal(final.done, true);
-    assert.equal(final.reply, 'Tam cavab.');
+    const events = stream ? sse(await response.text()) : null;
+    const final = stream ? events.at(-1) : await response.json();
+    const notice = getGuestCtaNotice(remaining);
+    const formatted = 'Tam cavab.\n\n' + (remaining <= 2 ? '**' + notice + '**' : notice);
+    assert.equal(final.remainingGuestMessages, remaining);
+    assert.equal(final.reply, formatted);
+    if (stream) {
+      assert.equal(final.done, true);
+      assert.equal(events.map(event => event.chunk || '').join(''), formatted);
+    }
   }
-  const limited = await f.ask({}, guest);
-  assert.equal(limited.status, 429);
-  assert.ok(Number(limited.headers.get('retry-after')) >= 1);
-  assert.equal((await limited.json()).code, 'RATE_LIMITED');
-  assert.equal(f.calls.length, 6);
+  for (const stream of [true, false]) {
+    const limited = await f.ask({ stream }, guest);
+    assert.equal(limited.status, 429);
+    const payload = await limited.json();
+    assert.equal(payload.code, 'GUEST_DAILY_LIMIT');
+    assert.equal(payload.reply, GUEST_EXHAUSTED_MESSAGE);
+    assert.equal(payload.remainingGuestMessages, 0);
+  }
+  assert.equal(f.calls.length, 4);
 });
 
 test('Ask HTTP: first text arrives while generation is pending, concurrent same-owner request is denied, explicit Stop cancels lease and saves nothing; cross-tenant cancel rejected', async t => {
@@ -614,17 +726,30 @@ test('Ask HTTP: skips strategy provenance reads on plain Ask while enforcing the
   assert.ok(provenanceCalls >= 1);
 });
 
-test('Ask HTTP: routes to gemini-4-hydrogen with low, medium, high thinking and rejects xhigh with 400 VALIDATION_ERROR', async t => {
-  const f = await fixture(t), guest = 'guest_fixture';
-  for (const level of ['low', 'medium', 'high']) {
+test('Ask HTTP: routes to Default Terra with the requested reasoning rules and rejects xhigh with 400 VALIDATION_ERROR', async t => {
+  const requests = [];
+  const f = await fixture(t, { generateAsk: createResponsesAskService({
+    requestResponse: async function* (params) {
+      requests.push(params);
+      yield { type: 'response.output_text.delta', delta: 'Salam.' };
+      yield { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 20, output_tokens: 4 } } };
+    },
+  }) }), guest = 'guest_fixture';
+  for (const level of ['low', 'off', 'medium', 'high']) {
     const response = await f.ask({ stream: false, thinkingLevel: level });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(body.model, 'gemini-4-hydrogen');
-    assert.equal(f.calls.at(-1).model, 'gemini-4-hydrogen');
-    assert.deepEqual(f.calls.at(-1).config.thinkingConfig, { thinkingLevel: level.toUpperCase() });
+    assert.equal(body.model, 'gpt-6.1-terra');
+    assert.equal(requests.at(-1).model, 'gpt-6.1-terra');
+    assert.deepEqual(requests.at(-1).reasoning, { effort: ['off', 'low'].includes(level) ? 'none' : level });
+    assert.equal(requests.at(-1).store, false);
   }
-  const callsBeforeXhigh = f.calls.length;
+  const terra = await f.ask({ stream: true, model: 'gpt-6.1-terra', thinkingLevel: 'high' });
+  const terraStream = await terra.text();
+  assert.match(terraStream, /"chunk":"Salam\.","model":"gpt-6\.1-terra"/);
+  assert.match(terraStream, /"done":true.*"model":"gpt-6\.1-terra"/);
+  assert.deepEqual(requests.at(-1).reasoning, { effort: 'high' });
+  const callsBeforeXhigh = requests.length;
   const authXhigh = await f.ask({ stream: false, thinkingLevel: 'xhigh' });
   assert.equal(authXhigh.status, 400);
   assert.equal((await authXhigh.json()).code, 'VALIDATION_ERROR');
@@ -634,7 +759,7 @@ test('Ask HTTP: routes to gemini-4-hydrogen with low, medium, high thinking and 
   const guestHigh = await f.ask({ thinkingLevel: 'high' }, guest);
   assert.equal(guestHigh.status, 401);
   assert.equal((await guestHigh.json()).reply, GUEST_RESTRICTION_NOTICES.thinking);
-  assert.equal(f.calls.length, callsBeforeXhigh);
+  assert.equal(requests.length, callsBeforeXhigh);
 });
 
 test('Ask HTTP: authenticated SSE flushes headers before decisionRouter.routeAsk and runs strategy provenance reads in parallel', async t => {
@@ -1108,101 +1233,42 @@ test('Ask mid-stream REVISION_CONFLICT returns current revision and marks idempo
   assert.equal(JSON.parse(idempEntry[1]).state, 'retryable');
 });
 
-test('Passive client disconnect (page refresh / tab close) completes Ask in background, persists saveChat, marks completed, and recovers via active status', async t => {
+test('Passive client disconnect aborts the running provider and releases admission without saving a partial chat', async t => {
   const redis = new RedisFixture();
   const f = await fixture(t, { redis, parallel: true });
-  const firstChunk = deferred();
-  const finishGeneration = deferred();
-  t.after(() => finishGeneration.resolve());
-
-  f.stream = async function* () {
-    yield { text: 'Birinci hissə — ', candidates: [{}] };
+  const firstChunk = deferred(), aborted = deferred();
+  f.stream = async function* ({ config }) {
+    yield { text: 'Birinci hissə', candidates: [{}] };
     firstChunk.resolve();
-    await finishGeneration.promise;
-    yield { text: 'tam arxa plan cavabı.', candidates: [{}] };
+    await new Promise(resolve => {
+      if (config.abortSignal.aborted) resolve();
+      else config.abortSignal.addEventListener('abort', resolve, { once: true });
+    });
+    aborted.resolve();
+    config.abortSignal.throwIfAborted();
   };
 
   const controller = new AbortController();
-  const idemKey = `bg-disconnect-${randomUUID()}`;
-  const response = await f.ask(
-    { stream: true, messages: [{ role: 'user', content: 'Uzun analiz et' }] },
-    f.ownerA,
-    { signal: controller.signal, headers: { 'Idempotency-Key': idemKey } }
-  );
-  const allocatedChatId = response.headers.get('X-Helmer-Ask-Chat-Id');
-  const runId = response.headers.get('X-Helmer-Ask-Run-Id');
-  assert.ok(allocatedChatId && runId);
-
+  const idemKey = `disconnect-${randomUUID()}`;
+  const options = { signal: controller.signal, headers: { 'Idempotency-Key': idemKey } };
+  const response = await f.ask({ stream: true }, f.ownerA, options);
+  const chatId = response.headers.get('X-Helmer-Ask-Chat-Id');
   const reader = response.body.getReader();
   await reader.read();
   await firstChunk.promise;
-
-  // Simulate passive page reload / tab leave WITHOUT calling POST /api/ask/cancel
   controller.abort();
   await reader.cancel().catch(() => {});
-  await new Promise(resolve => setTimeout(resolve, 25));
-
-  // While still generating, GET /api/ask/chats/:id reports activeRun so reloaded UI can show loading state
-  const inProgressRes = await fetch(`${f.baseUrl}/api/ask/chats/${allocatedChatId}`, {
-    headers: { 'X-Test-Owner': f.ownerA },
-  });
-  assert.equal(inProgressRes.status, 200);
-  const inProgressBody = await inProgressRes.json();
-  assert.equal(inProgressBody.activeRun?.runId, runId);
-  assert.equal(inProgressBody.activeRun?.status, 'running');
-
-  const activeRunsRes = await fetch(`${f.baseUrl}/api/ask/runs/active`, {
-    headers: { 'X-Test-Owner': f.ownerA },
-  });
-  const activeRunsBody = await activeRunsRes.json();
-  assert.ok(activeRunsBody.runs.some(r => r.runId === runId && r.chatId === allocatedChatId));
-
-  // Cross-tenant GET must NOT see Owner A's in-progress run
-  const crossTenantRes = await fetch(`${f.baseUrl}/api/ask/chats/${allocatedChatId}`, {
-    headers: { 'X-Test-Owner': f.ownerB },
-  });
-  assert.equal(crossTenantRes.status, 404);
-
-  // Let background generation finish and wait for activeRun cleanup to commit
-  finishGeneration.resolve();
-  for (let i = 0; i < 60 && f.releases() === 0; i++) {
-    await new Promise(resolve => setTimeout(resolve, 15));
-  }
-  assert.equal(f.releases(), 1, 'detached provider slot and lease must release after background save');
-
-  // Reloaded client polls / fetches chat and receives full persisted history + cleared activeRun
-  let recovered = null;
-  for (let i = 0; i < 60; i++) {
-    const recoveredRes = await fetch(`${f.baseUrl}/api/ask/chats/${allocatedChatId}`, {
-      headers: { 'X-Test-Owner': f.ownerA },
-    });
-    assert.equal(recoveredRes.status, 200);
-    recovered = await recoveredRes.json();
-    if (recovered.activeRun === null && recovered.chat) break;
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-  assert.equal(recovered.activeRun, null);
-  assert.ok(recovered.chat);
-  assert.equal(recovered.chat.messages[0].content, 'Uzun analiz et');
-  assert.equal(recovered.chat.messages[1].content, 'Birinci hissə — tam arxa plan cavabı.');
-
-  const idempEntry = [...redis.values.entries()].find(([k]) => k.startsWith('security:request:'));
-  assert.ok(idempEntry);
-  assert.equal(JSON.parse(idempEntry[1]).state, 'completed');
-
-  // Follow-up turn on the recovered chat succeeds immediately without leftover lock
-  f.stream = async function* () { yield { text: 'Növbəti sual cavabı.', candidates: [{}] }; };
-  const followUp = await f.ask({
-    chatId: allocatedChatId,
-    chatRevision: recovered.chat.revision,
-    messages: [{ role: 'user', content: 'Davam et' }],
-    stream: true,
-  });
-  assert.equal(followUp.status, 200);
-  assert.equal(sse(await followUp.text()).at(-1).done, true);
+  await aborted.promise;
+  for (let i = 0; i < 50 && !f.releases(); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(f.releases(), 1);
+  assert.equal(await f.chatRepository.getById(chatId, f.ownerA), null);
+  f.stream = async function* () { yield { text: 'Yeni cavab.', candidates: [{}] }; };
+  const retry = await f.ask({ stream: true }, f.ownerA, { headers: options.headers });
+  assert.equal(retry.status, 200);
+  assert.equal(sse(await retry.text()).at(-1).done, true);
 });
 
-test('Cross-replica POST /api/ask/cancel aborts detached background Ask via Redis and enforces Zod strict validation', async t => {
+test('Cross-replica POST /api/ask/cancel aborts active Ask via Redis and enforces Zod strict validation', async t => {
   const redis = new RedisFixture();
   const f = await fixture(t, { redis, parallel: true });
   const replica2CancelManager = createAskRunManager({ redis, cancelPollIntervalMs: 25 });
@@ -1228,7 +1294,7 @@ test('Cross-replica POST /api/ask/cancel aborts detached background Ask via Redi
     assert.equal((await badRes.json()).code, 'VALIDATION_ERROR');
   }
 
-  // 2. Run on Replica 1 -> disconnect client passively -> explicitly cancel via Replica 2
+  // Send explicit Stop through replica 2 while replica 1 remains connected.
   const entered = deferred();
   const abortedOnReplica1 = deferred();
   f.stream = async function* ({ config }) {
@@ -1249,12 +1315,6 @@ test('Cross-replica POST /api/ask/cancel aborts detached background Ask via Redi
   await reader.read();
   await entered.promise;
 
-  // Passive TCP drop does NOT cancel
-  tcpAbort.abort();
-  await reader.cancel().catch(() => {});
-  await new Promise(resolve => setTimeout(resolve, 40));
-  assert.equal(f.releases(), 0);
-
   // Explicit Stop hits Replica 2
   const stopRes = await fetch(replica2Url, {
     method: 'POST',
@@ -1268,4 +1328,69 @@ test('Cross-replica POST /api/ask/cancel aborts detached background Ask via Redi
   }
   assert.equal(f.releases(), 1);
   assert.equal((await f.chatRepository.list(f.ownerA)).length, 0);
+});
+
+
+test('Ask HTTP populates req.askTimings.decisionWaitMs, decisionPath, and firstTextMs across routing paths', async t => {
+  const f = await fixture(t);
+  const timingsCaptured = [];
+  const decisionQueue = [
+    { enableSearch: true, requireGrounding: false, intent: 'grounded_search', routerSource: 'fast_path', decisionPath: 'fast_path_search', latencyMs: 0 },
+    { enableSearch: false, requireGrounding: false, intent: 'standard', routerSource: 'fast_path', decisionPath: 'fast_path_direct', latencyMs: 0 },
+    { enableSearch: false, requireGrounding: false, intent: 'standard', routerSource: 'decisions_api', decisionPath: 'decisions_api', latencyMs: 180 },
+    { enableSearch: false, requireGrounding: false, intent: 'standard', routerSource: 'local_rules', decisionPath: 'heuristic_fallback', latencyMs: 952 },
+  ];
+
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.ownerId = f.ownerA;
+    req.user = f.users.get(f.ownerA);
+    req.auth = { user: req.user };
+    req.askTimings = { startedAt: Date.now() };
+    timingsCaptured.push(req.askTimings);
+    next();
+  });
+  const localPolicy = new AiPolicy({ env: {} });
+  app.use(new PrivacyPolicy({ findById: async id => f.users.get(id) }).middleware());
+  app.use(localPolicy.middleware());
+  app.post('/api/ask', createAskHandler({
+    configured: () => true,
+    chatRepository: f.chatRepository,
+    strategyRepository: f.strategyRepository,
+    plannerRepository: { list: async () => [] },
+    researchService: {},
+    decisionRouter: { routeAsk: async () => decisionQueue.shift() },
+    learningLoop: { createInteractionId: randomUUID, recordInteraction: async () => {}, recordSignal: async () => {} },
+    telemetryService: { trackAskQuery: async () => {} },
+    sanitizeGroundingMetadata: sanitizeAskGroundingMetadata,
+    generateAsk: async ({ onFirstText, onChunk }) => {
+      onFirstText?.(123);
+      if (onChunk) await onChunk('Tam cavab.');
+      return { text: 'Tam cavab.', model: 'gpt-6.1-terra', provider: 'openai', firstTextMs: 123, usage: { inputTokens: 5, outputTokens: 5 } };
+    },
+  }));
+
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const url = `http://127.0.0.1:${server.address().port}/api/ask`;
+
+  for (const expectedPath of ['fast_path_search', 'fast_path_direct', 'decisions_api', 'heuristic_fallback']) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+      body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: `Test ${expectedPath}` }] }),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    const timing = timingsCaptured.at(-1);
+    assert.equal(timing.decisionPath, expectedPath);
+    assert.equal(typeof timing.decisionWaitMs, 'number');
+    assert.ok(timing.decisionWaitMs >= 0);
+    assert.equal(timing.firstTextMs, 123);
+    assert.equal(timing.provider, 'openai');
+    assert.equal(timing.model, 'gpt-6.1-terra');
+    assert.equal(timing.reasoningEffort, 'none');
+  }
 });

@@ -1775,117 +1775,58 @@ function closeMobileModelSheet() {
 let currentAskThinking = "low";
 
 function createAskThinkingControls(isEn, onToggle = null) {
-  const card = element("div", `ask-thinking-card${state.askThinkingEnabled ? " is-active" : ""}`);
-
-  const mainRow = element("div", "ask-thinking-main-row");
-
-  const info = element("div", "ask-thinking-info");
-  const title = element("strong", "ask-thinking-title");
-  title.append(element("span", "", isEn ? "Thinking" : "Düşünmə"));
-  if (!state.currentUser) {
-    const lock = element("span", "guest-inline-lock");
-    lock.innerHTML = getGuestLockIconSvg(12);
-    title.appendChild(lock);
+  const card = element("div", "ask-thinking-card ask-thinking-levels");
+  const levels = ["low", "medium", "high"];
+  const rail = element("div", "ask-effort-rail");
+  const track = element("div", "ask-effort-track");
+  const thumb = element("span", "ask-effort-thumb");
+  track.append(thumb);
+  const input = element("input", "ask-effort-input");
+  input.type = "range";
+  input.min = "0";
+  input.max = "2";
+  input.step = "1";
+  input.setAttribute("aria-label", isEn ? "Thinking level" : "Düşünmə səviyyəsi");
+  const labels = element("div", "ask-effort-labels");
+  for (const level of levels) {
+    labels.append(element("span", "", level[0].toUpperCase() + level.slice(1)));
   }
-  const desc = element("small", "ask-thinking-desc", isEn ? "Smart analysis" : "Ağıllı analiz");
-  info.append(title, desc);
-
-  // iOS-style Toggle Switch
-  const toggleLabel = element("label", "ask-ios-toggle");
-  const toggleInput = document.createElement("input");
-  toggleInput.type = "checkbox";
-  toggleInput.checked = Boolean(state.askThinkingEnabled);
-  toggleInput.setAttribute("aria-label", isEn ? "Enable thinking" : "Düşünməni aktiv et");
-  const toggleTrack = element("span", "ask-ios-toggle-track");
-  toggleLabel.append(toggleInput, toggleTrack);
-
-  mainRow.append(info, toggleLabel);
-
-  // Smooth collapsible pills container
-  const pillsContainer = element("div", `ask-thinking-pills${state.askThinkingEnabled ? " is-open" : ""}`);
-  pillsContainer.setAttribute("role", "radiogroup");
-  pillsContainer.setAttribute("aria-label", isEn ? "Thinking level" : "Düşünmə səviyyəsi");
-
-  const pillGroup = element("div", "ask-thinking-pill-group");
-  const pillButtons = new Map();
-
-  const setLevel = (level) => {
-    if (!state.currentUser) {
-      openGuestRestrictionModal(GUEST_RESTRICTION_NOTICES.thinking);
-      return;
-    }
-    state.askThinkingLevel = level;
-    currentAskThinking = level;
-    try { localStorage.setItem("helmer_ask_thinking_level", level); } catch { }
-    for (const [lvl, btn] of pillButtons.entries()) {
-      const active = lvl === level;
-      btn.classList.toggle("is-active", active);
-      btn.setAttribute("aria-checked", String(active));
-    }
-    if (typeof onToggle === "function") {
-      onToggle(Boolean(state.askThinkingEnabled));
-    }
+  const sync = () => {
+    const index = Math.max(0, levels.indexOf(state.askThinkingEnabled ? state.askThinkingLevel : "low"));
+    input.value = String(index);
+    input.setAttribute("aria-valuetext", labels.children[index].textContent);
+    card.style.setProperty("--effort-position", index * 50 + "%");
+    Array.from(labels.children).forEach((label, i) => label.classList.toggle("is-active", i === index));
   };
-
-  ["low", "medium", "high"].forEach((lvl) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = `ask-thinking-pill-btn${state.askThinkingLevel === lvl ? " is-active" : ""}`;
-    btn.dataset.thinkingLevel = lvl;
-    btn.setAttribute("role", "radio");
-    btn.setAttribute("aria-checked", String(state.askThinkingLevel === lvl));
-    btn.textContent = { low: "Low", medium: "Medium", high: "High" }[lvl];
-
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (!state.currentUser) {
-        openGuestRestrictionModal(GUEST_RESTRICTION_NOTICES.thinking);
-        return;
-      }
-      setLevel(lvl);
-    });
-
-    pillButtons.set(lvl, btn);
-    pillGroup.appendChild(btn);
+  const restrictGuest = (event) => {
+    if (state.currentUser) return false;
+    event.preventDefault();
+    sync();
+    openGuestRestrictionModal(GUEST_RESTRICTION_NOTICES.thinking);
+    return true;
+  };
+  input.addEventListener("pointerdown", restrictGuest);
+  input.addEventListener("input", (event) => {
+    if (restrictGuest(event)) return;
+    const level = levels[input.valueAsNumber];
+    if (!level) return;
+    state.askThinkingLevel = level;
+    state.askThinkingEnabled = true;
+    currentAskThinking = level;
+    try {
+      localStorage.setItem("helmer_ask_thinking_enabled", "true");
+      localStorage.setItem("helmer_ask_thinking_level", level);
+    } catch { }
+    sync();
+    onToggle?.(true);
   });
-
-  pillsContainer.appendChild(pillGroup);
-
-  toggleInput.addEventListener("change", (e) => {
-    e.stopPropagation();
-    if (!state.currentUser) {
-      toggleInput.checked = false;
-      openGuestRestrictionModal(GUEST_RESTRICTION_NOTICES.thinking);
-      return;
-    }
-    const isChecked = toggleInput.checked;
-    state.askThinkingEnabled = isChecked;
-    try { localStorage.setItem("helmer_ask_thinking_enabled", String(isChecked)); } catch { }
-
-    if (isChecked) {
-      if (!state.askThinkingLevel || state.askThinkingLevel === "off") {
-        setLevel("medium");
-      } else {
-        setLevel(state.askThinkingLevel);
-      }
-      card.classList.add("is-active");
-      pillsContainer.classList.add("is-open");
-    } else {
-      currentAskThinking = "low";
-      card.classList.remove("is-active");
-      pillsContainer.classList.remove("is-open");
-    }
-    if (typeof onToggle === "function") {
-      onToggle(isChecked);
-    }
-  });
-
-  card.append(mainRow, pillsContainer);
+  rail.append(track, input);
+  card.append(rail, labels);
+  sync();
   return card;
 }
 
-function createAskModelSelector(isEn) {
+function createAskModelSelector(isEn, { isHome = false } = {}) {
   const menu = document.createElement("details");
   menu.className = "ask-model-selector-menu";
 
@@ -1895,10 +1836,8 @@ function createAskModelSelector(isEn) {
   trigger.setAttribute("role", "button");
 
   const getSelectorLabel = () => {
-    if (!state.askThinkingEnabled) return "Auto";
-    if (state.askThinkingLevel === "low") return "Thinking · Low";
-    if (state.askThinkingLevel === "high") return "Thinking · High";
-    return "Thinking · Med";
+    const level = state.askThinkingEnabled ? state.askThinkingLevel : "low";
+    return `Default · ${{ low: "Low", medium: "Medium", high: "High" }[level] || "Low"}`;
   };
   const nameSpan = element("span", "ask-model-name", getSelectorLabel());
   const chevron = element("span", "ask-model-chevron-icon");
@@ -1915,57 +1854,44 @@ function createAskModelSelector(isEn) {
 
   const popover = element("div", "ask-model-selector-popover");
 
-  const isAutoDefault = !state.askThinkingEnabled;
-
-  // Auto Option
-  const autoOption = button("", `ask-model-option${isAutoDefault ? " is-active" : ""}`, (e) => {
-    e.preventDefault();
-    state.askModel = "auto";
-    try { localStorage.setItem("helmer_ask_model", "auto"); } catch { }
-    state.askThinkingEnabled = false;
-    currentAskThinking = "low";
-    try { localStorage.setItem("helmer_ask_thinking_enabled", "false"); } catch { }
-    menu.removeAttribute("open");
-    render();
-  });
-  autoOption.type = "button";
-  const autoLeading = element("div", "ask-model-option-leading");
-  const autoBadge = element("div", "ask-model-option-badge");
-  autoBadge.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>';
-  const autoInfo = element("div", "ask-model-option-info");
-  const autoTitleRow = element("div", "ask-model-title-row");
-  autoTitleRow.append(
-    element("strong", "", "Auto"),
-    element("span", "ask-model-chip", isEn ? "New" : "Yeni")
-  );
-  autoInfo.append(
-    autoTitleRow,
-    element("small", "", isEn ? "Automatic smart mode" : "Avtomatik rejim")
-  );
-  autoLeading.append(autoBadge, autoInfo);
-  autoOption.append(autoLeading);
-  if (isAutoDefault) {
-    const check = element("span", "ask-model-check");
-    check.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-    autoOption.append(check);
-  }
-
-  const divider = element("div", "ask-model-popover-divider");
-  const thinkingControls = createAskThinkingControls(isEn, (enabled) => {
+  const modelInfo = element("div", "ask-model-option-info");
+  const modelTitle = element("div", "ask-default-model-title");
+  const modelCheck = element("span", "ask-model-check", "✓");
+  modelCheck.setAttribute("aria-hidden", "true");
+  modelTitle.append(element("strong", "", "Default"), modelCheck);
+  modelInfo.append(modelTitle, element("small", "", "GPT-6.1 Terra"));
+  popover.append(modelInfo, createAskThinkingControls(isEn, () => {
     nameSpan.textContent = getSelectorLabel();
-    autoOption.classList.toggle("is-active", !enabled);
-    const existingCheck = autoOption.querySelector(".ask-model-check");
-    if (!enabled && !existingCheck) {
-      const check = element("span", "ask-model-check");
-      check.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-      autoOption.append(check);
-    } else if (enabled && existingCheck) {
-      existingCheck.remove();
-    }
-  });
-
-  popover.append(autoOption, divider, thinkingControls);
+  }));
   menu.append(trigger, popover);
+
+  if (isHome) {
+    menu.classList.add("ask-home-model-selector");
+    menu.addEventListener("toggle", () => {
+      if (!menu.open) return;
+      const controller = new AbortController();
+      const position = () => {
+        if (!menu.isConnected || !menu.open) { controller.abort(); return; }
+        popover.style.removeProperty("transform");
+        popover.classList.remove("opens-above");
+        popover.style.removeProperty("max-height");
+        const rect = popover.getBoundingClientRect();
+        const triggerRect = trigger.getBoundingClientRect();
+        const below = Math.max(0, window.innerHeight - triggerRect.bottom - 16);
+        const above = Math.max(0, triggerRect.top - 16);
+        const openAbove = rect.height > below && above > below;
+        if (openAbove) popover.classList.add("opens-above");
+        popover.style.maxHeight = `${openAbove ? above : below}px`;
+        const aligned = popover.getBoundingClientRect();
+        const shift = Math.max(8 - aligned.left, Math.min(0, window.innerWidth - 8 - aligned.right));
+        popover.style.transform = `translateX(${shift}px)`;
+      };
+      position();
+      window.addEventListener("resize", position, { signal: controller.signal });
+      window.addEventListener("scroll", position, { capture: true, signal: controller.signal });
+      menu.addEventListener("toggle", () => controller.abort(), { once: true, signal: controller.signal });
+    });
+  }
 
   const onDocClick = (e) => {
     if (menu.hasAttribute("open") && !menu.contains(e.target)) {
@@ -1977,7 +1903,7 @@ function createAskModelSelector(isEn) {
   return menu;
 }
 
-// Build model selector: Auto (Decision 1 -> Hydrogen/Carbon) and Faster (Hydrogen Direct with Medium/High Thinking).
+// Build uses GPT-6.2 Sol with task-based reasoning.
 function createBuildModelSelector(isEn, { onSelect = null } = {}) {
   const isFaster = state.buildModel === "faster";
   const currentFasterThinking = state.buildFasterThinkingLevel === "high" ? "high" : "medium";
@@ -2074,7 +2000,7 @@ function createBuildModelSelector(isEn, { onSelect = null } = {}) {
     if (typeof scheduleBuildEstimate === "function") scheduleBuildEstimate();
   };
 
-  const auto = makeOption("Auto", isEn ? "Smarter routing" : "Daha ağıllı yönləndirmə", "m12 3-3 6-6 3 6 3 3 6 3-6 6-3-6-3Z", !isFaster);
+  const auto = makeOption("Auto", isEn ? "Automatic reasoning · GPT-6.2 Sol" : "Avtomatik düşünmə · GPT-6.2 Sol", "m12 3-3 6-6 3 6 3 3 6 3-6 6-3-6-3Z", !isFaster);
   auto.addEventListener("click", () => {
     state.buildModel = "auto";
     try { localStorage.setItem("helmer_build_model", "auto"); } catch {}
@@ -2102,10 +2028,10 @@ function createBuildModelSelector(isEn, { onSelect = null } = {}) {
 
   const fasterMed = makeOption(
     isEn ? "Faster · Medium" : "Faster · Medium",
-    isEn ? "Your essential assistant for daily workflow" : "Gündəlik iş axını zamanı əsas köməkçiniz",
+    isEn ? "Automatic reasoning up to Medium" : "Orta səviyyəyədək avtomatik düşünmə",
     "m13 2-9 12h7l-1 8 10-12h-7Z",
     isFasterMedActive,
-    isEn ? "~3x faster" : "~3x daha sürətli"
+    ""
   );
   fasterMed.disabled = false;
   fasterMed.addEventListener("click", () => selectFasterLevel("medium"));
@@ -2242,58 +2168,17 @@ function openMobileModelSheet(mode = "ask") {
     return;
   }
 
-  const isAutoDefault = !state.askThinkingEnabled;
-
-  // Auto Card
-  const autoCard = button("", `mobile-model-option-card${isAutoDefault ? " is-active" : ""}`, () => {
-    state.askModel = "auto";
-    try { localStorage.setItem("helmer_ask_model", "auto"); } catch { }
-    state.askThinkingEnabled = false;
-    currentAskThinking = "low";
-    try { localStorage.setItem("helmer_ask_thinking_enabled", "false"); } catch { }
-    closeMobileModelSheet();
-    syncMode();
-    if (state.mode === "ask") render();
-  });
-  autoCard.type = "button";
-  const autoLeading = element("div", "mobile-model-card-leading");
-  const autoIcon = element("div", "mobile-model-card-icon");
-  autoIcon.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2L14.4 8.6L21 11L14.4 13.4L12 20L9.6 13.4L3 11L9.6 8.6L12 2Z"/></svg>';
-  const autoCopy = element("div", "mobile-model-card-copy");
-  const autoTitleRow = element("div", "ask-model-title-row");
-  autoTitleRow.append(
-    element("strong", "", t("ask.modelSheet.autoTitle")),
-    element("span", "ask-model-chip", t("ask.modelSheet.newBadge") || (isEn ? "New" : "Yeni"))
-  );
-  autoCopy.append(
-    autoTitleRow,
-    element("small", "", t("ask.modelSheet.autoDesc"))
-  );
-  autoLeading.append(autoIcon, autoCopy);
-  autoCard.append(autoLeading);
-  if (isAutoDefault) {
-    const check = element("span", "mobile-model-card-check");
-    check.setAttribute("aria-hidden", "true");
-    check.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-    autoCard.appendChild(check);
-  }
-
-  options.append(autoCard);
-
-  const divider = element("div", "ask-model-popover-divider");
-  const thinkingControls = createAskThinkingControls(isEn, (enabled) => {
-    autoCard.classList.toggle("is-active", !enabled);
-    const existingCheck = autoCard.querySelector(".mobile-model-card-check");
-    if (!enabled && !existingCheck) {
-      const check = element("span", "mobile-model-card-check");
-      check.setAttribute("aria-hidden", "true");
-      check.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-      autoCard.appendChild(check);
-    } else if (enabled && existingCheck) {
-      existingCheck.remove();
-    }
-  });
-  options.append(divider, thinkingControls);
+  const modelInfo = element("div", "mobile-model-card-copy");
+  const modelTitle = element("div", "ask-default-model-title");
+  const modelCheck = element("span", "ask-model-check", "✓");
+  modelCheck.setAttribute("aria-hidden", "true");
+  modelTitle.append(element("strong", "", "Default"), modelCheck);
+  modelInfo.append(modelTitle, element("small", "", "GPT-6.1 Terra"));
+  options.append(modelInfo, createAskThinkingControls(isEn, () => {
+    document.querySelectorAll(".ask-model-selector-menu:not(.build-model-selector-menu) .ask-model-name").forEach((label) => {
+      label.textContent = `Default · ${{ low: "Low", medium: "Medium", high: "High" }[state.askThinkingLevel]}`;
+    });
+  }));
 
   body.appendChild(options);
   sheet.append(dragArea, header, body);
@@ -2908,9 +2793,10 @@ const state = {
   deepResearchHistoryExpanded: false,
   deepResearchGoogleSearchEnabled: true,
   deepResearchThreadEpoch: 0,
+  deepResearchAvailable: false,
   expandedResearchDetails: new Set(),
   askSubMode: "ask",
-  askModel: "auto",
+  askModel: "default",
   askThinkingLevel: (() => {
     try {
       const saved = localStorage.getItem("helmer_ask_thinking_level");
@@ -3862,7 +3748,8 @@ function syncNav() {
   }
   const deepResearchNewBadge = document.querySelector("#deepResearchNewBadge");
   if (deepResearchNewBadge) {
-    deepResearchNewBadge.textContent = t("deepResearch.navNewBadge") || (getLanguage() === "en" ? "New" : "Yeni");
+    deepResearchNewBadge.textContent = state.deepResearchAvailable
+      ? t("deepResearch.navNewBadge") : (getLanguage() === "en" ? "Temporarily unavailable" : "Müvəqqəti əlçatmazdır");
   }
 
   // Minimalist lock indicators for guests on restricted navigation items (in sidebar)
@@ -4362,7 +4249,26 @@ export function navigateToDeepResearch({ replaceRoute = false, initialDraft = ""
   }
 }
 
+let researchAvailabilityRequest;
+function loadResearchAvailability() {
+  if (researchAvailabilityRequest) return;
+  const epoch = state.identityEpoch;
+  const expectedUserId = state.currentUser?.id || null;
+  researchAvailabilityRequest = fetch("/api/features", { cache: "no-store" })
+    .then(response => response.ok ? response.json() : {})
+    .then(features => {
+      if (isIdentityStale(epoch, expectedUserId)) {
+        researchAvailabilityRequest = null;
+        return;
+      }
+      state.deepResearchAvailable = features.deepResearch === true;
+      if (state.view === "deep-research" && state.deepResearchAvailable) render();
+    })
+    .catch(() => { researchAvailabilityRequest = null; });
+}
+
 function renderDeepResearch() {
+  loadResearchAvailability();
   return renderAsk({ surface: "deep-research" });
 }
 
@@ -6800,11 +6706,99 @@ function renderDeepResearchHistorySection(isEn) {
   return section;
 }
 
+function createAskMessageElement(message, messageIndex, { isEn = getLanguage() === "en", surface = getActiveConversationSurface() } = {}) {
+  const isFreshResponse = message.role === "assistant" && freshAskResponses.has(message);
+  const isStreamingMsg = Boolean(message.isStreaming);
+  const isResearch = message.type === "research";
+  const row = element("article", `ask-message ask-message-${message.role}${isFreshResponse ? " is-fresh" : ""}${isStreamingMsg ? " is-streaming" : ""}${isResearch ? " ask-message-research" : ""}`);
+  const content = element("div", "ask-message-content");
+  if (message.role === "assistant") {
+    if (isResearch) {
+      renderAskResearchMessageContent(content, message, messageIndex, isEn, surface);
+    } else if (isStreamingMsg && !message.content) {
+      const isSearching = usesAskSearchAnimation(message);
+      const showLabel = isSearching || isAskThinkingActive(message);
+      const thinking = element("div", `ask-thinking${isSearching ? " is-searching" : ""}${showLabel ? " has-label" : " is-default"}`);
+      thinking.setAttribute("role", "status");
+      thinking.setAttribute("aria-live", "polite");
+      const iconWrap = element("span", "ask-thinking-icon");
+      iconWrap.innerHTML = askThinkingIcon(isSearching);
+      thinking.appendChild(iconWrap);
+      if (showLabel) {
+        const thinkingLabel = element("span", "ask-thinking-label", askThinkingLabel(message, isEn));
+        thinking.appendChild(thinkingLabel);
+      }
+      content.appendChild(thinking);
+    } else {
+      content.appendChild(renderAskRichText(message.content));
+      if (
+        Object.values(GUEST_RESTRICTION_NOTICES).includes(message.content) ||
+        (typeof GUEST_RESTRICTION_NOTICES_EN !== "undefined" && Object.values(GUEST_RESTRICTION_NOTICES_EN).includes(message.content))
+      ) {
+        const ctaWrap = element("div", "ask-restriction-cta-wrap");
+        const ctaBtn = element("a", "ask-restriction-cta-btn", isEn ? "Sign Up" : "Qeydiyyatdan keç");
+        ctaBtn.href = `/signup?returnTo=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
+        ctaWrap.appendChild(ctaBtn);
+        content.appendChild(ctaWrap);
+      }
+    }
+
+    if (!isStreamingMsg && message.type !== "research") {
+      const chips = renderAskSourceChips(message.groundingMetadata);
+      if (chips) content.appendChild(chips);
+    }
+    if (!isStreamingMsg) appendArtifactCards(content, message);
+    if (!isStreamingMsg && message.content) {
+      content.appendChild(createAskMessageActions(message, messageIndex, isEn));
+      if (isFreshResponse) {
+        freshAskResponses.delete(message);
+      }
+    }
+  } else {
+    if (message.pluginIds?.length) content.appendChild(element("span", "ask-message-context", message.pluginIds.map(id => `@${id}`).join(" · ")));
+    if (message.file) {
+      const fileBadge = element("div", "ask-message-attachment");
+      const iconWrap = element("span", "ask-message-attachment-icon");
+      iconWrap.innerHTML = getFileIconSvg(message.file.mimeType || message.file.type, message.file.name);
+      const meta = element("div", "ask-message-attachment-meta");
+      meta.append(
+        element("span", "ask-message-attachment-name", message.file.name || (isEn ? "File" : "Fayl")),
+        element("span", "ask-message-attachment-size", formatFileSize(message.file.size))
+      );
+      fileBadge.append(iconWrap, meta);
+      content.appendChild(fileBadge);
+    }
+    if (message.content) {
+      const parsedUserMsg = splitQuotedUserMessage(message.content);
+      if (parsedUserMsg.quote) {
+        const quoteBox = element("div", "ask-message-quote");
+        const quoteIcon = element("span", "ask-message-quote-icon");
+        quoteIcon.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>';
+        quoteBox.append(quoteIcon, element("span", "ask-message-quote-text", parsedUserMsg.quote));
+        content.appendChild(quoteBox);
+      }
+      if (parsedUserMsg.text) {
+        content.appendChild(element("div", "ask-message-text", parsedUserMsg.text));
+      }
+    }
+    if (message.strategyTitle) {
+      content.appendChild(element("span", "ask-message-context", `${isEn ? "Strategy" : "Strategiya"}: ${message.strategyTitle}`));
+    }
+    if (message.briefTitle) {
+      content.appendChild(element("span", "ask-message-context", `${t("ask.contextSheet.briefPrefix") || (isEn ? "Brief" : "Brif")}: ${message.briefTitle}`));
+    }
+    if (message.taskTitle) {
+      content.appendChild(element("span", "ask-message-context", `${isEn ? "Task" : "Tapşırıq"}: ${message.taskTitle}`));
+    }
+  }
+  row.appendChild(content);
+  return row;
+}
+
 function renderAsk({ surface = "ask" } = {}) {
   const conv = getConversationState(surface);
   const isDeepResearch = conv.isDeepResearch;
   const isEn = getLanguage() === "en";
-  const isAuto = state.askModel === "auto" || !state.askModel;
   workspace.classList.add("workspace-ask");
   if (isDeepResearch) workspace.classList.add("workspace-deep-research");
   const isChatActive = Boolean(conv.messages.length || conv.loading);
@@ -6945,92 +6939,7 @@ function renderAsk({ surface = "ask" } = {}) {
     thread.appendChild(intro);
   } else {
     conv.messages.forEach((message, messageIndex) => {
-      const isFreshResponse = message.role === "assistant" && freshAskResponses.has(message);
-      const isStreamingMsg = Boolean(message.isStreaming);
-      const isResearch = message.type === "research";
-      const row = element("article", `ask-message ask-message-${message.role}${isFreshResponse ? " is-fresh" : ""}${isStreamingMsg ? " is-streaming" : ""}${isResearch ? " ask-message-research" : ""}`);
-      const content = element("div", "ask-message-content");
-      if (message.role === "assistant") {
-        if (isResearch) {
-          renderAskResearchMessageContent(content, message, messageIndex, isEn, conv.surface);
-        } else if (isStreamingMsg && !message.content) {
-          const isSearching = usesAskSearchAnimation(message);
-          const showLabel = isSearching || isAskThinkingActive(message);
-          const thinking = element("div", `ask-thinking${isSearching ? " is-searching" : ""}${showLabel ? " has-label" : " is-default"}`);
-          thinking.setAttribute("role", "status");
-          thinking.setAttribute("aria-live", "polite");
-          const iconWrap = element("span", "ask-thinking-icon");
-          iconWrap.innerHTML = askThinkingIcon(isSearching);
-          thinking.appendChild(iconWrap);
-          if (showLabel) {
-            const thinkingLabel = element("span", "ask-thinking-label", askThinkingLabel(message, isEn));
-            thinking.appendChild(thinkingLabel);
-          }
-          content.appendChild(thinking);
-        } else {
-          content.appendChild(renderAskRichText(message.content));
-          if (
-            Object.values(GUEST_RESTRICTION_NOTICES).includes(message.content) ||
-            (typeof GUEST_RESTRICTION_NOTICES_EN !== "undefined" && Object.values(GUEST_RESTRICTION_NOTICES_EN).includes(message.content))
-          ) {
-            const ctaWrap = element("div", "ask-restriction-cta-wrap");
-            const ctaBtn = element("a", "ask-restriction-cta-btn", isEn ? "Sign Up" : "Qeydiyyatdan keç");
-            ctaBtn.href = `/signup?returnTo=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
-            ctaWrap.appendChild(ctaBtn);
-            content.appendChild(ctaWrap);
-          }
-        }
-
-        if (!isStreamingMsg && message.type !== "research") {
-          const chips = renderAskSourceChips(message.groundingMetadata);
-          if (chips) content.appendChild(chips);
-        }
-        if (!isStreamingMsg) appendArtifactCards(content, message);
-        if (!isStreamingMsg && message.content) {
-          content.appendChild(createAskMessageActions(message, messageIndex, isEn));
-          if (isFreshResponse) {
-            freshAskResponses.delete(message);
-          }
-        }
-      } else {
-        if (message.pluginIds?.length) content.appendChild(element("span", "ask-message-context", message.pluginIds.map(id => `@${id}`).join(" · ")));
-        if (message.file) {
-          const fileBadge = element("div", "ask-message-attachment");
-          const iconWrap = element("span", "ask-message-attachment-icon");
-          iconWrap.innerHTML = getFileIconSvg(message.file.mimeType || message.file.type, message.file.name);
-          const meta = element("div", "ask-message-attachment-meta");
-          meta.append(
-            element("span", "ask-message-attachment-name", message.file.name || (isEn ? "File" : "Fayl")),
-            element("span", "ask-message-attachment-size", formatFileSize(message.file.size))
-          );
-          fileBadge.append(iconWrap, meta);
-          content.appendChild(fileBadge);
-        }
-        if (message.content) {
-          const parsedUserMsg = splitQuotedUserMessage(message.content);
-          if (parsedUserMsg.quote) {
-            const quoteBox = element("div", "ask-message-quote");
-            const quoteIcon = element("span", "ask-message-quote-icon");
-            quoteIcon.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>';
-            quoteBox.append(quoteIcon, element("span", "ask-message-quote-text", parsedUserMsg.quote));
-            content.appendChild(quoteBox);
-          }
-          if (parsedUserMsg.text) {
-            content.appendChild(element("div", "ask-message-text", parsedUserMsg.text));
-          }
-        }
-        if (message.strategyTitle) {
-          content.appendChild(element("span", "ask-message-context", `${isEn ? "Strategy" : "Strategiya"}: ${message.strategyTitle}`));
-        }
-        if (message.briefTitle) {
-          content.appendChild(element("span", "ask-message-context", `${t("ask.contextSheet.briefPrefix") || (isEn ? "Brief" : "Brif")}: ${message.briefTitle}`));
-        }
-        if (message.taskTitle) {
-          content.appendChild(element("span", "ask-message-context", `${isEn ? "Task" : "Tapşırıq"}: ${message.taskTitle}`));
-        }
-      }
-      row.appendChild(content);
-      thread.appendChild(row);
+      thread.appendChild(createAskMessageElement(message, messageIndex, { isEn, surface: conv.surface }));
     });
   }
 
@@ -7107,7 +7016,6 @@ function renderAsk({ surface = "ask" } = {}) {
       const fileData = await readFileAsData(file, { isEn, signal: controller.signal });
       if (!isCurrent()) return;
       state.askPendingFile = fileData;
-      state.askModel = "auto";
       state.askError = "";
     } catch (err) {
       if (!isCurrent()) return;
@@ -7726,7 +7634,7 @@ function renderAsk({ surface = "ask" } = {}) {
   if (isDeepResearch) {
     composerActions.append(submit);
   } else {
-    const modelSelector = createAskModelSelector(isEn);
+    const modelSelector = createAskModelSelector(isEn, { isHome: surface === "ask" && !isChatActive });
     composerActions.append(modelSelector, submit);
   }
 
@@ -7781,14 +7689,18 @@ function renderAsk({ surface = "ask" } = {}) {
   }
 
   const guideCards = (!isChatActive && !selectedStrategy && !selectedTask) ? createHomeGuideCards(isEn, "ask") : null;
-  if (guideCards && !isDeepResearch) {
+  if (isDeepResearch && !state.deepResearchAvailable) {
+    const status = element("p", "ask-research-availability", isEn ? "Temporarily unavailable" : "Müvəqqəti əlçatmazdır");
+    status.setAttribute("role", "status");
+    composerArea.append(status);
+  } else if (guideCards && !isDeepResearch) {
     composerArea.append(form, helper, guideCards);
   } else if (isChatActive) {
     composerArea.append(form, helper);
   } else {
     composerArea.append(form);
   }
-  if (isDeepResearch && !isChatActive) {
+  if (isDeepResearch && state.deepResearchAvailable && !isChatActive) {
     const modelNoticeCard = createDeepResearchModelNoticeCard(isEn);
     if (modelNoticeCard) {
       composerArea.append(modelNoticeCard);
@@ -9235,6 +9147,10 @@ function finalizeStreamingAskMessageDom(message, messageIndex) {
     if (!content.querySelector(".ask-artifact-card") && Array.isArray(message.artifacts) && message.artifacts.length > 0) {
       appendArtifactCards(content, message);
     }
+    if (!content.querySelector(".ask-grounding-container")) {
+      const sources = renderAskSourceChips(message.groundingMetadata);
+      if (sources) content.appendChild(sources);
+    }
     if (row.classList.contains("strategy-ask-message")) {
       if (!content.querySelector(".strategy-ask-message-actions")) {
         content.appendChild(createStrategyAskMessageActions(message, messageIndex, isEn));
@@ -9283,6 +9199,51 @@ function finalizeStreamingAskMessageDom(message, messageIndex) {
     btn.disabled = false;
   });
 
+  return true;
+}
+
+function appendAskTurnToDom(userMsg, userMsgIndex, assistantMsg, assistantMsgIndex, { hasStructuralChange = false } = {}) {
+  if (hasStructuralChange || !state.askChatId || state.mode !== "ask" || state.view === "deep-research") {
+    return false;
+  }
+  const shell = document.querySelector(".ask-shell:not(.ask-shell-deep-research)");
+  const thread = shell?.querySelector(".ask-thread");
+  if (!shell || !thread || thread.querySelector(".ask-intro")) {
+    return false;
+  }
+  const existingRows = Array.from(thread.children || []).filter((node) => node.classList?.contains("ask-message"));
+  if (existingRows.length !== userMsgIndex) {
+    return false;
+  }
+  const isEn = getLanguage() === "en";
+  thread.querySelectorAll(".ask-error").forEach((node) => node.remove());
+  const composer = shell.querySelector(".ask-composer");
+  composer?.querySelectorAll(".ask-pending-file, .ask-quote-preview").forEach((node) => node.remove());
+
+  thread.appendChild(createAskMessageElement(userMsg, userMsgIndex, { isEn, surface: "ask" }));
+  thread.appendChild(createAskMessageElement(assistantMsg, assistantMsgIndex, { isEn, surface: "ask" }));
+
+  const askInput = document.querySelector("#askInput");
+  const askSubmit = document.querySelector(".ask-composer .ask-submit");
+  if (askInput) {
+    askInput.value = "";
+    askInput.style.height = "auto";
+    askInput.disabled = true;
+  }
+  shell.classList.remove("has-input");
+  composer?.classList.remove("has-input");
+  composer?.querySelector(".ask-input-wrap")?.classList.remove("has-value");
+  if (askSubmit) {
+    askSubmit.classList.add("is-stop", "is-generating");
+    askSubmit.type = "button";
+    askSubmit.disabled = false;
+    askSubmit.setAttribute("aria-label", isEn ? "Stop generating" : "Dayandır");
+    askSubmit.title = isEn ? "Stop generating" : "Dayandır";
+    askSubmit.replaceChildren(createAskStopIcon());
+  }
+  document.querySelectorAll(".ask-plugin-token-remove, .strategy-ask-deeper").forEach((btn) => {
+    btn.disabled = true;
+  });
   return true;
 }
 
@@ -9335,7 +9296,7 @@ async function thinkDeeperWithHigh(messageIndex) {
   const previousModel = assistantMsg.model;
   const previousGrounding = assistantMsg.groundingMetadata;
   assistantMsg.content = "";
-  assistantMsg.model = "gemini-4-hydrogen";
+  assistantMsg.model = "default";
   assistantMsg.isStreaming = true;
   setAskMessageMeta(assistantMsg, {
     thinkingLevel: "high",
@@ -9352,6 +9313,7 @@ async function thinkDeeperWithHigh(messageIndex) {
 
   let typewriter = null;
   let accumulatedFullText = "";
+  let trimmedFromServer = false;
   const epoch = state.identityEpoch;
   const expectedUserId = state.currentUser?.id || null;
 
@@ -9369,6 +9331,10 @@ async function thinkDeeperWithHigh(messageIndex) {
     surface: "ask",
   };
 
+  const regenPayloadMessages = state.askChatId && historyMessages.at(-1)?.role === "user"
+    ? [sanitizeAskMessageForApi(historyMessages.at(-1))]
+    : historyMessages.map(sanitizeAskMessageForApi);
+
   try {
     let response = await fetch("/api/ask", {
       method: "POST",
@@ -9380,14 +9346,15 @@ async function thinkDeeperWithHigh(messageIndex) {
         "X-Helmer-Model-Improvement": String(isModelImprovementActive()),
       },
       body: JSON.stringify({
-        messages: historyMessages.map(sanitizeAskMessageForApi),
-        model: "gemini-4-hydrogen",
+        messages: regenPayloadMessages,
+        model: "default",
         thinkingLevel: "high",
         strategyId: state.askStrategyId || undefined,
         briefId: state.askBriefId || undefined,
         taskId: state.askTaskId || undefined,
         chatId: state.askChatId || undefined,
         chatRevision: state.askChatId ? (window.helmerSecurity?.getRevision(state.askChatId) || 1) : undefined,
+        ...(state.askChatId ? { regenerateFromIndex: messageIndex } : {}),
         stream: true,
       }),
     });
@@ -9410,14 +9377,15 @@ async function thinkDeeperWithHigh(messageIndex) {
               "X-Helmer-Model-Improvement": String(isModelImprovementActive()),
             },
             body: JSON.stringify({
-              messages: historyMessages.map(sanitizeAskMessageForApi),
-              model: "gemini-4-hydrogen",
+              messages: regenPayloadMessages,
+              model: "default",
               thinkingLevel: "high",
               strategyId: state.askStrategyId || undefined,
               briefId: state.askBriefId || undefined,
               taskId: state.askTaskId || undefined,
               chatId: state.askChatId || undefined,
               chatRevision: state.askChatId ? (window.helmerSecurity?.getRevision(state.askChatId) || 1) : undefined,
+              ...(state.askChatId ? { regenerateFromIndex: messageIndex } : {}),
               stream: true,
             }),
           });
@@ -9441,14 +9409,15 @@ async function thinkDeeperWithHigh(messageIndex) {
               "X-Helmer-Model-Improvement": String(isModelImprovementActive()),
             },
             body: JSON.stringify({
-              messages: historyMessages.map(sanitizeAskMessageForApi),
-              model: "gemini-4-hydrogen",
+              messages: regenPayloadMessages,
+              model: "default",
               thinkingLevel: "high",
               strategyId: state.askStrategyId || undefined,
               briefId: state.askBriefId || undefined,
               taskId: state.askTaskId || undefined,
               chatId: state.askChatId || undefined,
               chatRevision: conflictData.revision,
+              ...(state.askChatId ? { regenerateFromIndex: messageIndex } : {}),
               stream: true,
             }),
           });
@@ -9556,6 +9525,10 @@ async function thinkDeeperWithHigh(messageIndex) {
           typewriter.finish(finalReply);
           assistantMsg.interactionId = data.interactionId || assistantMsg.interactionId;
           rememberSavedAskChat(data.chat);
+          if (Array.isArray(data.chat?.messages) && data.chat.messages.length < state.askMessages.length) {
+            state.askMessages.splice(data.chat.messages.length);
+            trimmedFromServer = true;
+          }
           if (typeof data.remainingGuestMessages === "number") {
             state.guestQuotaVersion += 1;
             state.remainingGuestMessages = data.remainingGuestMessages;
@@ -9578,10 +9551,14 @@ async function thinkDeeperWithHigh(messageIndex) {
       const data = await response.json();
       if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
       assistantMsg.content = data.reply;
-      assistantMsg.model = data.model || "gemini-3.8-flash";
+      assistantMsg.model = data.model || assistantMsg.model;
       assistantMsg.interactionId = data.interactionId || assistantMsg.interactionId;
       assistantMsg.isStreaming = false;
       rememberSavedAskChat(data.chat);
+      if (Array.isArray(data.chat?.messages) && data.chat.messages.length < state.askMessages.length) {
+        state.askMessages.splice(data.chat.messages.length);
+        trimmedFromServer = true;
+      }
       if (typeof data.remainingGuestMessages === "number") {
         state.guestQuotaVersion += 1;
         state.remainingGuestMessages = data.remainingGuestMessages;
@@ -9619,11 +9596,29 @@ async function thinkDeeperWithHigh(messageIndex) {
       assistantMsg.isStreaming = false;
       state.askLoading = false;
       const msgIdx = state.askMessages.indexOf(assistantMsg);
-      if (!finalizeStreamingAskMessageDom(assistantMsg, msgIdx >= 0 ? msgIdx : messageIndex)) {
+      if (trimmedFromServer || !finalizeStreamingAskMessageDom(assistantMsg, msgIdx >= 0 ? msgIdx : messageIndex)) {
         render();
       }
     }
   }
+}
+
+function isRecoverableAskNetworkError(error) {
+  if (!error) return false;
+  if (error.isStreamInterrupted === true) return true;
+  if (error.code === "EXECUTION_UNAVAILABLE") return true;
+  if (error.name === "TypeError") return true;
+  const msg = String(error.message || "").toLowerCase();
+  return (
+    msg.includes("load failed") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("networkerror") ||
+    msg.includes("network error") ||
+    msg.includes("internet connection appears to be offline") ||
+    msg.includes("connection lost") ||
+    msg.includes("bağlantı kəsildi") ||
+    msg.includes("connection ended")
+  );
 }
 
 // Keep identical retries tied to one admitted operation. A revision change is a
@@ -9633,6 +9628,7 @@ function createAskRequestOperation(payload) {
   const key = window.helmerSecurity?.idempotencyKey?.() || crypto.randomUUID();
   return {
     idempotencyKey: key,
+    model: payload.model,
     send(signal) {
       return fetch('/api/ask', {
         method: 'POST', signal,
@@ -9653,9 +9649,12 @@ function createAskRequestOperation(payload) {
 async function consumeAskEventStream(reader, onEvent, { maxFrameChars = 8 * 1024 * 1024, idleTimeoutMs = 65000 } = {}) {
   const decoder = new TextDecoder();
   let buffer = '', lines = [], frameChars = 0, completed = false;
-  const protocolError = () => new Error(getLanguage() === 'en'
-    ? 'The response stream was interrupted or invalid. Please retry.'
-    : 'Cavab axını kəsildi və ya düzgün deyil. Yenidən cəhd edin.');
+  const protocolError = () => Object.assign(
+    new Error(getLanguage() === 'en'
+      ? 'The response stream was interrupted or invalid. Please retry.'
+      : 'Cavab axını kəsildi və ya düzgün deyil. Yenidən cəhd edin.'),
+    { isStreamInterrupted: true }
+  );
   const dispatch = async () => {
     if (!lines.length) return;
     const dataText = lines.join('\n');
@@ -9669,13 +9668,17 @@ async function consumeAskEventStream(reader, onEvent, { maxFrameChars = 8 * 1024
         window.helmerSecurity?.revisions?.set?.(state.askChatId, data.revision);
       }
       const isEn = getLanguage() === 'en';
+      let message;
       if (['ASK_TIMEOUT', 'ASK_PROVIDER_TIMEOUT', 'EXECUTION_TIMEOUT'].includes(data.code)) {
-        throw new Error(isEn ? 'The response timed out. Please retry.' : 'Cavab üçün gözləmə müddəti bitdi. Yenidən cəhd edin.');
+        message = isEn ? 'The response timed out. Please retry.' : 'Cavab üçün gözləmə müddəti bitdi. Yenidən cəhd edin.';
+      } else if (data.code === 'GROUNDING_UNAVAILABLE') {
+        message = isEn ? 'Web Search could not verify any sources. Please retry.' : 'Veb axtarışı mənbələri təsdiqləyə bilmədi. Yenidən cəhd edin.';
+      } else {
+        message = typeof data.error === 'string' ? data.error : protocolError().message;
       }
-      if (data.code === 'GROUNDING_UNAVAILABLE') {
-        throw new Error(isEn ? 'Web Search could not verify any sources. Please retry.' : 'Veb axtarışı mənbələri təsdiqləyə bilmədi. Yenidən cəhd edin.');
-      }
-      throw new Error(typeof data.error === 'string' ? data.error : protocolError().message);
+      const streamErr = new Error(message);
+      if (typeof data.code === 'string' && data.code) streamErr.code = data.code;
+      throw streamErr;
     }
     if (data.chunk !== undefined && typeof data.chunk !== 'string') throw protocolError();
     if (data.reply !== undefined && typeof data.reply !== 'string') throw protocolError();
@@ -9724,6 +9727,7 @@ async function consumeAskEventStream(reader, onEvent, { maxFrameChars = 8 * 1024
 async function submitAskMessage(message, attachedFile = null, { preserveWhitespace = false, retryOperation = null, idempotencyKey = null, surface = getActiveConversationSurface(), forceResearch = false } = {}) {
   const conv = getConversationState(surface);
   const isDeepResearch = Boolean(conv.isDeepResearch || forceResearch);
+  if (isDeepResearch && state.deepResearchAvailable !== true) return;
   const selectedStrategy = state.savedStrategies.find((strategy) => strategy.id === conv.strategyId) || null;
   const selectedBriefCandidate = state.savedStrategies.find((strategy) => strategy.id === conv.briefId) || null;
   const selectedBrief = selectedBriefCandidate && getSavedStrategyBriefText(selectedBriefCandidate) ? selectedBriefCandidate : null;
@@ -9783,7 +9787,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
 
   const cleanResearchPrompt = contentText;
 
-  conv.messages.push({
+  const userMsg = {
     role: "user",
     content: contentText,
     pluginIds: isDeepResearch ? [] : pluginIds,
@@ -9791,7 +9795,8 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
     strategyTitle: selectedStrategy?.title || "",
     briefTitle: selectedBrief ? formatBriefContextLabel(selectedBrief, 64) : "",
     taskTitle: selectedTask?.text || "",
-  });
+  };
+  conv.messages.push(userMsg);
 
   const epoch = state.identityEpoch;
   const expectedUserId = state.currentUser?.id || null;
@@ -9938,16 +9943,15 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
     return;
   }
 
-  const chosenModel = "gemini-4-hydrogen";
-  const initialPlaceholderModel = "gemini-4-hydrogen";
+  const chosenModel = retryOperation?.model || state.askModel;
   const assistantMsg = {
     role: "assistant",
     content: "",
-    model: initialPlaceholderModel,
+    model: chosenModel,
     isStreaming: true,
   };
   setAskMessageMeta(assistantMsg, {
-    thinkingLevel: state.askThinkingEnabled ? (currentAskThinking || "low") : "auto",
+    thinkingLevel: state.askThinkingEnabled ? (currentAskThinking || "low") : "off",
     thinkingEnabled: Boolean(state.askThinkingEnabled),
     briefContextWait: Boolean(state.askBriefId),
     strategyContextWait: Boolean(!state.askBriefId && state.askStrategyId),
@@ -9958,7 +9962,11 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
   state.askError = "";
   freshAskResponses.add(assistantMsg);
   trackEvent("ask_message_sent", { messageCount: state.askMessages.length, model: chosenModel, hasFile: Boolean(fileToAttach) });
-  render();
+  if (!appendAskTurnToDom(userMsg, messageIndex, assistantMsg, state.askMessages.length - 1, {
+    hasStructuralChange: Boolean(pluginIds.length || artifactId || retryOperation),
+  })) {
+    render();
+  }
   scrollToLatestAskTurn();
   startAskWaitStages(assistantMsg);
 
@@ -9966,6 +9974,9 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
   let accumulatedFullText = "";
   let finalEventReceived = false;
   let askResponseSaved = false;
+  let handedOffToPolling = false;
+  let syncedMessagesFromServer = false;
+  const expectedMinMessages = state.askMessages.length;
 
   currentAskAbortController?.abort();
   const controller = new AbortController();
@@ -9973,12 +9984,16 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
   activeAskReader = null;
   activeAskTypewriter = null;
 
-  const apiThinkingLevel = (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking))
-    ? currentAskThinking
-    : undefined;
+  const apiThinkingLevel = state.askThinkingEnabled ? currentAskThinking : (state.currentUser ? "low" : "off");
+
+  const outgoingMessages = state.askMessages.slice(0, -1);
+  const lastOutgoingUserMsg = outgoingMessages.at(-1);
+  const requestMessages = state.askChatId && lastOutgoingUserMsg?.role === "user"
+    ? [sanitizeAskMessageForApi(lastOutgoingUserMsg)]
+    : outgoingMessages.map(sanitizeAskMessageForApi);
 
   let askOperation = retryOperation || createAskRequestOperation({
-    messages: state.askMessages.slice(0, -1).map(sanitizeAskMessageForApi),
+    messages: requestMessages,
     model: chosenModel,
     thinkingLevel: apiThinkingLevel,
     strategyId: state.askStrategyId || undefined,
@@ -10020,6 +10035,23 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
           if (activeAskRunMeta) activeAskRunMeta.idempotencyKey = askOperation?.idempotencyKey || null;
           response = await askOperation.send(controller.signal);
           if (isIdentityStale(epoch, expectedUserId) || controller.signal.aborted) return;
+        } else if (conflictData.code === "REQUEST_ALREADY_SUBMITTED") {
+          const recoverChatId = activeAskRunMeta?.chatId || state.askChatId;
+          if (recoverChatId && typeof pollActiveAskRun === "function") {
+            handedOffToPolling = true;
+            clearAskWaitStages(assistantMsg);
+            assistantMsg.isStreaming = true;
+            assistantMsg.status = "thinking";
+            assistantMsg.statusText = getLanguage() === "en" ? "Reconnecting to response..." : "Cavaba yenidən qoşulur...";
+            updateActiveAskThinkingStatus(assistantMsg);
+            pollActiveAskRun(recoverChatId, activeAskRunMeta?.runId || null, epoch, expectedUserId, {
+              immediate: true,
+              expectedMinMessages,
+              pendingPrompt: contentText,
+              retryPayload: { message: contentText, file: fileToAttach, pluginIds, artifactId, messageIndex, operation: null },
+            }).catch(() => {});
+            return;
+          }
         }
       }
     }
@@ -10185,6 +10217,10 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
       }
       assistantMsg.isStreaming = false;
       rememberSavedAskChat(data.chat);
+      if (Array.isArray(data.chat?.messages) && data.chat.messages.length > 0) {
+        state.askMessages = data.chat.messages.map((m) => ({ ...m }));
+        syncedMessagesFromServer = true;
+      }
       if (typeof data.remainingGuestMessages === "number") {
         state.guestQuotaVersion += 1;
         state.remainingGuestMessages = data.remainingGuestMessages;
@@ -10196,7 +10232,26 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
     }
   } catch (error) {
     const isAborted = error?.name === "AbortError" || currentAskAbortController?.signal?.aborted || controller.signal.aborted || isIdentityStale(epoch, expectedUserId);
-    if (!isAborted) {
+    if (!isAborted && isRecoverableAskNetworkError(error)) {
+      const recoverChatId = activeAskRunMeta?.chatId || state.askChatId;
+      if (recoverChatId && typeof pollActiveAskRun === "function") {
+        handedOffToPolling = true;
+        clearAskWaitStages(assistantMsg);
+        assistantMsg.isStreaming = true;
+        assistantMsg.status = "thinking";
+        assistantMsg.statusText = getLanguage() === "en" ? "Reconnecting to response..." : "Cavaba yenidən qoşulur...";
+        updateActiveAskThinkingStatus(assistantMsg);
+        pollActiveAskRun(recoverChatId, activeAskRunMeta?.runId || null, epoch, expectedUserId, {
+          immediate: true,
+          expectedMinMessages,
+          pendingPrompt: contentText,
+          retryPayload: { message: contentText, file: fileToAttach, pluginIds, artifactId, messageIndex, operation: askOperation },
+        }).catch(() => {});
+      } else if (!isIdentityStale(epoch, expectedUserId)) {
+        state.askError = getLanguage() === "en" ? "Connection lost. Please retry." : "Bağlantı kəsildi. Yenidən cəhd edin.";
+        state.askRetry = error?.noRetry ? null : { message: contentText, file: fileToAttach, pluginIds, artifactId, messageIndex, operation: askOperation };
+      }
+    } else if (!isAborted) {
       const isGuestLimit = error.message?.includes("Qonaq mesaj limitiniz bitdi") || error.message?.includes("GUEST_DAILY_LIMIT");
       if (isGuestLimit) {
         state.guestQuotaVersion += 1;
@@ -10208,22 +10263,26 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
         state.askRetry = error?.noRetry ? null : { message: contentText, file: fileToAttach, pluginIds, artifactId, messageIndex, operation: askOperation };
       }
     }
-    if (!isIdentityStale(epoch, expectedUserId) && !assistantMsg.content && !accumulatedFullText) {
+    if (!handedOffToPolling && !isIdentityStale(epoch, expectedUserId) && !assistantMsg.content && !accumulatedFullText) {
       const idx = state.askMessages.indexOf(assistantMsg);
       if (idx !== -1) state.askMessages.splice(idx, 1);
     }
   } finally {
     clearAskWaitStages(assistantMsg);
     typewriter?.flush();
+    if (handedOffToPolling) {
+      assistantMsg.isStreaming = true;
+      updateActiveAskThinkingStatus(assistantMsg);
+    }
     if (activeAskTypewriter === typewriter) activeAskTypewriter = null;
     if (currentAskAbortController === controller) {
       currentAskAbortController = null;
       activeAskReader = null;
     }
-    if (activeAskRunMeta?.idempotencyKey && activeAskRunMeta.idempotencyKey === (askOperation?.idempotencyKey || null)) {
+    if (!handedOffToPolling && activeAskRunMeta?.idempotencyKey && activeAskRunMeta.idempotencyKey === (askOperation?.idempotencyKey || null)) {
       activeAskRunMeta = null;
     }
-    if (!isIdentityStale(epoch, expectedUserId)) {
+    if (!handedOffToPolling && !isIdentityStale(epoch, expectedUserId)) {
       if (accumulatedFullText && (!assistantMsg.content || assistantMsg.content.length < accumulatedFullText.length)) {
         assistantMsg.content = accumulatedFullText;
       }
@@ -10236,7 +10295,7 @@ async function submitAskMessage(message, attachedFile = null, { preserveWhitespa
       assistantMsg.isStreaming = false;
       state.askLoading = false;
       const msgIdx = state.askMessages.indexOf(assistantMsg);
-      if (!finalizeStreamingAskMessageDom(assistantMsg, msgIdx >= 0 ? msgIdx : messageIndex + 1)) {
+      if (syncedMessagesFromServer || !finalizeStreamingAskMessageDom(assistantMsg, msgIdx >= 0 ? msgIdx : messageIndex + 1)) {
         render();
       }
     }
@@ -11179,7 +11238,7 @@ function showLoadingAskModal(initialQuery) {
         },
         body: JSON.stringify({
           messages: thread.map(sanitizeAskMessageForApi),
-          model: "gemini-4-hydrogen",
+          model: "default",
           thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
           strategyId: state.askStrategyId || undefined,
           briefId: state.askBriefId || undefined,
@@ -11206,7 +11265,7 @@ function showLoadingAskModal(initialQuery) {
             },
             body: JSON.stringify({
               messages: thread.map(sanitizeAskMessageForApi),
-              model: "gemini-4-hydrogen",
+              model: "default",
               thinkingLevel: (state.askThinkingEnabled && ["low", "medium", "high", "off"].includes(currentAskThinking)) ? currentAskThinking : undefined,
               strategyId: state.askStrategyId || undefined,
               briefId: state.askBriefId || undefined,
@@ -12960,7 +13019,7 @@ function buildOrchestrationMetaPanel(strategy, isEn) {
     webSearchQueries: strategy?.orchestration?.searchQueries,
     searchEntryPoint: strategy?.orchestration?.searchEntryPoint,
   });
-  if (!sources.length && !searchSuggestions.length) return null;
+  if (!sources.length && !searchSuggestions.length && strategy?.orchestration?.groundingUnavailable !== true) return null;
 
   const panel = element("section", "strategy-sources-card");
   panel.setAttribute("aria-label", isEn ? "Research sources" : "Araşdırma mənbələri");
@@ -12974,6 +13033,11 @@ function buildOrchestrationMetaPanel(strategy, isEn) {
     element("p", "", isEn ? "Source-linked findings shown separately from the generated plan" : "Mənbələrlə əlaqələndirilmiş tapıntılar plandan ayrıca göstərilir")
   );
   panel.appendChild(heading);
+  if (strategy?.orchestration?.groundingUnavailable === true) {
+    panel.appendChild(element("p", "", isEn
+      ? "Live web sources could not be verified for this strategy."
+      : "Bu strategiya üçün canlı veb mənbələri təsdiqlənmədi."));
+  }
   const list = element("div", "strategy-sources-list");
   const sourceLink = source => {
     let url;
@@ -13423,7 +13487,6 @@ function isActiveStrategyCopilotGrounded() {
 }
 
 async function ensureStrategyAskContext() {
-  state.askModel = "gemini-4-hydrogen";
   const isGrounded = isActiveStrategyCopilotGrounded();
   if (state.savedId) {
     if (isGrounded) {
@@ -14016,7 +14079,6 @@ function buildRefinementPanel() {
       openGuestRestrictionModal(GUEST_RESTRICTION_NOTICES.strategy);
       return;
     }
-    state.askModel = "gemini-4-hydrogen";
     if (isActiveStrategyCopilotGrounded()) {
       if (state.savedId) resetAskForBrief(state.savedId);
       else resetAskForBrief("", true);
@@ -14418,18 +14480,65 @@ async function loadSavedChats() {
   }
 }
 
-async function pollActiveAskRun(chatId, runId, epoch, expectedUserId) {
+async function pollActiveAskRun(chatId, runId, epoch, expectedUserId, options = {}) {
   stopAskRunPolling();
   const pollController = new AbortController();
   activeAskPollController = pollController;
   const isEn = getLanguage() === "en";
+  const {
+    immediate = false,
+    expectedMinMessages = null,
+    pendingPrompt = "",
+    retryPayload = null,
+  } = options || {};
+  const targetMinMessages = Number.isInteger(expectedMinMessages)
+    ? expectedMinMessages
+    : Math.max(2, state.askMessages.filter((m) => m && !m.isStreaming).length + 1);
+  let settleRetries = 0;
+
+  const buildPreservedMessages = (serverChat, lastErr = null) => {
+    const base = Array.isArray(serverChat?.messages)
+      ? serverChat.messages.map((m) => ({ ...m }))
+      : state.askMessages.filter((m) => m && !m.isStreaming).map((m) => ({ ...m }));
+    const promptText = String(
+      pendingPrompt ||
+      retryPayload?.message ||
+      lastErr?.promptPreview ||
+      state.askMessages.filter((m) => m && m.role === "user").at(-1)?.content ||
+      ""
+    ).trim();
+    if (promptText && (base.length < targetMinMessages - 1 || base.at(-1)?.role !== "user")) {
+      base.push({ role: "user", content: promptText });
+    }
+    return base;
+  };
+
+  const buildPollRetry = (preserved) => {
+    const lastUser = preserved.filter((m) => m && m.role === "user").at(-1);
+    const messageText = retryPayload?.message || lastUser?.content || "";
+    if (!messageText) return null;
+    return {
+      message: messageText,
+      file: retryPayload?.file || lastUser?.file || null,
+      pluginIds: retryPayload?.pluginIds || lastUser?.pluginIds || [],
+      artifactId: retryPayload?.artifactId || null,
+      messageIndex: Math.max(0, preserved.length - 1),
+      operation: null,
+    };
+  };
+
+  const clearActiveAskRunState = () => {
+    if (activeAskPollController === pollController) activeAskPollController = null;
+    if (activeAskRunMeta?.chatId === chatId) activeAskRunMeta = null;
+  };
 
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (isIdentityStale(epoch, expectedUserId) || pollController.signal.aborted || state.askChatId !== chatId || state.mode !== "ask") {
       return;
     }
+    const waitMs = settleRetries > 0 ? 500 : (immediate && attempt === 0 ? 250 : 1500);
     await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 1500);
+      const timer = setTimeout(resolve, waitMs);
       pollController.signal.addEventListener("abort", () => {
         clearTimeout(timer);
         resolve();
@@ -14444,34 +14553,79 @@ async function pollActiveAskRun(chatId, runId, epoch, expectedUserId) {
       if (isIdentityStale(epoch, expectedUserId) || pollController.signal.aborted || state.askChatId !== chatId) {
         return;
       }
-      if (!data?.activeRun || (runId && data.activeRun.runId && data.activeRun.runId !== runId && !data.chat)) {
-        if (activeAskPollController === pollController) activeAskPollController = null;
-        if (activeAskRunMeta?.chatId === chatId) activeAskRunMeta = null;
+      const runStillActive = Boolean(data?.activeRun && (!runId || !data.activeRun.runId || data.activeRun.runId === runId));
+      if (runStillActive) {
+        settleRetries = 0;
+        continue;
+      }
+      const chatMsgs = Array.isArray(data?.chat?.messages) ? data.chat.messages : null;
+      if (chatMsgs && chatMsgs.length >= targetMinMessages && chatMsgs.at(-1)?.role === "assistant") {
+        clearActiveAskRunState();
         state.askLoading = false;
-        if (data?.chat) {
-          state.askMessages = Array.isArray(data.chat.messages) ? data.chat.messages : [];
-          rememberSavedAskChat(data.chat);
-          if (state.currentUser) loadSavedChats().catch(() => { });
-        } else {
-          state.askMessages = state.askMessages.filter((m) => m && !m.isStreaming);
-        }
+        state.askError = "";
+        state.askRetry = null;
+        state.askMessages = chatMsgs;
+        rememberSavedAskChat(data.chat);
+        if (state.currentUser) loadSavedChats().catch(() => { });
         render();
         scrollToLatestAskTurn();
         return;
       }
+      if (data?.lastRunError) {
+        clearActiveAskRunState();
+        state.askLoading = false;
+        if (data.chat) rememberSavedAskChat(data.chat);
+        const preserved = buildPreservedMessages(data.chat, data.lastRunError);
+        state.askMessages = preserved;
+        state.askError = data.lastRunError.error || (isEn ? "Unable to generate response." : "Cavabı hazırlamaq mümkün olmadı.");
+        state.askRetry = buildPollRetry(preserved);
+        render();
+        scrollToLatestAskTurn();
+        return;
+      }
+      if (settleRetries < 3) {
+        settleRetries += 1;
+        continue;
+      }
+      clearActiveAskRunState();
+      state.askLoading = false;
+      if (data?.chat) rememberSavedAskChat(data.chat);
+      const preserved = buildPreservedMessages(data?.chat, null);
+      state.askMessages = preserved;
+      state.askError = isEn ? "The background response could not be recovered." : "Arxa planda tamamlanan cavabı yükləmək mümkün olmadı.";
+      state.askRetry = buildPollRetry(preserved);
+      render();
+      scrollToLatestAskTurn();
+      return;
     } catch (error) {
       if (error?.name === "AbortError" || pollController.signal.aborted || isIdentityStale(epoch, expectedUserId)) {
         return;
       }
-      if (activeAskPollController === pollController) activeAskPollController = null;
-      if (activeAskRunMeta?.chatId === chatId) activeAskRunMeta = null;
+      if (settleRetries < 3) {
+        settleRetries += 1;
+        continue;
+      }
+      clearActiveAskRunState();
       state.askLoading = false;
-      state.askMessages = state.askMessages.filter((m) => m && !m.isStreaming);
+      const preserved = buildPreservedMessages(null, null);
+      state.askMessages = preserved;
       state.askError = isEn ? "The background response could not be recovered." : "Arxa planda tamamlanan cavabı yükləmək mümkün olmadı.";
+      state.askRetry = buildPollRetry(preserved);
       render();
       return;
     }
   }
+  if (isIdentityStale(epoch, expectedUserId) || pollController.signal.aborted || state.askChatId !== chatId || state.mode !== "ask") {
+    return;
+  }
+  clearActiveAskRunState();
+  state.askLoading = false;
+  const preserved = buildPreservedMessages(null, null);
+  state.askMessages = preserved;
+  state.askError = isEn ? "The response took longer than expected to complete." : "Cavabın tamamlanması gözləniləndən uzun çəkdi.";
+  state.askRetry = buildPollRetry(preserved);
+  render();
+  scrollToLatestAskTurn();
 }
 
 async function openSavedChat(chatId) {
@@ -14482,17 +14636,21 @@ async function openSavedChat(chatId) {
   try {
     const data = await api(`/api/ask/chats/${chatId}`);
     if (epoch !== state.identityEpoch || (state.currentUser?.id || null) !== expectedUserId) return;
-    if (!data.chat && !data.activeRun) return;
+    if (!data.chat && !data.activeRun && !data.lastRunError) return;
     if (data.chat) {
       rememberSavedAskChat(data.chat);
-    } else if (data.activeRun?.chatId) {
-      state.askChatId = data.activeRun.chatId;
-      rememberActiveAskChat(data.activeRun.chatId);
+    } else if (data.activeRun?.chatId || data.lastRunError?.chatId) {
+      const recoveredId = data.activeRun?.chatId || data.lastRunError?.chatId;
+      state.askChatId = recoveredId;
+      rememberActiveAskChat(recoveredId);
     }
     const msgs = Array.isArray(data.chat?.messages) ? [...data.chat.messages] : [];
     const activeRun = data.activeRun && data.activeRun.status === "running" ? data.activeRun : null;
-    if (!data.chat && activeRun?.promptPreview) {
+    const lastRunError = !activeRun && data.lastRunError ? data.lastRunError : null;
+    if (activeRun?.promptPreview && msgs.at(-1)?.role !== "user") {
       msgs.push({ role: "user", content: activeRun.promptPreview });
+    } else if (lastRunError?.promptPreview && msgs.at(-1)?.role !== "user") {
+      msgs.push({ role: "user", content: lastRunError.promptPreview });
     }
     const isResearchChat = msgs.length > 0 && msgs.some((m) => m && (m.type === "research" || m.jobId)) && !msgs.some((m) => m && m.role === "assistant" && m.type !== "research" && !m.jobId);
     state.currentChatId = data.chat?.id || chatId;
@@ -14522,12 +14680,13 @@ async function openSavedChat(chatId) {
         const pendingAssistant = {
           role: "assistant",
           content: "",
-          model: activeRun.model || "gemini-4-hydrogen",
+          model: activeRun.model || "default",
           isStreaming: true,
           status: "thinking",
           statusText: isEn ? "Generating response..." : "Cavab hazırlanır...",
         };
         msgs.push(pendingAssistant);
+        const expectedMin = msgs.length;
         state.askMessages = msgs;
         state.askLoading = true;
         if (typeof activeAskRunMeta !== "undefined") {
@@ -14545,12 +14704,29 @@ async function openSavedChat(chatId) {
         closeSidebar();
         startAskWaitStages(pendingAssistant);
         if (typeof pollActiveAskRun === "function") {
-          pollActiveAskRun(state.askChatId, activeRun.runId, epoch, expectedUserId).catch(() => { });
+          pollActiveAskRun(state.askChatId, activeRun.runId, epoch, expectedUserId, {
+            expectedMinMessages: expectedMin,
+            pendingPrompt: activeRun.promptPreview || "",
+          }).catch(() => { });
         }
         return;
       }
       state.askMessages = msgs;
       state.askLoading = false;
+      if (lastRunError) {
+        state.askError = lastRunError.error || (isEn ? "Unable to generate response." : "Cavabı hazırlamaq mümkün olmadı.");
+        const lastUser = msgs.filter((m) => m && m.role === "user").at(-1);
+        if (lastUser?.content) {
+          state.askRetry = {
+            message: lastUser.content,
+            file: lastUser.file || null,
+            pluginIds: lastUser.pluginIds || [],
+            artifactId: null,
+            messageIndex: Math.max(0, msgs.length - 1),
+            operation: null,
+          };
+        }
+      }
       if (typeof syncWorkspaceRoute === "function") syncWorkspaceRoute("home");
     }
     syncMode();

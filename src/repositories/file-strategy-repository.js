@@ -157,7 +157,7 @@ export class FileStrategyRepository {
           legacyRecords = r2Data;
         }
       } catch (err) {
-        console.error("Error reading legacy R2 strategies.json:", err?.message || err);
+        console.error("Error reading legacy R2 strategies.json:", { name: err?.name, code: err?.code || err?.$metadata?.httpStatusCode });
       }
     }
 
@@ -172,7 +172,7 @@ export class FileStrategyRepository {
           }
         }
       } catch (err) {
-        console.error("Error reading legacy Redis strategies:", err?.message || err);
+        console.error("Error reading legacy Redis strategies:", { name: err?.name, code: err?.code || err?.$metadata?.httpStatusCode });
       }
     }
 
@@ -241,7 +241,7 @@ export class FileStrategyRepository {
             }
           } catch (err) {
             this.inFlightTenantReads.delete(tenantKey);
-            console.error(`Failed to migrate shard to R2 for tenant ${tenantKey}:`, err?.message || err);
+            console.error(`Failed to migrate shard to R2 for tenant ${tenantKey}:`, { name: err?.name, code: err?.code || err?.$metadata?.httpStatusCode });
             break;
           }
           const fresh = await this.readCloud(tenantKey, { force: true }).catch(() => null);
@@ -385,7 +385,7 @@ export class FileStrategyRepository {
         }
         throw storageCorruption("Invalid authoritative tenant shard structure.");
       } catch (err) {
-        console.error(`R2 strategy read error (${tenantKey}):`, err?.message || err);
+        console.error(`R2 strategy read error (${tenantKey}):`, { name: err?.name, code: err?.code || err?.$metadata?.httpStatusCode });
         throw err;
       }
     }
@@ -486,7 +486,7 @@ export class FileStrategyRepository {
           try {
             await this.redis.set(this.tenantRedisKey(ownerId), JSON.stringify(nextRecords));
           } catch (err) {
-            console.error(`Redis strategy write error (${ownerId}):`, err?.message || err);
+            console.error(`Redis strategy write error (${ownerId}):`, { name: err?.name, code: err?.code || err?.$metadata?.httpStatusCode });
           }
         }
 
@@ -800,7 +800,7 @@ export class FileStrategyRepository {
       }
       return aggregated;
     } catch (err) {
-      console.error("Error reading all strategy shards:", err?.message || err);
+      console.error("Error reading all strategy shards:", { name: err?.name, code: err?.code || err?.$metadata?.httpStatusCode });
       return [];
     }
   }
@@ -1320,7 +1320,7 @@ export class FileStrategyRepository {
             if (written) break;
           } catch (err) {
             this.inFlightTenantReads.delete(tenantKey);
-            console.error(`Failed to write tombstone to R2 for tenant ${tenantKey}:`, err?.message || err);
+            console.error(`Failed to write tombstone to R2 for tenant ${tenantKey}:`, { name: err?.name, code: err?.code || err?.$metadata?.httpStatusCode });
             throw err;
           }
 
@@ -1429,7 +1429,7 @@ export class FileStrategyRepository {
             }
           } catch (err) {
             this.inFlightTenantReads.delete(userKey);
-            console.error(`Failed to write migrated shard to R2 for tenant ${userKey}:`, err?.message || err);
+            console.error(`Failed to write migrated shard to R2 for tenant ${userKey}:`, { name: err?.name, code: err?.code || err?.$metadata?.httpStatusCode });
             throw err;
           }
         }

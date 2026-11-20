@@ -1,9 +1,10 @@
+import { researchUnavailable } from './research-availability.js';
 import { assertExecutionActive } from '../security/execution-control.js';
 import { privacySnapshot, executionContext } from "../security/privacy-policy.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { aiConfig, hasGeminiConfiguration } from "./config.js";
-import { getGeminiClient } from "./client.js";
+import { getGeminiClient } from "./research-google-client.js";
 import { extractGroundingSources } from "./strategy-service.js";
 import { logWithoutBlocking } from "../learning/learning-loop-service.js";
 import { generateSelectiveResearchArtifacts } from "../artifacts/research-artifact-builder.js";
@@ -677,6 +678,7 @@ export class ResearchService {
     telemetryService = null,
     geminiClient = null,
     artifactRepository = null,
+    enabled = true,
   }) {
     this.chatRepository = chatRepository;
     this.strategyRepository = strategyRepository;
@@ -685,6 +687,7 @@ export class ResearchService {
     this.telemetryService = telemetryService;
     this.geminiClient = geminiClient;
     this.artifactRepository = artifactRepository;
+    this.enabled = enabled;
     this.activeJobs = new Map();
     this.runningJobPromises = new Set();
   }
@@ -740,6 +743,7 @@ export class ResearchService {
     sessionId,
     executionLease = null,
   }) {
+    if (!this.enabled) throw researchUnavailable();
     const allowGoogleSearch = googleSearchEnabled !== false;
     if (this.hasActiveJobForOwner(ownerId)) {
       const busyErr = new Error("Active research job already running for owner");
@@ -1011,6 +1015,7 @@ export class ResearchService {
   }
 
   async executeJob(jobId) {
+    if (!this.enabled) return;
     const job = this.activeJobs.get(jobId);
     if (!job) return;
 
@@ -1832,6 +1837,7 @@ export class ResearchService {
   }
 
   async resumeOrphanedJobs() {
+    if (!this.enabled) return;
     try {
       const allChats = await this.chatRepository.readAll();
       for (const chat of allChats) {

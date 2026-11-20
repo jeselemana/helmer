@@ -189,8 +189,8 @@ export const HELMER_BUILD_SHARED_QUALITY_POLICY = `
 `;
 
 export const BUILD_MODE_DIRECTIVES = Object.freeze({
-  auto: `\n\n[BUILD EXECUTION MODE: AUTO — CALIBRATED STRATEGIC SYNTHESIS (Gemini 4 Hydrogen / Gemini 4 Carbon). Deliver deep, decision-calibrated architectural and strategic reasoning, explicit scenario trade-offs, unit-economics sensitivity analysis, and comprehensive operational dependency mapping while strictly avoiding repetitive filler.]`,
-  faster: `\n\n[BUILD EXECUTION MODE: FASTER — HIGH-VELOCITY FOCUSED SYNTHESIS (Gemini 4 Hydrogen). Deliver sharp, high-density, execution-ready strategic and architectural decisions across all required sections. Maximize signal-to-noise ratio, keep prose tight and concrete, and maintain 100% mathematical, financial, and epistemic rigor.]`,
+  auto: `\n\n[BUILD EXECUTION MODE: AUTO — CALIBRATED STRATEGIC SYNTHESIS (GPT-6.2 Sol). Deliver deep, decision-calibrated architectural and strategic reasoning, explicit scenario trade-offs, unit-economics sensitivity analysis, and comprehensive operational dependency mapping while strictly avoiding repetitive filler.]`,
+  faster: `\n\n[BUILD EXECUTION MODE: FASTER — HIGH-VELOCITY FOCUSED SYNTHESIS (GPT-6.2 Sol). Deliver sharp, high-density, execution-ready strategic and architectural decisions across all required sections. Maximize signal-to-noise ratio, keep prose tight and concrete, and maintain 100% mathematical, financial, and epistemic rigor.]`,
 });
 
 export const STRATEGY_PROMPT = `You are Helmer Build, the Head Product & Systems Architect within the Helmer ecosystem. Create an actionable, commercially realistic marketing and business strategy from the supplied brief and clarification context.
@@ -326,15 +326,20 @@ export function buildRefinementInput({ brief, answers, strategy, action, request
   );
 }
 
+export const SMART_SEARCH_OFFER_DIRECTIVE = `[SMART SEARCH OFFER DIRECTIVE]
+When current evidence is unavailable, answer using the information you have and qualify time-sensitive claims. The application handles offers to verify current facts. Do not add your own offers to run web search.`;
+
 export const ASK_INSTRUCTIONS = `You are Helmer Ask, a precise, fast, and helpful AI assistant inside Helmer.
-Identity: You are Helmer (Helmer Ask), running on the Gemini 4 Hydrogen model (never claim to be OpenAI/ChatGPT or legacy Gemini 3.8/3.7/3.5).
+Identity: You are Helmer (Helmer Ask). Never misrepresent your identity or claim to be a different application.
 Answer the user's question directly, clearly, and completely in the language they use.
 Avoid unnecessary preamble or boilerplate introductory phrases.
 Always complete your thoughts, explanations, and analyses fully without leaving sentences, bullet points, or sections truncated or cut off.
 Never claim to have performed actions, searches, or analysis that you did not perform.
+Keep continuity with earlier turns. Use the application's verification status when discussing earlier searches. Correct an earlier factual answer only when there is a concrete reason, and keep social acknowledgments brief.
 When answering queries regarding new AI models, model names or unreleased versions (e.g., Gemini 3.8 Flash, GPT-6 Astra, new Claude/Llama/DeepSeek releases), upcoming product releases, technical innovations, current events, real-time facts, or unfamiliar entities, never rely on internal training cutoff to conclude that something does not exist; verify live facts, news, and official announcements.
 If reference context (such as a saved strategy or task) is provided, thoroughly analyze it to address the user's specific request while preserving depth and structural completeness.
 If the user wants to build a complete business or marketing strategy, explain that the Build mode is optimized for the structured strategy workflow, while still answering their immediate question.
+${SMART_SEARCH_OFFER_DIRECTIVE}
 ${EPISTEMIC_HUMILITY_RULES}`;
 
 export const GUEST_EXHAUSTED_MESSAGE = "Qonaq mesaj limitiniz bitdi. Helmer-dən limitsiz istifadə etmək və söhbəti davam etdirmək üçün qeydiyyatdan keçin.";
@@ -370,7 +375,7 @@ export function getGuestCtaNotice(remainingMessages) {
   return `Qeyd: Qonaq rejimində qalan mesaj haqqınız: ${count}. Bütün analizlərin yaddaşda qalması və limitsiz istifadə üçün qeydiyyatdan keçin.`;
 }
 
-export function formatGuestAnswerWithCta(text, remainingMessages) {
+export function formatGuestAnswerWithCta(text, remainingMessages, followup = "") {
   const count = Math.max(0, Number(remainingMessages) || 0);
   if (count === 0) {
     return GUEST_EXHAUSTED_MESSAGE;
@@ -379,6 +384,7 @@ export function formatGuestAnswerWithCta(text, remainingMessages) {
   let answer = (text || "").trim();
   const suffix = /(?:\n\s*)?\*{0,2}(?:Qeyd: Qonaq rejimində qalan mesaj haqqınız: \d+\. Bütün analizlərin yaddaşda qalması və limitsiz istifadə üçün qeydiyyatdan keçin\.|Diqqət: Cəmi \d+ mesaj haqqınız qaldı! Söhbətin yarımçıq qalmaması və sessiyanın itməməsi üçün indi qeydiyyatdan keçin\.)\*{0,2}\s*$/;
   while (suffix.test(answer)) answer = answer.replace(suffix, '').trim();
+  if (followup) answer += `\n\n${followup}`;
   const notice = getGuestCtaNotice(count);
   return `${answer}\n\n${count <= 2 ? `**${notice}**` : notice}`.trim();
 }
@@ -413,8 +419,8 @@ export function createGuestAnswerStream(remainingMessages, emit) {
         published = prefix;
       }
     },
-    finish(text = received) {
-      const formatted = formatGuestAnswerWithCta(text, remainingMessages);
+    finish(text = received, followup = "") {
+      const formatted = formatGuestAnswerWithCta(text, remainingMessages, followup);
       if (!formatted.startsWith(published)) throw new Error('Guest stream content mismatch');
       const suffix = formatted.slice(published.length);
       if (suffix) emit(suffix);

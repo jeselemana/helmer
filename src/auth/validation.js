@@ -210,6 +210,16 @@ export function detectSensitiveInformation(text) {
   return { isSensitive: false };
 }
 
+function validateMemoryText(text, context) {
+  const { isSensitive, reason } = detectSensitiveInformation(text);
+  if (isSensitive) {
+    context.addIssue({
+      code: "custom",
+      message: reason || "Yaddaşda həssas şəxsi məlumatların saxlanılmasına icazə verilmir.",
+    });
+  }
+}
+
 export const UserMemoryItemSchema = z.object({
   id: z.string().trim().min(1).max(100),
   text: z
@@ -217,9 +227,7 @@ export const UserMemoryItemSchema = z.object({
     .trim()
     .min(1, "Yaddaş mətni boş ola bilməz.")
     .max(500, "Yaddaş mətni 500 simvoldan çox ola bilməz.")
-    .refine((text) => !detectSensitiveInformation(text).isSensitive, (text) => ({
-      message: detectSensitiveInformation(text).reason || "Yaddaşda həssas şəxsi məlumatların saxlanılmasına icazə verilmir.",
-    })),
+    .superRefine(validateMemoryText),
   category: z.enum(["business", "audience", "preference", "constraint", "general"]).default("general"),
   createdAt: z.string().max(80),
 }).strict();
@@ -230,9 +238,7 @@ export const AddMemoryItemSchema = z.object({
     .trim()
     .min(1, "Qeyd daxil edin.")
     .max(500, "Qeyd 500 simvoldan uzun ola bilməz.")
-    .refine((text) => !detectSensitiveInformation(text).isSensitive, (text) => ({
-      message: detectSensitiveInformation(text).reason || "Yaddaşda həssas şəxsi məlumatların saxlanılmasına icazə verilmir.",
-    })),
+    .superRefine(validateMemoryText),
   category: z.enum(["business", "audience", "preference", "constraint", "general"]).optional().default("general"),
 }).strict();
 
@@ -261,9 +267,7 @@ export const ImportedMemoryItemSchema = z.object({
     .trim()
     .min(1, "Qeyd daxil edin.")
     .max(500, "Qeyd 500 simvoldan uzun ola bilməz.")
-    .refine((text) => !detectSensitiveInformation(text).isSensitive, (text) => ({
-      message: detectSensitiveInformation(text).reason || "Yaddaşda həssas şəxsi məlumatların saxlanılmasına icazə verilmir.",
-    })),
+    .superRefine(validateMemoryText),
   category: z.enum(["business", "audience", "preference", "constraint", "general"]).optional().default("general"),
 }).strict();
 

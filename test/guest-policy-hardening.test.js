@@ -97,8 +97,8 @@ test('guest HTTP: more than 5 answers succeed without daily limit or CTA, and pe
   assert.equal(f.providers(), 7);
   const quota = await (await fetch(`${f.base}/api/auth/guest-status`)).json();
   assert.equal(quota.isGuest, true);
-  assert.equal(quota.limit, null);
-  assert.equal(quota.remaining, null);
+  assert.equal(quota.limit, 5);
+  assert.equal(quota.remaining, 5);
   assert.equal(quota.askPerMinuteLimit, 7);
 });
 

@@ -1,3 +1,4 @@
+import { researchUnavailable } from '../services/ai/research-availability.js';
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { z } from 'zod';
@@ -34,6 +35,10 @@ export function createResearchRouter({ researchService, chatRepository, strategy
         });
       }
 
+      if (researchService.enabled === false) {
+        const error = researchUnavailable();
+        return res.status(error.status).json({ code: error.code, error: error.message });
+      }
       if (!hasGeminiConfiguration() && !researchService.geminiClient) {
         return res.status(503).json({
           code: "GEMINI_NOT_CONFIGURED",

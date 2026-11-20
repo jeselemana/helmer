@@ -1,4 +1,4 @@
-import { hasGeminiConfiguration, hasOpenAIConfiguration } from "../ai/config.js";
+import { hasOpenAIConfiguration } from "../ai/config.js";
 import { schemasFor, sectionSchema, sheetSchema, slideSchema } from "../artifacts/schemas.js";
 
 export class PluginRegistry {
@@ -23,7 +23,7 @@ export class PluginRegistry {
 
 export function createPluginRegistry() {
   const registry = new PluginRegistry();
-  const available = () => hasGeminiConfiguration() || hasOpenAIConfiguration();
+  const available = () => hasOpenAIConfiguration();
   const definitions = [
     ["word", "Word", "document", "sənəd yarat", "Create a document", "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", sectionSchema, 60, /(?:\bword\b|\bdocx\b|word sənədi)/i],
     ["excel", "Excel", "spreadsheet", "spreadsheet, hesablama və analiz yarat", "Create spreadsheets, calculations and analysis", "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", sheetSchema, 20, /(?:\bexcel\b|\bxlsx\b|spreadsheet|elektron cədvəl)/i],

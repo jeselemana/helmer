@@ -12,6 +12,8 @@ const DEFAULT_PRICING = Object.freeze({
   "gpt-5.6-terra": { inputPerMillion: 1.25, outputPerMillion: 5.00 },
   "gpt-6-sol": { inputPerMillion: 2.00, outputPerMillion: 10.00 },
   "gpt-6.1-sol": { inputPerMillion: 2.00, outputPerMillion: 10.00 },
+  "gpt-6.2-sol": { inputPerMillion: 2.00, outputPerMillion: 10.00 },
+  "gpt-6.1-terra": { inputPerMillion: 1.00, outputPerMillion: 5.00 },
 });
 
 function getEnvNumber(name, fallback) {

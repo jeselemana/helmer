@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import dotenv from 'dotenv';
 import { createClient } from 'redis';
-import { getGeminiClient } from '../src/services/ai/client.js';
+import { getGeminiClient } from '../src/services/ai/research-google-client.js';
 import { AiPolicy } from '../src/services/security/ai-policy.js';
 import { configureProviderPolicy } from '../src/services/security/provider-policy.js';
 import { executionContext } from '../src/services/security/privacy-policy.js';

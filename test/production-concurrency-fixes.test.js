@@ -1,4 +1,4 @@
-import { installBuildRoutingFixture } from "./helpers/build-routing-fixture.js";
+import { createFixtureStrategyRouter as createStrategyRouter, installBuildRoutingFixture } from "./helpers/build-routing-fixture.js";
 installBuildRoutingFixture();
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -14,9 +14,9 @@ import { FileAuthStore } from "../src/auth/auth-store.js";
 import { FileStrategyRepository } from "../src/repositories/file-strategy-repository.js";
 import { FileChatRepository } from "../src/repositories/file-chat-repository.js";
 import { FilePlannerRepository } from "../src/repositories/file-planner-repository.js";
-import { createStrategyRouter, strategyErrorHandler, computePayloadFingerprint } from "../src/http/strategy-router.js";
+import { strategyErrorHandler, computePayloadFingerprint } from "../src/http/strategy-router.js";
 import { extractGroundingSources } from "../src/services/ai/strategy-service.js";
-import { getGeminiClient } from "../src/services/ai/client.js";
+import { getGeminiClient } from "../src/services/ai/research-google-client.js";
 
 process.env.GEMINI_API_KEY = "test-gemini-key";
 const geminiClient = getGeminiClient();
@@ -59,7 +59,7 @@ class MockRes extends EventEmitter {
     return this.headers[k.toLowerCase()];
   }
 
-  flushHeaders() {}
+  flushHeaders() { this.headersSent = true; }
 
   write(chunk) {
     if (!this.chunks) this.chunks = [];
@@ -516,6 +516,17 @@ test("7. Hygiene & Security: Invalid body removes listeners; multi-client SSE di
     // Part B: SSE Multi-Caller Disconnect Safety
     // Caller 1 and Caller 2 connect to the same in-flight generation
     let modelAbortSignal = null;
+    let markModelStarted;
+    const modelStarted = new Promise(resolve => { markModelStarted = resolve; });
+    let markSecondLookup;
+    const secondLookup = new Promise(resolve => { markSecondLookup = resolve; });
+    let secondCallerDispatched = false;
+    const originalReadTenant = repo.readTenant.bind(repo);
+    repo.readTenant = async (...args) => {
+      const records = await originalReadTenant(...args);
+      if (secondCallerDispatched && args[0] === "usr_multi_caller") markSecondLookup();
+      return records;
+    };
     let modelFinishResolve = null;
     const modelFinishPromise = new Promise((resolve) => {
       modelFinishResolve = resolve;
@@ -524,6 +535,7 @@ test("7. Hygiene & Security: Invalid body removes listeners; multi-client SSE di
     const originalGenerateContent = geminiClient.models.generateContent;
     geminiClient.models.generateContent = async (_params, options) => {
       modelAbortSignal = options?.signal || _params?.config?.abortSignal;
+      markModelStarted();
       await modelFinishPromise;
       return {
         candidates: [{ finishReason: "STOP" }], text: JSON.stringify(createSampleStrategy("Multi-Caller Strategy")),
@@ -546,36 +558,31 @@ test("7. Hygiene & Security: Invalid body removes listeners; multi-client SSE di
     });
     const caller2Res = new MockRes();
 
-    // Start caller 1
-    router.handle(caller1Req, caller1Res, () => {});
-    await new Promise((r) => setTimeout(r, 20));
-
-    // Start caller 2
-    router.handle(caller2Req, caller2Res, () => {});
-    await new Promise((r) => setTimeout(r, 20));
-
-    assert.ok(modelAbortSignal, "Model must have received abort signal");
-    assert.equal(modelAbortSignal.aborted, false);
-
-    // Simulate Caller 1 socket disconnect (close)
-    caller1Res.emit("close");
-
-    // Model signal must NOT be aborted because Caller 2 is still listening!
-    assert.equal(modelAbortSignal.aborted, false, "Caller 1 disconnect must NOT abort in-flight generation for Caller 2");
-
-    // Now resolve model generation
-    modelFinishResolve();
-    await new Promise((resolve) => {
-      if (caller2Res.writableEnded) return resolve();
-      caller2Res.on("finish", resolve);
-    });
+    try {
+      router.handle(caller1Req, caller1Res, () => {});
+      await modelStarted;
+      secondCallerDispatched = true;
+      router.handle(caller2Req, caller2Res, () => {});
+      await secondLookup;
+      // The route attaches immediately after its asynchronous saved-result lookup.
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(modelAbortSignal.aborted, false);
+      caller1Res.emit("close");
+      assert.equal(modelAbortSignal.aborted, false, "Caller 1 disconnect must NOT abort in-flight generation for Caller 2");
+      modelFinishResolve();
+      await new Promise(resolve => {
+        if (caller2Res.writableEnded) return resolve();
+        caller2Res.on("finish", resolve);
+      });
+    } finally {
+      modelFinishResolve();
+      geminiClient.models.generateContent = originalGenerateContent;
+    }
 
     // Caller 2 must receive completed event
     assert.equal(caller2Res.writableEnded, true);
     const caller2Output = (caller2Res.chunks || []).join("");
     assert.ok(caller2Output.includes("Multi-Caller Strategy"), "Caller 2 must receive completed strategy event");
-
-    geminiClient.models.generateContent = originalGenerateContent;
 
     // Part C: Grounding Scheme Allowlist: extractGroundingSources
     const testMetadata = {

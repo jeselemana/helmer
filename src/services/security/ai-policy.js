@@ -3,6 +3,7 @@ import net from 'node:net';
 import { BUILD_OUTPUT_RESERVATIONS, isValidBuildOutputReservation } from '../ai/build-config.js';
 import {
   guestAskPerMinuteLimit,
+  guestAskDailyLimit,
   guestAskIpPerMinuteLimit,
   guestBuildPerMinuteLimit,
   guestBuildIpPerMinuteLimit,
@@ -12,6 +13,7 @@ import { resolveAskThinkingLevel } from '../ai/ask-routing.js';
 import {
   ASK_BARRIER,
   LEASE_MS,
+  acquireBuildLease,
   acquireLocalOwnerExecutionLease,
   acquireSharedAskLease,
   createSharedAskLeaseHandle,
@@ -134,6 +136,8 @@ export const DEFAULT_MODEL_PRICING = Object.freeze({
   'gpt-5.6-terra': { input: 1.25, output: 5.00, search: 0.035 },
   'gpt-6-sol': { input: 2.00, output: 10.00, search: 0.050 },
   'gpt-6.1-sol': { input: 2.00, output: 10.00, search: 0.050 },
+  'gpt-6.2-sol': { input: 2.00, output: 10.00, search: 0.010 },
+  'gpt-6.1-terra': { input: 1.00, output: 5.00, search: 0.010 },
   'gpt-4o': { input: 2.50, output: 10.00, search: 0.035 },
   'default': { input: 2.50, output: 10.00, search: 0.035 },
 });
@@ -381,7 +385,9 @@ export class AiPolicy {
             lastUserMsg,
             hasAttachment: messages.some(message => Boolean(message?.file)),
             hasStrategyContext: Boolean(body.strategyId || body.briefId), hasTaskContext: Boolean(body.taskId),
-            rawThinkingLevel: resolveAskThinkingLevel({ requestedThinkingLevel: body.thinkingLevel, lastUserMsg }),
+            rawThinkingLevel: resolveAskThinkingLevel({
+              requestedThinkingLevel: body.thinkingLevel === "off" ? "auto" : body.thinkingLevel, lastUserMsg,
+            }),
             explicitLowThinking: body.thinkingLevel === 'low',
           }) || notice;
         }
@@ -391,6 +397,12 @@ export class AiPolicy {
       const isAsk = /^\/api\/ask\/?$/i.test(reqPath);
       const isResearch = /^\/api\/ask\/research\/?$/i.test(reqPath);
       const sharedAsk = this.allowParallelAskChats && isAsk && !guest && req.body?.mode !== 'research';
+      if (guest && isAsk) {
+        let reservation;
+        req.securityContext.reserveGuestAsk = () => reservation ??= this._guestAskBalance(req, true);
+      }
+      const parallelBuild = this.allowParallelAskChats && !guest &&
+        /^\/api\/strategy\/(?:estimate|assess|generate|generate-stream|refine|[0-9a-f-]{36}\/refine)\/?$/i.test(reqPath);
       const endTimedOutRequest = () => {
         if (res.destroyed || res.writableEnded) return;
         if (!res.headersSent) return res.status(504).json({ code: 'EXECUTION_TIMEOUT' });
@@ -497,7 +509,6 @@ export class AiPolicy {
             res.setHeader('Retry-After', String(retryAfter));
             return res.status(429).json({ code: 'RATE_LIMITED', error: this._rateLimitErrorMessage(req) });
           }
-          req.remainingGuestMessages = null;
           req.remainingGuestBriefs = null;
         }
         const route = canonicalRequestRoute(reqPath);
@@ -505,7 +516,7 @@ export class AiPolicy {
         const shareKey = /^[A-Za-z0-9_-]{16,100}$/.test(refineKey || '') ? `${route}:${refineKey}` : null;
         let lease;
         try {
-          lease = acquireLocalOwnerExecutionLease(req.ownerId, shareKey);
+          lease = acquireLocalOwnerExecutionLease(req.ownerId, shareKey, parallelBuild ? 'build' : sharedAsk ? 'ask' : 'exclusive');
         } catch (error) {
           return res.status(error.status).json({ code: error.code, error: 'Hazırda başqa tapşırıq icra olunur. Bir az sonra yenidən cəhd edin.' });
         }
@@ -566,7 +577,7 @@ export class AiPolicy {
         if (req.aborted || res.destroyed || res.writableEnded) return finishRequest();
         return next();
       }
-      let requestKey, requestRecord, previousRequest, lock, sharedAskLease, fingerprint;
+      let requestKey, requestRecord, previousRequest, lock, sharedOwnerLease, fingerprint;
       let replayResult;
       const isUpRequest = /^\/api\/up\/challenges(?:\/|$)/i.test(reqPath);
       const isDurableStrategyRequest = /^\/api\/strategy\/(?:generate|[0-9a-f-]{36}\/refine)\/?$/i.test(reqPath);
@@ -618,7 +629,7 @@ export class AiPolicy {
         if (requestKey && requestRecord && !(idempotentPersisted && replayResult)) await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; redis.call('set',KEYS[1],ARGV[2],'EX',900); return 1", { keys: [requestKey], arguments: [requestRecord, JSON.stringify({ state: finalState, fingerprint, result: replayResult })] }).catch(() => {});
         const releaseOps = [];
         if (lock) releaseOps.push(this.redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end; return 0", { keys: [lock], arguments: [token] }).catch(() => {}));
-        if (sharedAskLease) releaseOps.push(sharedAskLease.release().catch(() => {}));
+        if (sharedOwnerLease) releaseOps.push(sharedOwnerLease.release().catch(() => {}));
         if (releaseOps.length) {
           const ownerKey = req.ownerId;
           const releasePromise = Promise.all(releaseOps).finally(() => {
@@ -673,7 +684,7 @@ export class AiPolicy {
         };
         const actor = req.ownerId, ip = this.ipKey(req);
         if (preAdmittedSharedAsk) {
-          sharedAskLease = preAdmittedSharedAsk.sharedAskLease;
+          sharedOwnerLease = preAdmittedSharedAsk.sharedAskLease;
         } else {
           const pendingOwnerRelease = this.releasingOwnerLocks.get(actor);
           if (pendingOwnerRelease && !req.aborted && !res.destroyed) {
@@ -684,20 +695,20 @@ export class AiPolicy {
               reserveAskRate(this.redis, actor, ip, token),
               acquireSharedAskLease(this.redis, actor, token),
             ]);
-            if (leaseResult.status === 'fulfilled') sharedAskLease = leaseResult.value;
+            if (leaseResult.status === 'fulfilled') sharedOwnerLease = leaseResult.value;
             if (rateResult.status === 'rejected') throw rateResult.reason;
             if (rateResult.value > 0) {
               res.setHeader('Retry-After', String(rateResult.value));
               throw fail('RATE_LIMITED', 429);
             }
             if (leaseResult.status === 'rejected') throw leaseResult.reason;
-            if (!sharedAskLease && !req.aborted && !res.destroyed) {
+            if (!sharedOwnerLease && !req.aborted && !res.destroyed) {
               await new Promise((resolve) => setTimeout(resolve, 150));
               if (!req.aborted && !res.destroyed) {
-                sharedAskLease = await acquireSharedAskLease(this.redis, actor, token);
+                sharedOwnerLease = await acquireSharedAskLease(this.redis, actor, token);
               }
             }
-            if (!sharedAskLease) throw fail('EXECUTION_BUSY', 429);
+            if (!sharedOwnerLease) throw fail('EXECUTION_BUSY', 429);
           } else if (guest) {
             const spec = this._guestMinuteRateSpec(req);
             const retryAfter = await reserveMinuteRate(this.redis, spec.keys, spec.limits, token);
@@ -705,14 +716,20 @@ export class AiPolicy {
               res.setHeader('Retry-After', String(retryAfter));
               throw fail('RATE_LIMITED', 429);
             }
-            req.remainingGuestMessages = null;
             req.remainingGuestBriefs = null;
           } else {
             const keys = [`security:rate:${actor}`, `security:rate-ip:${ip}`];
             const allowed = await this.redis.eval("for _,k in ipairs(KEYS) do if tonumber(redis.call('get',k) or '0') >= tonumber(ARGV[1]) then return 0 end end; for _,k in ipairs(KEYS) do local n = redis.call('incr',k); if n == 1 then redis.call('expire',k,600) end end; return 1", { keys, arguments: ['60'] });
             if (!allowed) throw fail('RATE_LIMITED', 429);
           }
-          if (!sharedAsk) {
+          if (parallelBuild) {
+            sharedOwnerLease = await acquireBuildLease(this.redis, actor, token);
+            if (!sharedOwnerLease && !req.aborted && !res.destroyed) {
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              if (!req.aborted && !res.destroyed) sharedOwnerLease = await acquireBuildLease(this.redis, actor, token);
+            }
+            if (!sharedOwnerLease) throw fail('EXECUTION_BUSY', 429);
+          } else if (!sharedAsk) {
             lock = `security:owner-execution:${actor}`;
             let locked = await this.redis.set(lock, token, { NX: true, PX: 180000 });
             if (!locked && !req.aborted && !res.destroyed) {
@@ -735,8 +752,8 @@ export class AiPolicy {
         let inFlightLeaseCheck = null;
         req.securityContext.assertLease = async ({ maxStaleMs = 0 } = {}) => {
           const now = Date.now();
-          const checkOwned = () => sharedAskLease
-            ? sharedAskLease.isOwned()
+          const checkOwned = () => sharedOwnerLease
+            ? sharedOwnerLease.isOwned()
             : (this.redis.isReady ? Promise.resolve(this.redis.get(lock)).then(v => v === token) : Promise.resolve(false));
           if (maxStaleMs > 0 && lastLeaseOkAt && (now - lastLeaseOkAt < maxStaleMs)) {
             if (now - lastLeaseOkAt >= 250 && !inFlightLeaseCheck) {
@@ -771,7 +788,7 @@ export class AiPolicy {
         req.securityContext.controller = controller; req.securityContext.signal = controller.signal;
         const renewal = setInterval(async () => {
           try {
-            const ok = sharedAskLease ? await sharedAskLease.renew() : await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; return redis.call('pexpire',KEYS[1],180000)", { keys: [lock], arguments: [token] });
+            const ok = sharedOwnerLease ? await sharedOwnerLease.renew() : await this.redis.eval("if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end; return redis.call('pexpire',KEYS[1],180000)", { keys: [lock], arguments: [token] });
             if (!ok) controller.abort(fail('EXECUTION_LOCK_LOST'));
           } catch { controller.abort(fail('EXECUTION_UNAVAILABLE')); }
         }, 30000); renewal.unref();
@@ -830,7 +847,8 @@ export class AiPolicy {
     if (searching && (!Number.isFinite(searchPrice) || searchPrice < 0)) throw fail('TOOL_PRICING_UNAVAILABLE');
     let inlineBase64Chars = 0;
     const serialized = JSON.stringify(params, (key, value) => {
-      if (key === 'data' && typeof value === 'string' && value.length > 4096) {
+      if ((key === 'data' || key === 'file_data' || (key === 'image_url' && value?.startsWith?.('data:'))) &&
+          typeof value === 'string' && value.length > 4096) {
         inlineBase64Chars += value.length;
         return `[inlineData:${value.length}]`;
       }
@@ -840,7 +858,9 @@ export class AiPolicy {
     const input = Buffer.byteLength(serialized || '') + Math.ceil(inlineBase64Chars / 750);
     const output = reservation?.outputTokenReservation ?? Math.min(params?.max_output_tokens || params?.max_completion_tokens || params?.max_tokens || params?.config?.maxOutputTokens || 16384, 16384);
     const searchCalls = searching ? (Number.isSafeInteger(params?.max_tool_calls) && params.max_tool_calls > 0 ? params.max_tool_calls : 1) : 0;
-    const micros = Math.ceil(input * price.input + output * price.output + searchCalls * searchPrice * 1000000);
+    // OpenAI search content is billed as input; reserve a working allowance per tool call.
+    const searchInput = tools.some(tool => tool.type === 'web_search') ? searchCalls * 8192 : 0;
+    const micros = Math.ceil((input + searchInput) * price.input + output * price.output + searchCalls * searchPrice * 1000000);
     const day = new Date().toISOString().slice(0, 10), keys = [`security:budget:${day}:${context?.ownerId}`, `security:budget:${day}:global`];
     const userLimit = Number(this.env.AI_USER_DAILY_USD || 5), globalLimit = Number(this.env.AI_PLATFORM_DAILY_USD || 100);
     const guestIpLimit = Number(this.env.AI_GUEST_IP_DAILY_USD || userLimit);
@@ -973,6 +993,42 @@ export class AiPolicy {
       limits: [guestAskPerMinuteLimit(this.env), guestAskIpPerMinuteLimit(this.env)],
     };
   }
+
+  async _guestAskBalance(req, reserve = false) {
+    this.ready();
+    const limit = guestAskDailyLimit(this.env);
+    const day = new Date().toISOString().slice(0, 10);
+    const keys = [`security:guest-day:${day}:${req.ownerId}`, `security:guest-ip-day:${day}:${this.ipKey(req)}`];
+    let used;
+    if (this.redis?.isReady && reserve) {
+      used = await this.redis.eval(`
+        local used = 0
+        for _, key in ipairs(KEYS) do
+          used = math.max(used, tonumber(redis.call('get', key) or '0'))
+        end
+        if used >= tonumber(ARGV[1]) then return used end
+        for _, key in ipairs(KEYS) do
+          redis.call('incr', key)
+          redis.call('expire', key, 172800)
+        end
+        return used + 1
+      `, { keys, arguments: [String(limit)] });
+    } else if (this.redis?.isReady) {
+      used = Math.max(...(await Promise.all(keys.map(key => this.redis.get(key)))).map(Number));
+    } else {
+      if (this.guestAskDay !== day) {
+        this.guestAskDay = day;
+        this.guestAskUsage = new Map();
+      }
+      used = Math.max(...keys.map(key => this.guestAskUsage.get(key) || 0));
+      if (reserve && used < limit) {
+        for (const key of keys) this.guestAskUsage.set(key, (this.guestAskUsage.get(key) || 0) + 1);
+        used++;
+      }
+    }
+    if (!Number.isSafeInteger(used) || used < 0) throw fail('EXECUTION_UNAVAILABLE');
+    return { limit, used, remaining: Math.max(0, limit - used) };
+  }
   _rateLimitErrorMessage(req) {
     const reqPath = normalizeRequestPath(req.path);
     if (/^\/api\/strategy\/(?:estimate|assess|generate|generate-stream)\/?$/i.test(reqPath)) {
@@ -1034,12 +1090,10 @@ export class AiPolicy {
         buildPerMinuteLimit: null,
       };
     }
-    this.ready();
+    const ask = await this._guestAskBalance(req);
     return {
       isGuest: true,
-      limit: null,
-      used: 0,
-      remaining: null,
+      ...ask,
       buildLimit: null,
       buildUsed: 0,
       buildRemaining: null,

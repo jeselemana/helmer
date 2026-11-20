@@ -25,7 +25,9 @@ export const learningConfig = Object.freeze({
     correction: numberFromEnv("AI_QUALITY_CORRECTION", -0.08),
   }),
   pricing: Object.freeze([
-    price(process.env.OPENAI_ASK_MODEL || "gpt-5.6-luna", "OPENAI_LUNA_INPUT_USD_PER_1M", "OPENAI_LUNA_OUTPUT_USD_PER_1M"),
+    Object.freeze({ model: "gpt-6.2-sol", inputPerMillion: 2.00, outputPerMillion: 10.00 }),
+    Object.freeze({ model: "gpt-6.1-terra", inputPerMillion: 1.00, outputPerMillion: 5.00 }),
+    price("gpt-5.6-luna", "OPENAI_LUNA_INPUT_USD_PER_1M", "OPENAI_LUNA_OUTPUT_USD_PER_1M"),
     price(process.env.OPENAI_ASK_COMPLEX_MODEL || "gpt-5.6-terra", "OPENAI_TERRA_INPUT_USD_PER_1M", "OPENAI_TERRA_OUTPUT_USD_PER_1M"),
     price("gemini-4-hydrogen", "GEMINI_HYDROGEN_INPUT_USD_PER_1M", "GEMINI_HYDROGEN_OUTPUT_USD_PER_1M"),
     price("gemini-4-carbon", "GEMINI_CARBON_INPUT_USD_PER_1M", "GEMINI_CARBON_OUTPUT_USD_PER_1M"),

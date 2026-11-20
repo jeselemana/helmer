@@ -9,6 +9,10 @@ export function guestAskPerMinuteLimit(env = process.env) {
   return parsePositiveSafeInt(env.GUEST_ASK_RATE_LIMIT_PER_MINUTE ?? '10', 'GUEST_ASK_RATE_LIMIT_PER_MINUTE');
 }
 
+export function guestAskDailyLimit(env = process.env) {
+  return parsePositiveSafeInt(env.GUEST_AI_DAILY_LIMIT ?? '5', 'GUEST_AI_DAILY_LIMIT');
+}
+
 export function guestAskIpPerMinuteLimit(env = process.env) {
   if (env.GUEST_ASK_IP_RATE_LIMIT_PER_MINUTE !== undefined) {
     return parsePositiveSafeInt(env.GUEST_ASK_IP_RATE_LIMIT_PER_MINUTE, 'GUEST_ASK_IP_RATE_LIMIT_PER_MINUTE');
@@ -29,6 +33,7 @@ export function guestBuildIpPerMinuteLimit(env = process.env) {
 
 export function validateSecurityConfig(env = process.env) {
   guestAskPerMinuteLimit(env);
+  guestAskDailyLimit(env);
   guestAskIpPerMinuteLimit(env);
   guestBuildPerMinuteLimit(env);
   guestBuildIpPerMinuteLimit(env);
@@ -40,6 +45,9 @@ export function validateSecurityConfig(env = process.env) {
   if (!env.SESSION_SECRET?.trim()) missing.push('SESSION_SECRET');
   if (!env.AUTH_SECRET?.trim()) missing.push('AUTH_SECRET');
   if (!env.REDIS_URL?.trim()) missing.push('REDIS_URL');
+  for (const name of ['OPENAI_API_KEY', 'R2_ENDPOINT', 'R2_BUCKET_NAME', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']) {
+    if (!env[name]?.trim()) missing.push(name);
+  }
   if (env.ADMIN_MFA_ENCRYPTION_KEY) {
     const key = Buffer.from(env.ADMIN_MFA_ENCRYPTION_KEY, 'base64');
     if (key.length !== 32) throw new Error('ADMIN_MFA_ENCRYPTION_KEY must be a 32-byte base64-encoded string');
@@ -49,6 +57,12 @@ export function validateSecurityConfig(env = process.env) {
   }
   if (!env.APP_URL || !/^https:\/\//.test(env.APP_URL)) {
     throw new Error('APP_URL must be an HTTPS URL in production');
+  }
+  try {
+    const endpoint = new URL(env.R2_ENDPOINT);
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error();
+  } catch {
+    throw new Error('R2_ENDPOINT must be an HTTPS endpoint without credentials, query parameters or fragments');
   }
   const hasTurnstileSiteKey = Boolean(env.TURNSTILE_SITE_KEY?.trim() || env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim());
   if (hasTurnstileSiteKey && !env.TURNSTILE_SECRET_KEY?.trim()) {

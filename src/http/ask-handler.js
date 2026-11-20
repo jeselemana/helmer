@@ -1,17 +1,18 @@
+import { researchUnavailable } from '../services/ai/research-availability.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { publicAskErrorCode } from './ask-errors.js';
 import { assertExecutionAuthorized } from '../services/security/execution-control.js';
-import { aiConfig, hasGeminiConfiguration } from '../services/ai/config.js';
+import { hasOpenAIConfiguration } from '../services/ai/config.js';
 import { createAskConfig } from '../services/ai/ask-config.js';
 import { createAskRunManager } from '../services/ai/ask-run-manager.js';
-import { createAskTransport } from './ask-transport.js';
+import { createAskTransport, publicAskErrorMessage } from './ask-transport.js';
 import { askRequestSchema } from './capability-router.js';
 import { CreateResearchJobSchema } from '../services/ai/research-service.js';
-import { resolveAskThinkingLevel } from '../services/ai/ask-routing.js';
-import { createHelmerDecisionRouter } from '../services/ai/decision-router.js';
-import { hasGroundedAssistantHistory } from '../services/ai/search-router.js';
-import { buildAskPrompt, detectGuestFunctionalRestriction } from '../services/ai/prompts.js';
+import { resolveAskModelRoute, resolveAskReasoningEffort, resolveAskThinkingLevel } from '../services/ai/ask-routing.js';
+import { createLocalAiRouter } from '../services/ai/local-ai-routing.js';
+import { acceptsLiveSearchOffer, hasGroundedAssistantHistory, shouldOfferLiveSearch } from '../services/ai/search-router.js';
+import { buildAskPrompt, createGuestAnswerStream, detectGuestFunctionalRestriction, formatGuestAnswerWithCta, GUEST_EXHAUSTED_MESSAGE } from '../services/ai/prompts.js';
 import { assertCachedFileReference, prepareUploadedContext } from '../services/artifacts/upload-context.js';
 import { geminiFileCache } from '../services/ai/gemini-file-cache.js';
 import { buildPersonalizationContext } from '../services/ai/personal-context.js';
@@ -60,18 +61,34 @@ export function createAskCancelHandler({ askRunManager } = {}) {
   };
 }
 
+function resolveAskDecisionPath(decision) {
+  if (
+    decision &&
+    typeof decision.decisionPath === "string" &&
+    ["fast_path_search", "fast_path_direct", "decisions_api", "openai_decision", "heuristic_fallback"].includes(decision.decisionPath)
+  ) {
+    return decision.decisionPath;
+  }
+  const source = decision?.routerSource;
+  if (source === "decisions_api") return "decisions_api";
+  if (source === "fast_path") return decision?.enableSearch ? "fast_path_search" : "fast_path_direct";
+  if (source === "local_rules") return "heuristic_fallback";
+  return source || null;
+}
+
 export function createAskHandler({ chatRepository, strategyRepository, plannerRepository, researchService,
   learningLoop, telemetryService, generateAsk, sanitizeGroundingMetadata,
-  configured = hasGeminiConfiguration, limits = createAskConfig(), decisionRouter = null, cleanupQueue = null, askRunManager = null }) {
-  const ASK_GEMINI_MODEL = aiConfig.askGeminiModel;
-  const activeDecisionRouter = decisionRouter || createHelmerDecisionRouter();
+  configured = hasOpenAIConfiguration, limits = createAskConfig(), decisionRouter = null, cleanupQueue = null, askRunManager = null }) {
+  const defaultModel = resolveAskModelRoute();
+  const activeDecisionRouter = decisionRouter || createLocalAiRouter();
   const activeAskRunManager = askRunManager || createAskRunManager();
   return async function handleAsk(req, res) {
     const learningStartedAt = Date.now();
+    if (!req.askTimings) req.askTimings = { startedAt: learningStartedAt };
     let learningInteractionId = null;
     let learningPrompt = "";
     let learningTaskType = "ask_general";
-    let learningModel = ASK_GEMINI_MODEL;
+    let learningModel = defaultModel;
     let learningContext = {};
     const newlyPersistedFileIds = new Set();
     const pendingFilePersists = [];
@@ -84,6 +101,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
     let releaseDetachedPolicy = null;
     let activeRunId = null;
     let allocatedChatId = null;
+    let terminalRunError = null;
     const cleanupOrphanedFiles = async () => {
       if (pendingFilePersists.length) {
         await Promise.allSettled(pendingFilePersists);
@@ -188,6 +206,10 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       if (req.body.mode === "research") {
         if (!req.user) return res.status(401).json({ code: "AUTH_REQUIRED" });
+        if (researchService?.enabled === false) {
+          const error = researchUnavailable();
+          return res.status(error.status).json({ code: error.code, error: error.message });
+        }
         const rawPrompt = messages.at(-1)?.content || "";
         const parsedResearch = CreateResearchJobSchema.safeParse({
           prompt: rawPrompt,
@@ -236,10 +258,15 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       if (!configured()) {
         return res.status(503).json({
-          code: "GEMINI_NOT_CONFIGURED",
+          code: "OPENAI_NOT_CONFIGURED",
           error: "Süni intellekt xidməti hazırda əlçatmazdır.",
         });
       }
+      const selectedAskModel = resolveAskModelRoute({ requestedModel: req.body.model });
+      const preloadedChat = chatId && req.preloadedAskChat && req.preloadedAskChat.id === chatId && req.preloadedAskChat.ownerId === req.ownerId
+        ? req.preloadedAskChat
+        : null;
+      const earlyMessages = preloadedChat ? [...preloadedChat.messages, messages.at(-1)] : messages;
       const lastUserMessageText = messages.at(-1)?.content || "";
       learningPrompt = lastUserMessageText;
       learningContext = {
@@ -249,15 +276,13 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         chatId: chatId || undefined,
         searchGrounded: Boolean(
           req.body.pluginIds?.includes("web") ||
-          messages.some((m) => isGroundedAssistantMessage(m) || Boolean(m?.pluginIds?.includes("web")))
+          earlyMessages.some((m) => isGroundedAssistantMessage(m) || Boolean(m?.pluginIds?.includes("web")))
         ),
       };
 
       // Parallel Pre-Flight Context Loading & Deduplicated Chat Read
       const contextStartedAt = Date.now();
-      const preloadedChat = chatId && req.preloadedAskChat && req.preloadedAskChat.id === chatId && req.preloadedAskChat.ownerId === req.ownerId
-        ? req.preloadedAskChat
-        : null;
+      const isGuest = !req.user;
       const earlyStrategyId = strategyId || preloadedChat?.strategyId || "";
       const preloadedStrategy = earlyStrategyId && req.preloadedAskStrategy && req.preloadedAskStrategy.id === earlyStrategyId && req.preloadedAskStrategy.ownerId === req.ownerId
         ? req.preloadedAskStrategy
@@ -270,14 +295,37 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         req.body.chatRevision === undefined ||
         req.body.chatRevision === null ||
         Number(req.body.chatRevision) === (preloadedChat.revision || 1);
+      const guestPreRestriction = isGuest
+        ? detectGuestFunctionalRestriction({
+            lastUserMsg: lastUserMessageText,
+            hasAttachment: earlyMessages.some((m) => Boolean(m.file && (m.file.data || m.file.textContent || m.file.name || m.file.fileId))),
+            hasStrategyContext: Boolean(earlyStrategyId || earlyBriefId),
+            hasTaskContext: Boolean(earlyTaskId),
+            rawThinkingLevel: resolveAskThinkingLevel({
+              requestedThinkingLevel: rawThinkingLevel === "off" ? "auto" : rawThinkingLevel,
+              lastUserMsg: lastUserMessageText,
+              hasStrategyContext: hasEarlyContext,
+            }),
+            explicitLowThinking: rawThinkingLevel === "low",
+          })
+        : null;
       let prefetchedSearchDecisionPromise = null;
-      if (req.user?.emailVerifiedAt && (!req.user.status || req.user.status === "active") && !hasEarlyContext && (!chatId || preloadedChat) && preloadedRevisionOk) {
-        const prefetchMessages = preloadedChat ? [...preloadedChat.messages, messages.at(-1)] : messages;
-        const prefetchExplicitWeb = req.body.pluginIds?.includes("web") === true;
+      const canPrefetchDecision = Boolean(
+        ((req.user?.emailVerifiedAt && (!req.user.status || req.user.status === "active")) ||
+          (isGuest && !guestPreRestriction)) &&
+        !hasEarlyContext &&
+        req.body.regenerateFromIndex === undefined &&
+        (!chatId || preloadedChat) &&
+        preloadedRevisionOk
+      );
+      if (canPrefetchDecision) {
+        const prefetchMessages = earlyMessages;
+        const prefetchExplicitWeb = req.body.pluginIds?.includes("web") === true ||
+          acceptsLiveSearchOffer(lastUserMessageText, preloadedChat?.messages.at(-1));
         const prefetchGroundedHistory = hasGroundedAssistantHistory(prefetchMessages) || prefetchMessages.some(
           (m) => isGroundedAssistantMessage(m) || Boolean(m?.pluginIds?.includes("web"))
         );
-        const prefetchHasMedia = prefetchMessages.some((m) => Boolean(m?.file));
+        const prefetchHasMedia = prefetchMessages.slice(-6).some((m) => Boolean(m?.file));
         const prefetchPrompt = typeof messages.at(-1)?.content === "string" ? messages.at(-1).content : "";
         prefetchController = new AbortController();
         prefetchedSearchDecisionPromise = activeDecisionRouter.routeAsk({
@@ -291,7 +339,17 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         });
         prefetchedSearchDecisionPromise.catch(() => {});
       }
-      const [existingChat, rawSelectedStrategy, rawSelectedBrief, rawSelectedTask, personalizationContext, initialOwnerStrategies] = await Promise.all([
+      const personalizationPromise = req.user?.settings?.personalIntelligence === true
+        ? buildPersonalizationContext({
+            user: req.user,
+            userMessage: lastUserMessageText,
+            currentChatId: chatId,
+            chatRepository,
+            strategyRepository,
+            mode: "ask",
+          }).catch(() => "")
+        : Promise.resolve("");
+      const [existingChat, rawSelectedStrategy, rawSelectedBrief, rawSelectedTask, initialOwnerStrategies] = await Promise.all([
         chatId
           ? (preloadedChat ? Promise.resolve(preloadedChat) : chatRepository.getById(chatId, req.ownerId))
           : Promise.resolve(null),
@@ -300,16 +358,6 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           : Promise.resolve(null),
         earlyBriefId && strategyRepository ? strategyRepository.getById(earlyBriefId, req.ownerId) : Promise.resolve(null),
         earlyTaskId ? findPlannerTask(earlyTaskId) : Promise.resolve(null),
-        req.user?.settings?.personalIntelligence === true
-          ? buildPersonalizationContext({
-              user: req.user,
-              userMessage: lastUserMessageText,
-              currentChatId: chatId,
-              chatRepository,
-              strategyRepository,
-              mode: "ask",
-            })
-          : Promise.resolve(""),
         hasEarlyStrategyOrTask && strategyRepository && typeof strategyRepository.readAll === "function"
           ? strategyRepository.readAll(req.ownerId)
           : Promise.resolve([]),
@@ -329,26 +377,40 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           ? Number(req.body.chatRevision)
           : expectedRevision;
         if (clientRevision !== expectedRevision) return res.status(409).json({ code: 'REVISION_CONFLICT', revision: expectedRevision });
-        const incoming = messages.at(-1);
-        messages.splice(0, messages.length, ...existingChat.messages, incoming);
-        messages.forEach((message, index) => {
-          const stored = existingChat.messages[index];
-          if (stored?.role === message.role && stored.content === message.content) {
-            if (stored.artifacts) message.artifacts = stored.artifacts;
-            if (stored.execution) message.execution = stored.execution;
-            if (stored.pluginIds) message.pluginIds = stored.pluginIds;
-            if (stored.groundingMetadata) message.groundingMetadata = stored.groundingMetadata;
-            if (stored.type) message.type = stored.type;
-            if (stored.status) message.status = stored.status;
-            if (stored.jobId) message.jobId = stored.jobId;
-            if (stored.steps) message.steps = stored.steps;
-            if (stored.sources) message.sources = stored.sources;
-            if (stored.query) message.query = stored.query;
-            if (stored.id) message.id = stored.id;
-            if (stored.searchGrounded !== undefined) message.searchGrounded = stored.searchGrounded;
-            if (stored.groundingActive !== undefined) message.groundingActive = stored.groundingActive;
+        const regenerateFromIndex = req.body.regenerateFromIndex;
+        if (regenerateFromIndex !== undefined) {
+          const validRegenIndex =
+            Number.isInteger(regenerateFromIndex) &&
+            regenerateFromIndex >= 1 &&
+            regenerateFromIndex < existingChat.messages.length &&
+            existingChat.messages[regenerateFromIndex]?.role === "assistant" &&
+            existingChat.messages[regenerateFromIndex - 1]?.role === "user";
+          if (!validRegenIndex) {
+            return res.status(400).json({ code: "VALIDATION_ERROR", error: "Yenidən generasiya indeksi düzgün deyil." });
           }
-        });
+          messages.splice(0, messages.length, ...existingChat.messages.slice(0, regenerateFromIndex));
+        } else {
+          const incoming = messages.at(-1);
+          messages.splice(0, messages.length, ...existingChat.messages, incoming);
+          messages.forEach((message, index) => {
+            const stored = existingChat.messages[index];
+            if (stored?.role === message.role && stored.content === message.content) {
+              if (stored.artifacts) message.artifacts = stored.artifacts;
+              if (stored.execution) message.execution = stored.execution;
+              if (stored.pluginIds) message.pluginIds = stored.pluginIds;
+              if (stored.groundingMetadata) message.groundingMetadata = stored.groundingMetadata;
+              if (stored.type) message.type = stored.type;
+              if (stored.status) message.status = stored.status;
+              if (stored.jobId) message.jobId = stored.jobId;
+              if (stored.steps) message.steps = stored.steps;
+              if (stored.sources) message.sources = stored.sources;
+              if (stored.query) message.query = stored.query;
+              if (stored.id) message.id = stored.id;
+              if (stored.searchGrounded !== undefined) message.searchGrounded = stored.searchGrounded;
+              if (stored.groundingActive !== undefined) message.groundingActive = stored.groundingActive;
+            }
+          });
+        }
       }
 
       if (briefId && existingChat?.strategyId) {
@@ -415,8 +477,11 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           assertCachedFileReference(message.file, existingChat);
         }
       }
-      await Promise.all(messages.map(async (message) => {
+      const RECENT_ASK_FILE_WINDOW = 10;
+      const fileWindowStart = Math.max(0, messages.length - RECENT_ASK_FILE_WINDOW);
+      await Promise.all(messages.map(async (message, index) => {
         if (!message.file) return;
+        if (index < fileWindowStart && !message.file.data) return;
         transport.signal.throwIfAborted();
         if (message.file.data) {
           message.file = await prepareUploadedContext(message.file);
@@ -542,16 +607,18 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         return m;
       });
 
-      const isGuest = !req.user;
-      const remainingMessages = null;
+      let remainingMessages = null;
 
-      const selectedAskModel = ASK_GEMINI_MODEL;
-      const explicitWeb = req.body.pluginIds?.includes("web") === true;
+      // An offer must come from the authoritative chat, and the user's acceptance
+      // must immediately follow it. Never treat client-supplied history as an offer.
+      const acceptedSearchOffer = Boolean(existingChat && acceptsLiveSearchOffer(lastUserMsg, messages.at(-2)));
+      const explicitWeb = req.body.pluginIds?.includes("web") === true || acceptedSearchOffer;
       if (explicitWeb) messages.at(-1).pluginIds = ["web"];
       const requestedThinkingLevel = resolveAskThinkingLevel({
         requestedThinkingLevel: rawThinkingLevel,
         lastUserMsg,
         hasStrategyContext,
+        model: selectedAskModel,
       });
 
       const hasGroundedHistory = hasGroundedAssistantHistory(messages) || messages.some(
@@ -561,6 +628,16 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         .map(message => Date.parse(message.groundedAt ?? (message.createdAt || existingChat?.createdAt)))
         .filter(Number.isFinite);
       const messagesForPrompt = messages;
+      const verifiedWebTurns = new Set();
+      if (existingChat) {
+        for (const [index, message] of existingChat.messages.entries()) {
+          if (index >= messagesForPrompt.length - 1) break;
+          if (message.role === "assistant" &&
+              sanitizeGroundingMetadata(message.groundingMetadata)?.groundingChunks?.length) {
+            verifiedWebTurns.add(index);
+          }
+        }
+      }
 
       learningInteractionId = learningLoop.createInteractionId();
       learningPrompt = messages.at(-1).content;
@@ -575,19 +652,20 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         hasBriefContext: Boolean(selectedBriefText),
         hasTaskContext: Boolean(selectedTask),
         hasAttachment: Boolean(hasAnyAttachment),
-        personalizationApplied: Boolean(personalizationContext),
+        personalizationApplied: false,
         searchGrounded: Boolean(explicitWeb || hasGroundedHistory),
       };
 
       // One durable completion path for JSON, SSE and exact guest notices.
       // Never emit done before the authorized, revision-checked commit and replay record.
-      const complete = async (reply, groundingMetadata, { restrictedFeature = false, notice = false, grounded = false, truncated = false, finishReason = null } = {}) => {
+      const complete = async (reply, groundingMetadata, { restrictedFeature = false, notice = false, grounded = false, truncated = false, finishReason = null, liveSearchOffered = false } = {}) => {
         const now = Date.now();
         const groundedAt = grounded ? new Date(Math.min(now, ...groundedHistoryDates)).toISOString() : undefined;
         const updatedMessages = [...messages, {
           role: "assistant", content: reply, model: selectedAskModel,
           interactionId: learningInteractionId, groundingMetadata, createdAt: new Date(now).toISOString(),
           ...(grounded ? { searchGrounded: true, groundedAt } : {}),
+          ...(liveSearchOffered ? { liveSearchOffered: true } : {}),
         }];
         const [, isCancelled] = await Promise.all([
           assertExecutionAuthorized(transport.signal),
@@ -602,7 +680,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         const buildPayload = (chatRecord) => ({
           reply, model: selectedAskModel, interactionId: learningInteractionId,
           chat: chatRecord, chatId: chatRecord?.id, chatRevision: chatRecord?.revision || 1,
-          groundingMetadata, remainingGuestMessages: null, isGuest,
+          groundingMetadata, remainingGuestMessages: remainingMessages, isGuest,
           ...(activeRunId ? { runId: activeRunId } : {}),
           ...(restrictedFeature ? { restrictedFeature: true } : {}),
           ...(truncated ? { truncated: true } : {}),
@@ -616,6 +694,11 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           await req.securityContext?.persistIdempotentResult?.();
           idempotentPersisted = true;
         };
+        // Fence an already-started storage commit until its idempotency record
+        // settles. Provider execution always stops on a disconnected socket.
+        transport.signal.throwIfAborted();
+        releaseDetachedGuard = req.detachAskExecutionGuard?.() || null;
+        releaseDetachedPolicy = req.securityContext?.enableAskBackgroundCompletion?.() || null;
         req.securityContext?.markMutationPending?.();
         let savedChat;
         try {
@@ -655,12 +738,25 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         const restrictionNotice = detectGuestFunctionalRestriction({
           lastUserMsg, hasAttachment: Boolean(hasAnyAttachment),
           hasStrategyContext: Boolean(selectedStrategy || strategyId || selectedBriefRecord || briefId),
-          hasTaskContext: Boolean(selectedTask || taskId), rawThinkingLevel: requestedThinkingLevel,
+          hasTaskContext: Boolean(selectedTask || taskId), rawThinkingLevel: resolveAskThinkingLevel({
+            requestedThinkingLevel: rawThinkingLevel === "off" ? "auto" : rawThinkingLevel, lastUserMsg, hasStrategyContext,
+          }),
           explicitLowThinking: rawThinkingLevel === "low",
         });
         if (restrictionNotice) {
           await complete(restrictionNotice, undefined, { restrictedFeature: true, notice: true });
           return;
+        }
+        const balance = await req.securityContext.reserveGuestAsk?.();
+        if (!Number.isSafeInteger(balance?.remaining) || balance.remaining < 0) {
+          throw Object.assign(new Error("Guest balance unavailable"), { code: "EXECUTION_UNAVAILABLE", status: 503 });
+        }
+        remainingMessages = balance.remaining;
+        if (remainingMessages === 0) {
+          return res.status(429).json({
+            code: "GUEST_DAILY_LIMIT", error: GUEST_EXHAUSTED_MESSAGE, reply: GUEST_EXHAUSTED_MESSAGE,
+            remainingGuestMessages: 0, isGuest: true,
+          });
         }
       }
 
@@ -676,13 +772,14 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       const decisionStartedAt = Date.now();
       if (prefetchedSearchDecisionPromise) prefetchedDecisionUsed = true;
+      const hasRecentMedia = messages.slice(-6).some((m) => Boolean(m.file && (m.file.data || m.file.textContent || m.file.name || m.file.fileId)));
       const decisionPromise = prefetchedSearchDecisionPromise || activeDecisionRouter.routeAsk({
         prompt: lastUserMsg,
         messages,
         explicitWeb,
         hasStrategyContext,
         hasGroundedHistory,
-        hasMedia: Boolean(hasAnyAttachment),
+        hasMedia: hasRecentMedia,
         signal: transport.signal,
       });
       decisionPromise.catch(() => {});
@@ -693,7 +790,6 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           ownerId: req.ownerId,
           chatId: allocatedChatId,
           idempotencyKey: req.get('Idempotency-Key') || '',
-          prompt: lastUserMsg,
           model: selectedAskModel,
           requestTimeoutMs: limits.requestTimeoutMs,
           requestStartedAt: learningStartedAt,
@@ -709,24 +805,29 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
             transport.abortExplicit();
             transport.signal.throwIfAborted();
           }
-          // Passive TCP disconnect after pre-flight must NOT kill generation; only explicit Stop aborts.
-          transport.enableBackgroundCompletion();
-          releaseDetachedGuard = req.detachAskExecutionGuard?.() || null;
-          releaseDetachedPolicy = req.securityContext?.enableAskBackgroundCompletion?.(limits.requestTimeoutMs) || null;
+          transport.signal.throwIfAborted();
           if (isStreamingRequest) {
             transport.start();
           }
           return handle;
         });
 
-      const [regOutcome, decisionOutcome] = await Promise.allSettled([registerRunSideEffect, decisionPromise]);
+      const [regOutcome, decisionOutcome, personalizationOutcome] = await Promise.allSettled([
+        registerRunSideEffect,
+        decisionPromise,
+        personalizationPromise,
+      ]);
       if (regOutcome.status === "rejected") throw regOutcome.reason;
       if (decisionOutcome.status === "rejected") throw decisionOutcome.reason;
       const searchDecision = decisionOutcome.value;
+      const personalizationContext = personalizationOutcome.status === "fulfilled" ? personalizationOutcome.value : "";
+      const decisionWaitMs = Date.now() - decisionStartedAt;
+      const decisionPath = resolveAskDecisionPath(searchDecision);
       if (req.askTimings) {
-        req.askTimings.decisionWaitMs = Date.now() - decisionStartedAt;
+        req.askTimings.decisionWaitMs = decisionWaitMs;
         req.askTimings.decisionLatencyMs = searchDecision?.latencyMs ?? null;
         req.askTimings.decisionSource = searchDecision?.routerSource || null;
+        req.askTimings.decisionPath = decisionPath;
       }
       const enableSearch = explicitWeb || searchDecision.enableSearch;
       const requireGrounding = explicitWeb || searchDecision.requireGrounding;
@@ -743,33 +844,73 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
         .filter(Boolean)
         .join("\n\n");
       const trimmedPersonalizationContext = typeof personalizationContext === "string" ? personalizationContext.trim() : "";
+      learningContext.personalizationApplied = Boolean(trimmedPersonalizationContext);
       let reply = "";
-      let activeModel = ASK_GEMINI_MODEL;
+      const activeModel = selectedAskModel;
 
       if (isStreamingRequest && enableSearch) {
         transport.send({ status: "searching", statusText: "Vebdə axtarıram", model: activeModel });
       }
-      if (req.askTimings) req.askTimings.providerStartMs = Date.now() - req.askTimings.startedAt;
+      const providerStartedAt = Date.now();
+      if (req.askTimings) Object.assign(req.askTimings, {
+        providerStartMs: providerStartedAt - req.askTimings.startedAt,
+        provider: "openai",
+        model: selectedAskModel,
+        reasoningEffort: resolveAskReasoningEffort(requestedThinkingLevel, selectedAskModel),
+      });
+      const recordFirstText = (elapsedMs) => {
+        if (req.askTimings && req.askTimings.firstTextMs === undefined && Number.isFinite(elapsedMs)) {
+          req.askTimings.firstTextMs = elapsedMs;
+        }
+      };
+      const guestStream = isGuest && isStreamingRequest
+        ? createGuestAnswerStream(remainingMessages, chunk => transport.send({ chunk, model: activeModel }))
+        : null;
       const generated = await generateAsk({
         model: selectedAskModel, instructions: fullInstructions, referenceContext,
         ...(trimmedPersonalizationContext ? { personalizationContext: trimmedPersonalizationContext } : {}),
-        messages: messagesForPrompt,
+        messages: messagesForPrompt, verifiedWebTurns,
+        ...(acceptedSearchOffer ? { searchQuery: messages.slice(0, -2).findLast(message => message.role === "user")?.content || "" } : {}),
         thinkingLevel: requestedThinkingLevel, enableSearch, requireGrounding,
         ownerId: req.ownerId, signal: transport.signal,
+        onFirstText: recordFirstText,
         ...(isStreamingRequest ? { onChunk: async (chunk, groundingMetadata) => {
           if (req.askTimings && req.askTimings.firstChunkMs === undefined) req.askTimings.firstChunkMs = Date.now() - req.askTimings.startedAt;
-          transport.send({ chunk, model: activeModel, groundingMetadata });
+          recordFirstText(Date.now() - providerStartedAt);
+          if (guestStream) guestStream.push(chunk);
+          else transport.send({ chunk, model: activeModel, groundingMetadata });
           await transport.drain();
         } } : {}),
       });
+      if (req.askTimings && generated?.reasoningEffort) req.askTimings.reasoningEffort = generated.reasoningEffort;
+      recordFirstText(generated?.firstTextMs);
       reply = generated.text;
       if (!reply) throw new Error("Ask mode returned an empty response.");
       transport.signal.throwIfAborted();
-
       const sanitizedGrounding = sanitizeGroundingMetadata(generated.groundingMetadata) || undefined;
+      const liveSearchOffered = !requireGrounding && !sanitizedGrounding && !generated.truncated && shouldOfferLiveSearch(lastUserMsg);
+      let offer = "";
+      if (liveSearchOffered) {
+        offer = req.user?.settings?.language === "en" || !/[əğıöüşç]/iu.test(lastUserMsg) && /\b(?:what|when|how|check|search|next|recent|latest)\b/i.test(lastUserMsg)
+          ? "I can verify this with a live web search if you’d like."
+          : "İstəsən, rəsmi mənbələr üzrə canlı axtarışla yoxlaya bilərəm.";
+        if (!isGuest) {
+          if (isStreamingRequest) {
+            transport.send({ chunk: `\n\n${offer}`, model: activeModel });
+            await transport.drain();
+          }
+          reply = `${reply.trimEnd()}\n\n${offer}`;
+        }
+      }
+      if (isGuest) {
+        reply = guestStream ? guestStream.finish(reply, offer) : formatGuestAnswerWithCta(reply, remainingMessages, offer);
+        if (guestStream) await transport.drain();
+      }
+
       const groundingActive = Boolean(enableSearch || sanitizedGrounding?.groundingChunks?.length || hasGroundedHistory);
       await complete(reply, sanitizedGrounding, {
         grounded: groundingActive,
+        liveSearchOffered,
         truncated: Boolean(generated.truncated),
         finishReason: generated.finishReason || null,
       });
@@ -807,6 +948,13 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
 
       return;
     } catch (error) {
+      const code = publicAskErrorCode(error);
+      if (!req.securityContext?.explicitCancel && code !== 'ASK_CANCELLED') {
+        terminalRunError = {
+          code,
+          error: publicAskErrorMessage(code),
+        };
+      }
 
       const modelImprovementActive = isModelImprovementEnabled(req);
       const groundingActive = learningContext.searchGrounded === true;
@@ -817,9 +965,9 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
           mode: "ask", taskType: learningTaskType,
           userPrompt: isRestricted ? "[Zəruri əməliyyat qeydi - Məzmun ötürülmür]" : learningPrompt,
           relevantContext: isRestricted ? null : learningContext,
-          modelProvider: "google", modelName: learningModel,
+          modelProvider: "openai", modelName: learningModel,
           modelResponse: "", latencyMs: Date.now() - learningStartedAt,
-          requestStatus: "error", errorType: publicAskErrorCode(error),
+          requestStatus: "error", errorType: code,
           groundingActive,
           onlyNecessaryData: isRestricted,
           modelImprovement: !isRestricted,
@@ -829,26 +977,26 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       telemetryService.trackAskQuery({
         ownerId: req.ownerId,
         sessionId: req.guestOwnerId,
-        model: ASK_GEMINI_MODEL,
+        model: learningModel,
         latencyMs: Date.now() - learningStartedAt,
         groundingActive,
         status: "error",
         querySnippet: isRestricted ? "" : learningPrompt,
-        error: { code: publicAskErrorCode(error) },
+        error: { code },
         onlyNecessaryData: isRestricted,
         modelImprovement: !isRestricted,
       }).catch(() => {});
-      console.error("Ask mode error:", { code: publicAskErrorCode(error) });
+      console.error("Ask mode error:", { code });
       if (req.securityContext && !chatCommitted && !req.securityContext.mutationPending) {
         req.securityContext.askTerminalFailure = true;
       }
       await cleanupOrphanedFiles();
       if (res.writableEnded || res.destroyed) return;
       if (transport.streaming) return transport.fail(error);
-      const code = publicAskErrorCode(error);
+      if (code === "AI_RATE_LIMITED") res.setHeader("Retry-After", String(error.retryAfter || 60));
       return res.status(httpStatusOf(error)).json({
         code,
-        error: "Cavabı hazırlamaq mümkün olmadı.",
+        error: publicAskErrorMessage(code),
       });
     } finally {
       if (prefetchController && !prefetchedDecisionUsed) {
@@ -857,7 +1005,7 @@ export function createAskHandler({ chatRepository, strategyRepository, plannerRe
       transport.dispose();
       await Promise.allSettled([
         cleanupOrphanedFiles(),
-        activeRunHandle ? activeRunHandle.finish().catch(() => {}) : Promise.resolve(),
+        activeRunHandle ? activeRunHandle.finish(terminalRunError ? { error: terminalRunError } : undefined).catch(() => {}) : Promise.resolve(),
         releaseDetachedGuard ? releaseDetachedGuard().catch(() => {}) : Promise.resolve(),
         releaseDetachedPolicy ? releaseDetachedPolicy().catch(() => {}) : Promise.resolve(),
       ]);

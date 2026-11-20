@@ -51,11 +51,7 @@ gcloud builds submit --tag "${IMAGE_NAME}" .
 # Regions to deploy
 TARGET_REGIONS=("us-central1" "europe-west3")
 for REGION in "${TARGET_REGIONS[@]}"; do
-  LOCATION="us"
-  if [[ "$REGION" =~ ^europe- ]]; then
-    LOCATION="eu"
-  fi
-  echo "=== 3. Cloud Run Deploy: ${REGION} (location: ${LOCATION}) ==="
+  echo "=== 3. Cloud Run Deploy: ${REGION} ==="
   gcloud run deploy "${SERVICE_NAME}" \
     --image "${IMAGE_NAME}" \
     --platform managed \
@@ -69,7 +65,9 @@ for REGION in "${TARGET_REGIONS[@]}"; do
     --cpu 1 \
     --min-instances 0 \
     --max-instances 10 \
-    --update-env-vars "^##^NODE_ENV=production##GEMINI_USE_VERTEX=true##GOOGLE_CLOUD_PROJECT=${PROJECT_ID}##GOOGLE_CLOUD_LOCATION=${LOCATION}##GOOGLE_CLOUD_REGION=${REGION}"
+    --startup-probe "httpGet.path=/api/health,httpGet.port=8080,periodSeconds=10,failureThreshold=24" \
+    --readiness-probe "httpGet.path=/api/health,httpGet.port=8080,periodSeconds=10,timeoutSeconds=8,failureThreshold=2" \
+    --update-env-vars "^##^NODE_ENV=production##DEEP_RESEARCH_ENABLED=false##ASK_MAX_CONCURRENT=${ASK_MAX_CONCURRENT:-100}##AI_MAX_PROVIDER_SLOTS=${AI_MAX_PROVIDER_SLOTS:-32}"
   echo "✅ ${REGION} deploy uğurla tamamlandı!"
 done
 

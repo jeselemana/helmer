@@ -1,5 +1,9 @@
+import { createBuildOrchestrator } from '../../src/services/ai/build-orchestrator.js';
+import { assessBrief, generateStrategy, refineStrategy } from '../../src/services/ai/strategy-service.js';
+import { createStrategyRouter } from '../../src/http/strategy-router.js';
 import { beforeEach } from 'node:test';
-import { getGeminiClient, getBuildVertexClient } from '../../src/services/ai/client.js';
+import { getBuildVertexClient } from "./legacy-google-inference.js";
+import { getGeminiClient } from "../../src/services/ai/research-google-client.js";
 
 // Storage/concurrency regressions provide a final-result mock on the legacy
 // Gemini client. Bridge it to the isolated Build client and supply its scout.
@@ -24,5 +28,20 @@ export function installBuildRoutingFixture() {
       if (previousProject === undefined) delete process.env.GOOGLE_CLOUD_PROJECT; else process.env.GOOGLE_CLOUD_PROJECT = previousProject;
       if (previousGemini === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previousGemini;
     });
+  });
+}
+
+// These historical safety and persistence tests use the legacy provider contract
+// as a fixture. The production router defaults to the Responses orchestrator.
+export function createFixtureStrategyRouter(repository, learning, options = {}) {
+  const orchestrate = createBuildOrchestrator({ gemini: getBuildVertexClient });
+  return createStrategyRouter(repository, learning, {
+    ...options,
+    generationServices: {
+      assessBrief: args => assessBrief({ ...args, orchestrate }),
+      generateStrategy: args => generateStrategy({ ...args, orchestrate }),
+      refineStrategy: (payload, ownerId, signal, profile, onChunk, onUsage) =>
+        refineStrategy(payload, ownerId, signal, profile, onChunk, onUsage, orchestrate),
+    },
   });
 }

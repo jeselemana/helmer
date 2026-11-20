@@ -4,7 +4,8 @@ import { createBuildOrchestrator, enforceBuildRoute, analyzeBuildTaskSignals } f
 import { buildConfig, BUILD_SAFETY_SETTINGS, BUILD_OUTPUT_RESERVATIONS, BUILD_HYDROGEN_THINKING_RESERVATIONS, BUILD_CARBON_THINKING_RESERVATIONS } from '../src/services/ai/build-config.js';
 import { StrategySchema, StrategyAssessmentSchema, evaluateBriefSufficiency, stripInlineGroundingRedirectUrls } from '../src/domain/strategy.js';
 import { buildStrategyPersonalizationContext } from '../src/services/ai/personal-context.js';
-import { resolveBuildVertexClientOptions, resolveGeminiClientOptions } from '../src/services/ai/client.js';
+import { resolveBuildVertexClientOptions } from "./helpers/legacy-google-inference.js";
+import { resolveGeminiClientOptions } from "../src/services/ai/research-google-client.js";
 import { executionContext } from '../src/services/security/privacy-policy.js';
 import { wrapProvider, configureProviderPolicy } from '../src/services/security/provider-policy.js';
 import { strategyFixture } from './helpers/build-fixtures.js';

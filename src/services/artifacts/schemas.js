@@ -3,7 +3,7 @@ import { z } from "zod";
 const text = z.string().max(6000);
 const short = z.string().max(180);
 const color = z.string().regex(/^[0-9A-Fa-f]{6}$/);
-export const uuid = z.string().uuid();
+export const uuid = z.guid();
 export const tableSchema = z.object({
   headers: z.array(short).min(1).max(12),
   rows: z.array(z.array(text).max(12)).max(150),

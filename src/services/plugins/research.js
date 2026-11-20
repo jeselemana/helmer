@@ -1,4 +1,4 @@
-import { hasGeminiConfiguration } from "../ai/config.js";
+import { hasOpenAIConfiguration } from "../ai/config.js";
 import { extractCleanDomain, isGoogleRelayHostOrUrl, isLowQualityDomain, scoreDomain } from "../ai/research-service.js";
 
 function safeSource(url, title, rawDomain) {
@@ -33,11 +33,11 @@ function safeSource(url, title, rawDomain) {
   }
 }
 
-export function createWebResearch({ geminiResearch } = {}) {
+export function createWebResearch({ openaiResearch } = {}) {
   return async ({ messages, instructions, signal, onChunk }) => {
-    if (hasGeminiConfiguration() && geminiResearch) {
+    if (hasOpenAIConfiguration() && openaiResearch) {
       try {
-        const result = await geminiResearch({ messages, instructions, signal, onChunk });
+        const result = await openaiResearch({ messages, instructions, signal, onChunk });
         const rawChunks = result.groundingMetadata?.groundingChunks || [];
         const groundingChunks = rawChunks
           .map(chunk => safeSource(chunk.web?.uri, chunk.web?.title, chunk.web?.domain))
@@ -51,6 +51,6 @@ export function createWebResearch({ geminiResearch } = {}) {
         throw error;
       }
     }
-    throw Object.assign(new Error("Google Search Grounding unavailable"), { code: 'GROUNDING_UNAVAILABLE', status: 503 });
+    throw Object.assign(new Error("Web search grounding unavailable"), { code: 'GROUNDING_UNAVAILABLE', status: 503 });
   };
 }

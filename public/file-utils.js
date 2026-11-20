@@ -92,6 +92,27 @@ export async function readUploadedFileAsData(file, { isEn = false, signal } = {}
     throw new Error(isEn ? "File size must not exceed 20MB." : "Faylın həcmi 20MB-dan çox ola bilməz.");
   }
 
+  if ((ext === "heic" || ext === "heif") && typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(file);
+      try {
+        signal?.throwIfAborted();
+        const scale = Math.min(1, 2560 / Math.max(bitmap.width, bitmap.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+        canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.92));
+        signal?.throwIfAborted();
+        if (blob) return readUploadedFileAsData(new File([blob], file.name.replace(/\.hei[cf]$/i, ".jpg"), {
+          type: "image/jpeg",
+        }), { isEn, signal });
+      } finally { bitmap.close(); }
+    } catch { signal?.throwIfAborted(); }
+    throw new Error(isEn ? "Convert this HEIC or HEIF image to PNG, JPEG, or WebP before uploading."
+      : "HEIC və ya HEIF şəklini yükləməzdən əvvəl PNG, JPG və ya WebP formatına çevirin.");
+  }
+
   const mimeType = detectMimeType(file.name, file.type);
   const isTextLike = isTextLikeFile(file);
   if (signal && typeof FileReader !== "undefined" && file instanceof Blob) {

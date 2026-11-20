@@ -1,5 +1,5 @@
 /**
- * Dynamic search router module for Gemini 3.8 Flash Google Search Grounding.
+ * Local routing for Ask web search.
  *
  * Intelligently determines whether a user prompt requires real-time web search
  * (market pricing, competitor analysis, current trends, recent dates, URLs, entity lookup)
@@ -30,7 +30,7 @@ const FACT_CHECK_AND_VERIFICATION_PATTERN = /(?:r[əe]smi\s+(?:status|olaraq|ela
  * Guard against conversational questions directed at the assistant about its own identity,
  * creator, or model (e.g., "OpenAI deyilsən?", "Sən hansısan indi", "Sən Gemini-san?").
  */
-const ASSISTANT_IDENTITY_GUARD_PATTERN = /(?:(?:\bs[əe]n\b|\bsiz\b|\bhelmer\b).*(?:kim(?:s[əe]n|siniz)?|hans[ıi](?:san|s[ıi]z|\s+model[a-zəıiöüçşğ]*)|n[əe]s[əe]n|openai|chatgpt|gpt|gemini|claude|deepseek|google|anthropic|yarad[ıi]b|i[sş]l[əe]yirs[əe]n|modeli?s[əe]n)|(?:\b(?:openai|chatgpt|gpt|gemini|claude|google|anthropic)\b[-a-zəıiöüçşğ]*\s+(?:deyils[əe]n|deyilmi|deyilsiniz|s[əe]ns[əe]n|modelis[əe]n))|\b(?:hans[ıi]\s+model(?:s[əe]n|d[əe]\s+i[sş]l[əe]yirs[əe]n)|s[əe]n\s+hans[ıi]san|kim\s+t[əe]r[əe]find[əe]n\s+yarad[ıi]l)\b)/i;
+export const ASSISTANT_IDENTITY_GUARD_PATTERN = /(?:(?:\bs[əe]n\b|\bsiz\b|\bhelmer\b).*(?:kim(?:s[əe]n|siniz)?|hans[ıi](?:san|s[ıi]z|\s+model[a-zəıiöüçşğ]*)|n[əe]s[əe]n|openai|chatgpt|gpt|gemini|claude|deepseek|google|anthropic|yarad[ıi]b|i[sş]l[əe]yirs[əe]n|modeli?s[əe]n)|(?:\b(?:openai|chatgpt|gpt|gemini|claude|google|anthropic)\b[-a-zəıiöüçşğ]*\s+(?:deyils[əe]n|deyilmi|deyilsiniz|s[əe]ns[əe]n|modelis[əe]n))|\b(?:hans[ıi]\s+model(?:s[əe]n|d[əe]\s+i[sş]l[əe]yirs[əe]n)|s[əe]n\s+hans[ıi]san|kim\s+t[əe]r[əe]find[əe]n\s+yarad[ıi]l)\b)/i;
 
 /**
  * Contextual guard for conceptual questions, copywriting, internal business brainstorming,
@@ -44,6 +44,20 @@ const HARD_EXTERNAL_REALTIME_FACT_PATTERN = /(?:202[4-9]|203[0-9]|\b(?:az[əe]rb
 const STRICT_REGULATORY_GROUNDING_PATTERN = /(?:r[əe]smi\s+inflyasiya\s+faizi|m[əe]rk[əe]zi\s+bank[ıi]n\s+faiz\s+d[əe]r[əe]c[əe]si)/i;
 
 const SHORT_VERIFICATION_FOLLOWUP_PATTERN = /^(?:d[əe]qiq\??|[əe]mins[əe]n\??|do[gğ]rudan\??|h[əe]qiq[əe]t[əe]n\??|d[uü]zd[uü]r\??|yenid[əe]n\s+c[əe]hd\s+et|t[əe]krar\s+(?:c[əe]hd\s+et|yoxla|axtar|ara[sş]d[ıi]r)|bir\s+d[əe]\s+(?:yoxla|bax|ara[sş]d[ıi]r)|olmayacaq\??|yoxla|exact(?:ly)?\??|really\??|are\s+you\s+sure\??|sure\??|verify\??|retry|try\s+again|check\s+again|m[əe]nb[əe]\??|sources?\??|link\??)[!?.…\s]*$/i;
+
+const SEARCH_OFFER_ACCEPTANCE = /^(?:(?:b[əe]li|h[əe]|yes|sure|evet)[,\s]+)?(?:z[əe]hm[əe]t\s+olmasa\s+|please\s+|lütfen\s+)?(?:yoxla|axtar|ara[sş]d[ıi]r|bax|go\s+ahead|do\s+it|verify|check(?:\s+(?:it|that))?|search|look\s+it\s+up|kontrol\s+et|ara)(?:\s+please)?[.!?…\s]*$|^(?:b[əe]li|h[əe]|yes(?:\s+please)?|evet)[.!?…\s]*$/iu;
+export function acceptsLiveSearchOffer(prompt, previousTurn) {
+  return previousTurn?.role === "assistant" && previousTurn.liveSearchOffered === true &&
+    typeof prompt === "string" && SEARCH_OFFER_ACCEPTANCE.test(prompt.trim());
+}
+
+export function shouldOfferLiveSearch(prompt) {
+  return !ASSISTANT_IDENTITY_GUARD_PATTERN.test(prompt) && !CONCEPTUAL_OR_COPYWRITING_GUARD_PATTERN.test(prompt) &&
+    (REALTIME_TIME_PATTERN.test(prompt) || HARD_EXTERNAL_REALTIME_FACT_PATTERN.test(prompt) ||
+      EXPLICIT_WEB_LOOKUP_PATTERN.test(prompt) || TRENDS_AND_NEWS_PATTERN.test(prompt) ||
+      PRICE_AND_MARKET_PATTERN.test(prompt) || AI_AND_TECH_MODELS_PATTERN.test(prompt) ||
+      /(?:gələcək|növbəti|yaxın)\s+\d.{0,12}\bil\b|\b(?:next|coming)\s+\d+\s+years?\b/iu.test(prompt));
+}
 
 export function hasGroundedAssistantHistory(messages = []) {
   if (!Array.isArray(messages) || messages.length === 0) return false;

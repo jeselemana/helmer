@@ -1,4 +1,5 @@
 import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { randomUUID } from "node:crypto";
 
 let _s3 = null;
 
@@ -151,30 +152,36 @@ export async function testR2Connection() {
   const s3 = getS3Client();
   if (!s3) return { configured: false, reason: "Failed to initialize S3 client" };
 
+  const pingKey = `data/health/${randomUUID()}.json`;
+  const payload = { ping: true, time: new Date().toISOString(), nonce: randomUUID() };
+  const options = { abortSignal: AbortSignal.timeout(10000) };
+  let written = false;
   try {
-    const pingKey = "data/_ping.json";
-    const payload = { ping: true, time: new Date().toISOString() };
     await s3.send(
       new PutObjectCommand({
         Bucket: getBucket(),
         Key: pingKey,
         Body: JSON.stringify(payload),
         ContentType: "application/json",
-      })
+        IfNoneMatch: "*",
+      }), options
     );
+    written = true;
     const getRes = await s3.send(
       new GetObjectCommand({
         Bucket: getBucket(),
         Key: pingKey,
-      })
+      }), options
     );
     const str = await getRes.Body.transformToString();
     const parsed = JSON.parse(str || "{}");
+    await s3.send(new DeleteObjectCommand({ Bucket: getBucket(), Key: pingKey }), options);
+    written = false;
     return {
       configured: true,
       accessible: true,
       bucket: getBucket(),
-      pingSuccess: parsed.ping === true,
+      pingSuccess: parsed.ping === true && parsed.nonce === payload.nonce,
       timestamp: parsed.time,
     };
   } catch (err) {
@@ -184,6 +191,10 @@ export async function testR2Connection() {
       bucket: getBucket(),
       code: err.name || err.Code || err.$metadata?.httpStatusCode,
     };
+  } finally {
+    if (written) {
+      await s3.send(new DeleteObjectCommand({ Bucket: getBucket(), Key: pingKey }), { abortSignal: AbortSignal.timeout(5000) }).catch(() => {});
+    }
   }
 }
 

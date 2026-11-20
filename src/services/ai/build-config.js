@@ -1,3 +1,6 @@
+export const BUILD_OPENAI_MODEL = "gpt-6.2-sol";
+export const BUILD_OPENAI_OUTPUT_TOKENS = Object.freeze({ LOW: 16384, MEDIUM: 24576, HIGH: 32768 });
+
 // Build-only contract; other modes retain their existing provider configuration.
 const primaryLocation = (process.env.BUILD_VERTEX_LOCATION || process.env.GOOGLE_CLOUD_BUILD_LOCATION || "us").trim() || "us";
 const fallbackLocations = Object.freeze(["global", "us"].filter((loc) => loc !== primaryLocation));
@@ -84,6 +87,7 @@ export function resolveBuildOutputReservation(params) {
 
 export function isValidBuildOutputReservation(modelKey, reservationValue) {
   if (!Number.isSafeInteger(reservationValue) || reservationValue <= 0) return false;
+  if (modelKey === BUILD_OPENAI_MODEL) return Object.values(BUILD_OPENAI_OUTPUT_TOKENS).includes(reservationValue);
   if (modelKey === "gemini-4-hydrogen") {
     return Object.values(BUILD_HYDROGEN_THINKING_RESERVATIONS).includes(reservationValue) ||
       reservationValue === BUILD_OUTPUT_RESERVATIONS["gemini-4-hydrogen"];

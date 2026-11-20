@@ -81,8 +81,8 @@ test('AiPolicy in-memory allows guests past 3 daily briefs and enforces rolling 
   assert.equal(quota.isGuest, true);
   assert.equal(quota.buildLimit, null);
   assert.equal(quota.buildRemaining, null);
-  assert.equal(quota.limit, null);
-  assert.equal(quota.remaining, null);
+  assert.equal(quota.limit, 5);
+  assert.equal(quota.remaining, 5);
   assert.equal(quota.buildPerMinuteLimit, 6);
 });
 
@@ -102,7 +102,7 @@ test('guest HTTP Build mode: omits guestCtaNotice/remainingGuestBriefs and enfor
   app.get('/api/security/config', (req, res) => {
     res.json({
       guest: true,
-      guestAiDailyLimit: null,
+      guestAiDailyLimit: 5,
       guestBuildDailyLimit: null,
       guestAskPerMinuteLimit: 10,
       guestBuildPerMinuteLimit: guestBuildPerMinuteLimit(policy.env),
@@ -138,7 +138,7 @@ test('guest HTTP Build mode: omits guestCtaNotice/remainingGuestBriefs and enfor
 
   const configRes = await fetch(`${base}/api/security/config`);
   const configData = await configRes.json();
-  assert.equal(configData.guestAiDailyLimit, null);
+  assert.equal(configData.guestAiDailyLimit, 5);
   assert.equal(configData.guestBuildDailyLimit, null);
   assert.equal(configData.guestBuildPerMinuteLimit, 4);
 

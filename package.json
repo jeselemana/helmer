@@ -23,18 +23,18 @@
     "dotenv": "^16.6.1",
     "exceljs": "^4.4.0",
     "express": "^4.22.3",
-    "fast-xml-parser": "^5.11.2",
+    "fast-xml-parser": "5.12.1",
     "google-auth-library": "^11.0.2",
     "jszip": "^3.10.2",
     "nodemailer": "^10.0.13",
-    "openai": "^4.0.0",
+    "openai": "7.62.0",
     "otplib": "^13.5.0",
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.20.2",
     "pptxgenjs": "^4.0.1",
     "qs": "^6.16.0",
     "redis": "^5.10.0",
-    "zod": "^3.25.76"
+    "zod": "4.6.7"
   },
   "overrides": {
     "minimatch": "^11.0.4",

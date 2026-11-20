@@ -3,16 +3,27 @@ import { CONCURRENT_PAUSE_CHECK_SYMBOL } from './ai-policy.js';
 import { executionContext } from './privacy-policy.js';
 import { providerUsage } from './provider-usage.js';
 import { isValidBuildOutputReservation, resolveBuildOutputReservation } from "../ai/build-config.js";
+import { isBoundedWebSearch } from "../ai/openai-web-search.js";
 let policy;
 export function configureProviderPolicy(value) { policy = value; }
 export async function assertPlatformEnabled(options) { await policy?.assertEnabled?.(options); }
-export function wrapProvider(client, kind, { buildVertex = false } = {}) {
+export function wrapProvider(client, kind, { buildVertex = false, askModels = null, buildResponses = false } = {}) {
   if (client.__helmerProtected) return client;
   function protect(target, method, type) {
     if (typeof target?.[method] !== 'function') return;
     const original = target[method].bind(target);
     target[method] = async (params, options) => {
-      const outputTokenReservation = buildVertex ? resolveBuildOutputReservation(params) : undefined;
+      if (askModels && (type !== 'responses' || !askModels.has(params.model) || !isBoundedWebSearch(params) ||
+          params.previous_response_id || params.conversation || params.background || params.store !== false)) {
+        throw Object.assign(new Error('Invalid Ask provider configuration'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
+      }
+      const outputTokenReservation = buildVertex ? resolveBuildOutputReservation(params) : buildResponses ? params.max_output_tokens : undefined;
+      if (buildResponses && (type !== 'responses' || params.model !== 'gpt-6.2-sol' ||
+          !isValidBuildOutputReservation(params.model, outputTokenReservation) || !isBoundedWebSearch(params) ||
+          !['low', 'medium', 'high'].includes(params.reasoning?.effort) ||
+          params.previous_response_id || params.conversation || params.background || params.store !== false)) {
+        throw Object.assign(new Error('Invalid Build provider configuration'), { code: 'EXECUTION_UNAVAILABLE', status: 503 });
+      }
       if (buildVertex && (!isValidBuildOutputReservation(params.model, outputTokenReservation) || params.config?.maxOutputTokens !== undefined ||
           (params.config?.tools && (!Array.isArray(params.config.tools) || params.config.tools.length > 1 || params.config.tools.some(tool =>
             !tool?.googleSearch || Object.keys(tool).length !== 1 || Object.keys(tool.googleSearch).length !== 0))))) {
@@ -35,7 +46,7 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
       const enabled = options => measure('platformMs', () => assertPlatformEnabled(options));
       context.signal?.throwIfAborted();
       const reserveOptions = {
-        ...(buildVertex ? { outputTokenReservation } : {}),
+        ...((buildVertex || buildResponses) ? { outputTokenReservation } : {}),
         [CONCURRENT_PAUSE_CHECK_SYMBOL]: true,
       };
       const [enabledResult, authResult, reserveResult] = await Promise.allSettled([
@@ -178,7 +189,7 @@ export function wrapProvider(client, kind, { buildVertex = false } = {}) {
         }
         else if (type === 'decision') payload = params;
         else if (type === 'chat') payload = { ...params, store: false, ...(params.max_completion_tokens ? { max_completion_tokens: Math.min(params.max_completion_tokens, 16384) } : { max_tokens: Math.min(params.max_tokens || 16384, 16384) }) };
-        else payload = { ...params, store: false, max_output_tokens: Math.min(params.max_output_tokens || 16384, 16384), ...(context.guest ? { max_tool_calls: 1 } : {}) };
+        else payload = { ...params, store: false, max_output_tokens: buildResponses ? outputTokenReservation : Math.min(params.max_output_tokens || 16384, 16384), ...(context.guest && params.tools?.length ? { max_tool_calls: 1 } : {}) };
         signal?.throwIfAborted();
         providerDispatched = true;
         decisionDispatched = type === 'decision';

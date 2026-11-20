@@ -11,7 +11,8 @@ import { FileStrategyRepository } from '../src/repositories/file-strategy-reposi
 import { AiPolicy } from '../src/services/security/ai-policy.js';
 import { PrivacyPolicy } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
-import { getBuildVertexClient } from '../src/services/ai/client.js';
+import { createBuildOrchestrator } from '../src/services/ai/build-orchestrator.js';
+import { assessBrief, generateStrategy, refineStrategy } from '../src/services/ai/strategy-service.js';
 
 async function fixture(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'helmer-build-http-'));
@@ -50,8 +51,7 @@ async function fixture(t) {
       })();
     },
   } }, 'gemini', { buildVertex: true });
-  t.mock.method(getBuildVertexClient().models, 'generateContent', gemini.models.generateContent);
-  t.mock.method(getBuildVertexClient().models, 'generateContentStream', gemini.models.generateContentStream);
+  const orchestrate = createBuildOrchestrator({ gemini: () => gemini });
   const repository = new FileStrategyRepository(path.join(directory, 'strategies.json'), null, { cloud: false });
   f.repository = repository;
   const app = express(); app.use(express.json());
@@ -65,7 +65,16 @@ async function fixture(t) {
   app.use(new PrivacyPolicy({ findById: async id => users.get(id) }).middleware());
   app.use(policy.middleware());
   const learning = { createInteractionId: randomUUID, recordInteraction: async data => f.learning.push(data) };
-  app.use('/api/strategy', createStrategyRouter(repository, learning, { hasActiveJobForOwner: owner => f.background === owner }));
+  f.generationServices = {
+    assessBrief: options => assessBrief({ ...options, orchestrate }),
+    generateStrategy: options => generateStrategy({ ...options, orchestrate }),
+    refineStrategy: (payload, ownerId, signal, profile, onChunk, onUsage) =>
+      refineStrategy(payload, ownerId, signal, profile, onChunk, onUsage, orchestrate),
+  };
+  app.use('/api/strategy', createStrategyRouter(repository, learning, {
+    hasActiveJobForOwner: owner => f.background === owner,
+    generationServices: f.generationServices,
+  }));
   app.use(strategyErrorHandler);
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
@@ -210,25 +219,18 @@ test('Build HTTP: provider failure returns a safe, correlated SSE error without 
   assert.equal((await f.repository.list(f.ownerA)).length, 0);
 });
 
-test('Build estimate endpoint is strict, private, Hydrogen-scouted and caches only tenant-scoped no-search estimates', async t => {
-  const f = await fixture(t), brief = 'Prepare a secure technical launch strategy';
-  const response = await f.post('/estimate', { brief });
+test('Build estimate is strict and deterministic without a provider call', async t => {
+  const f = await fixture(t);
+  const payload = { brief: 'Prepare a secure technical launch strategy' };
+  const response = await f.post('/estimate', payload);
   assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { preparationEstimate: { minMinutes: 1, maxMinutes: 3, bufferMinutes: 1 } });
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.deepEqual(await response.json(), { preparationEstimate: { minMinutes: 6, maxMinutes: 14, bufferMinutes: 3 } });
-  assert.deepEqual(f.calls.map(call => call.params.model), ['gemini-4-hydrogen']);
-  assert.doesNotMatch(JSON.stringify(f.calls), /Software|UnneededSecretBrand/);
-  const again = await f.post('/estimate', { brief });
-  assert.equal(again.status, 200); assert.equal(f.calls.length, 1);
-  const other = await f.post('/estimate', { brief }, { headers: { 'X-Test-Owner': f.ownerB } });
-  assert.equal(other.status, 200); assert.equal(f.calls.length, 2);
-  assert.equal((await f.post('/estimate', { brief, googleSearch: true })).status, 400);
-  assert.equal((await f.post('/estimate', { brief: 'tiny' })).status, 400);
-  const unkeyed = await f.post('/estimate', { brief }, { headers: { 'Idempotency-Key': '' } });
-  assert.equal(unkeyed.status, 400);
-  f.background = f.ownerA;
-  assert.equal((await f.post('/estimate', { brief })).status, 429);
-  assert.equal(f.learning.length, 0);
+  const otherTenant = await f.post('/estimate', payload, { headers: { 'X-Test-Owner': f.ownerB } });
+  assert.equal(otherTenant.status, 200);
+  assert.equal(f.calls.length, 0);
+  assert.equal((await f.post('/estimate', { ...payload, unknown: true })).status, 400);
+  assert.equal(f.calls.length, 0);
 });
 
 test('Build estimate rejects idempotency mismatches and does not spend guest message or brief allowance', async t => {
@@ -239,10 +241,10 @@ test('Build estimate rejects idempotency mismatches and does not spend guest mes
   const conflict = await f.post('/estimate', { brief: 'Prepare an entirely different safe launch plan' }, { headers });
   assert.equal(conflict.status, 409);
   assert.equal((await conflict.json()).code, 'IDEMPOTENCY_CONFLICT');
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 0);
   const again = await f.post('/estimate', { brief: 'Prepare a safe business launch plan' }, { headers });
   assert.equal(again.status, 200);
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 0);
   assert.equal(f.policy.inMemoryGuestUsage?.size || 0, 0);
 });
 
@@ -520,7 +522,7 @@ test('Build HTTP Redis hardening: distributed rate-limit and route idempotency s
     app.use((req, _res, next) => { req.ownerId = req.get('X-Test-Owner') || f.ownerA; req.user = f.users.get(req.ownerId); req.auth = { user: req.user }; next(); });
     app.use(new PrivacyPolicy({ findById: async id => f.users.get(id) }).middleware());
     app.use(f.policy.middleware());
-    app.use('/api/strategy', createStrategyRouter(f.repository, null, { redis: sharedRedis }));
+    app.use('/api/strategy', createStrategyRouter(f.repository, null, { redis: sharedRedis, generationServices: f.generationServices }));
     app.use(strategyErrorHandler);
     const srv = app.listen(0, '127.0.0.1');
     await new Promise(resolve => srv.once('listening', resolve));

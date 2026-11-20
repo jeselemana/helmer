@@ -16,12 +16,13 @@ import { FileAiLearningRepository } from '../src/repositories/file-ai-learning-r
 import { AiPolicy } from '../src/services/security/ai-policy.js';
 import { PrivacyPolicy } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy } from '../src/services/security/provider-policy.js';
-import { createStrategyRouter, strategyErrorHandler } from '../src/http/strategy-router.js';
-import { getBuildVertexClient, getGeminiClient } from '../src/services/ai/client.js';
+import { strategyErrorHandler } from '../src/http/strategy-router.js';
+import { getBuildVertexClient } from "./helpers/legacy-google-inference.js";
+import { getGeminiClient } from "../src/services/ai/research-google-client.js";
 import { MAX_GROUNDED_CHAT_RETENTION_MS } from '../src/services/ai/grounded-chat-retention.js';
 import { createDocumentExport, createPdfPrintDocument } from '../public/exporters.js';
 import { strategyFixture } from './helpers/build-fixtures.js';
-import { installBuildRoutingFixture } from './helpers/build-routing-fixture.js';
+import { createFixtureStrategyRouter as createStrategyRouter, installBuildRoutingFixture } from './helpers/build-routing-fixture.js';
 
 installBuildRoutingFixture();
 

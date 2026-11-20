@@ -1,4 +1,4 @@
-import { installBuildRoutingFixture } from "./helpers/build-routing-fixture.js";
+import { createFixtureStrategyRouter as createStrategyRouter, installBuildRoutingFixture } from "./helpers/build-routing-fixture.js";
 installBuildRoutingFixture();
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -18,8 +18,7 @@ import { TenantLockManager } from "../src/repositories/tenant-lock.js";
 import { writeJsonAtomically } from "../src/repositories/atomic-json-store.js";
 import { LearningLoopService } from "../src/services/learning/learning-loop-service.js";
 import { acquireIdempotencyLock } from "../src/http/execution-lock.js";
-import { createStrategyRouter } from "../src/http/strategy-router.js";
-import { getGeminiClient } from "../src/services/ai/client.js";
+import { getGeminiClient } from "../src/services/ai/research-google-client.js";
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function fixture(t) {

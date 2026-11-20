@@ -1,4 +1,4 @@
-import { installBuildRoutingFixture } from './helpers/build-routing-fixture.js';
+import { createFixtureStrategyRouter as createStrategyRouter, installBuildRoutingFixture } from './helpers/build-routing-fixture.js';
 installBuildRoutingFixture();
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,17 +20,19 @@ import { TelemetryService } from '../src/services/telemetry/telemetry-service.js
 import { LearningLoopService } from '../src/services/learning/learning-loop-service.js';
 import { createCapabilityRouter, createArtifactRouter } from '../src/http/capability-router.js';
 import { createTelemetryClientRouter } from '../src/http/telemetry-router.js';
-import { createStrategyRouter, strategyErrorHandler } from '../src/http/strategy-router.js';
+import { strategyErrorHandler } from '../src/http/strategy-router.js';
 import { createPlannerRouter } from '../src/http/planner-router.js';
 import { createAskHandler } from '../src/http/ask-handler.js';
-import { createAskService, buildAskContents } from '../src/services/ai/ask-service.js';
+import { createGoogleGroundedAskService as createAskService } from './helpers/legacy-google-grounded-ask.js';
+import { buildAskContents } from '../src/services/ai/ask-context.js';
 import { createAskConfig } from '../src/services/ai/ask-config.js';
 import { sanitizeAskGroundingMetadata } from '../src/services/ai/ask-grounding.js';
 import { getRelevantUserContext } from '../src/services/ai/personal-context.js';
 import { AiPolicy } from '../src/services/security/ai-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
 import { PrivacyPolicy } from '../src/services/security/privacy-policy.js';
-import { getGeminiClient, getBuildVertexClient } from '../src/services/ai/client.js';
+import { getBuildVertexClient } from "./helpers/legacy-google-inference.js";
+import { getGeminiClient } from "../src/services/ai/research-google-client.js";
 import { specs } from './artifact-fixtures.js';
 
 function createSampleStrategy(title = 'B2B Growth Plan', tag = 'default') {
@@ -62,6 +64,12 @@ function createSampleStrategy(title = 'B2B Growth Plan', tag = 'default') {
 }
 
 test('HTTP Regression 1: Saved grounded Build strategy with @word never sends evidence or orchestration to provider', async t => {
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-fixture';
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  });
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-sec1-word-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 

@@ -26,8 +26,8 @@ import {
 import { buildStrategyPersonalizationContext } from "../services/ai/personal-context.js";
 import { detectTargetMarket } from "../services/ai/prompts.js";
 import { BuildEstimateRequestSchema } from "../services/ai/build-estimate.js";
-import { buildConfig } from "../services/ai/build-config.js";
-import { createHelmerDecisionRouter, deterministicBuildFallbackRoute } from "../services/ai/decision-router.js";
+import { BUILD_OPENAI_MODEL } from "../services/ai/build-config.js";
+import { createLocalAiRouter } from "../services/ai/local-ai-routing.js";
 import {
   isGroundedStrategyRecord,
   isExpiredGroundedStrategyRecord,
@@ -305,7 +305,7 @@ async function runTrackedBuild({
   if (!learningLoop && !telemetryService) return { result: await execute(() => {}), interactionId: null };
   const interactionId = learningLoop ? learningLoop.createInteractionId() : null;
   const startedAt = Date.now();
-  let providerMeta = { provider: "google", model: buildConfig.strategistModel, usage: null, stageMetrics: [] };
+  let providerMeta = { provider: "openai", model: BUILD_OPENAI_MODEL, usage: null, stageMetrics: [] };
   const isRestricted = onlyNecessaryData || modelImprovement === false;
   let searchObserved = false;
   let searchAttempted = false;
@@ -439,7 +439,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
   const telemetryService = options?.telemetryService || null;
   const routeIdempotencyState = new Map();
   const generationServices = options.generationServices || { assessBrief, generateStrategy, refineStrategy };
-  const decisionRouter = options?.decisionRouter || createHelmerDecisionRouter({ redis: options?.redis || null });
+  const decisionRouter = options?.decisionRouter || createLocalAiRouter();
   const resolvePreFlightBuildDecision = async ({ payload, existingStrategy = null, isBriefGeneration = true, signal }) => {
     const effectiveBuildMode = payload.buildMode === "faster"
       ? "faster"
@@ -460,7 +460,7 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
       });
       if (!decision || typeof decision !== "object" || !decision.targetModel || !decision.thinkingLevel) {
         return {
-          buildDecision: deterministicBuildFallbackRoute({
+          buildDecision: await createLocalAiRouter().routeBuild({
             prompt: promptText,
             hasExistingBrief: Boolean(existingStrategy || payload.strategy),
             existingBriefSummary: existingSummary,
@@ -473,11 +473,11 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
     } catch (error) {
       assertExecutionActive(error, signal);
       if (error?.isSafetyBlock || ["AI_SAFETY_BLOCKED", "AI_CONTENT_BLOCKED"].includes(error?.code)) throw error;
-      console.warn("[Build decision] Pre-flight routing failed; using deterministic Hydrogen fallback", {
+      console.warn("[Build decision] Pre-flight routing failed; using local reasoning rules", {
         code: error?.code || "DECISION_ERROR",
       });
       return {
-        buildDecision: deterministicBuildFallbackRoute({
+        buildDecision: await createLocalAiRouter().routeBuild({
           prompt: promptText,
           hasExistingBrief: Boolean(existingStrategy || payload.strategy),
           existingBriefSummary: existingSummary,
@@ -1528,8 +1528,8 @@ export function createStrategyRouter(repository, learningLoop = null, options = 
             ownerId: req.ownerId,
             modificationRequest: latestVersion.changeRequest,
             response: latestVersion.data,
-            modelProvider: "google",
-            modelName: latestVersion?.data?.orchestration?.generatorModel || buildConfig.strategistModel,
+            modelProvider: "openai",
+            modelName: latestVersion?.data?.orchestration?.generatorModel || BUILD_OPENAI_MODEL,
             finalAccepted: true,
           }) : null);
         logWithoutBlocking(learningUpdate, "Build acceptance logging");

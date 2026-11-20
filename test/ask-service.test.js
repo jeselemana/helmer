@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createAskService, buildAskContents } from '../src/services/ai/ask-service.js';
+import { createGoogleGroundedAskService as createAskService } from './helpers/legacy-google-grounded-ask.js';
+import { buildAskContents } from '../src/services/ai/ask-context.js';
 import { createAskConfig } from '../src/services/ai/ask-config.js';
 import { sanitizeAskGroundingMetadata } from '../src/services/ai/ask-grounding.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
@@ -244,28 +245,35 @@ test('optional search never retries authentication, rate, budget or configuratio
   }
 });
 
-test('Ask service applies fast-streaming directive only at low effort without files', async () => {
+test('Ask service applies fast-streaming directive only at low effort without files while keeping systemInstruction deterministic', async () => {
   const f = fixture([{ text: 'OK' }]);
   await f.generate({ messages, thinkingLevel: 'low' });
-  const lowSystem = f.calls.at(-1).config.systemInstruction;
-  assert.match(lowSystem, /LOW THINKING \/ FAST STREAMING/);
+  const lowCall = f.calls.at(-1);
+  const lowSystem = lowCall.config.systemInstruction;
+  const lowTurnText = lowCall.contents.at(-1).parts.map(p => p.text).join('\n');
   assert.match(lowSystem, /untrusted reference data/);
-  assert.ok(lowSystem.endsWith('start streaming your clear, direct answer immediately.'));
+  assert.doesNotMatch(lowSystem, /LOW THINKING \/ FAST STREAMING/);
+  assert.match(lowTurnText, /LOW THINKING \/ FAST STREAMING/);
+  assert.ok(lowTurnText.includes('start streaming your clear, direct answer immediately.'));
 
   await f.generate({ messages, thinkingLevel: 'high' });
-  assert.doesNotMatch(f.calls.at(-1).config.systemInstruction, /LOW THINKING \/ FAST STREAMING/);
+  const highCall = f.calls.at(-1);
+  assert.equal(highCall.config.systemInstruction, lowSystem);
+  assert.doesNotMatch(highCall.contents.at(-1).parts.map(p => p.text).join('\n'), /LOW THINKING \/ FAST STREAMING/);
 
   await f.generate({ messages: [{ role: 'user', content: 'analyze', file: { name: 'doc.txt', textContent: 'data' } }], thinkingLevel: 'low' });
-  assert.doesNotMatch(f.calls.at(-1).config.systemInstruction, /LOW THINKING \/ FAST STREAMING/);
+  const fileCall = f.calls.at(-1);
+  assert.equal(fileCall.config.systemInstruction, lowSystem);
+  assert.doesNotMatch(fileCall.contents.at(-1).parts.map(p => p.text).join('\n'), /LOW THINKING \/ FAST STREAMING/);
 });
 
 test('Ask web capability never restores rejected low-quality or credential-bearing sources', async t => {
   const { createWebResearch } = await import('../src/services/plugins/research.js');
-  const previous = process.env.GEMINI_API_KEY;
-  process.env.GEMINI_API_KEY = 'fixture-key';
-  t.after(() => { if (previous === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previous; });
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'fixture-key';
+  t.after(() => { if (previous === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous; });
   for (const uri of ['https://pinterest.com/pin/spam', 'https://user:secret@example.com/source', 'javascript:alert(1)']) {
-    const research = createWebResearch({ geminiResearch: async () => ({ text: 'Unverified text', groundingMetadata: { groundingChunks: [{ web: { uri } }] } }) });
+    const research = createWebResearch({ openaiResearch: async () => ({ text: 'Unverified text', groundingMetadata: { groundingChunks: [{ web: { uri } }] } }) });
     await assert.rejects(research({ messages }), { code: 'GROUNDING_UNAVAILABLE' });
   }
 });
@@ -313,9 +321,11 @@ test('Ask service enforces mandatory search and drops immediate-streaming shortc
     candidates: [{ groundingMetadata: { groundingChunks: [{ web: { uri: 'https://cbar.az/az', domain: 'cbar.az', title: 'CBAR' } }] } }],
   }]);
   await f.generate({ messages, thinkingLevel: 'low', enableSearch: true, requireGrounding: true });
-  const system = f.calls.at(-1).config.systemInstruction;
-  assert.match(system, /MANDATORY SEARCH EXECUTION/);
-  assert.doesNotMatch(system, /LOW THINKING \/ FAST STREAMING/);
+  const call = f.calls.at(-1);
+  const turnText = call.contents.at(-1).parts.map(p => p.text).join('\n');
+  assert.doesNotMatch(call.config.systemInstruction, /MANDATORY SEARCH EXECUTION/);
+  assert.match(turnText, /MANDATORY SEARCH EXECUTION/);
+  assert.doesNotMatch(turnText, /LOW THINKING \/ FAST STREAMING/);
 });
 
 test('Ask service resets search timeout on thinking parts, blocks RECITATION, and handles MAX_TOKENS', async () => {
@@ -349,4 +359,37 @@ test('Ask service resets search timeout on thinking parts, blocks RECITATION, an
   assert.equal(truncatedResult.text, 'Qismən cavab');
   assert.equal(truncatedResult.truncated, true);
   assert.equal(truncatedResult.finishReason, 'MAX_TOKENS');
+});
+
+
+test('Ask service embeds Smart Search Offer directive deterministically across search modes and reports geminiFirstTextMs', async () => {
+  const f = fixture([{ text: 'Birinci hissə ' }, { text: 'ikinci hissə.' }]);
+  const firstTextLatencies = [];
+  const resNoSearch = await f.generate({
+    messages: [{ role: 'user', content: 'Fransanın prezidenti kimdir?' }],
+    enableSearch: false,
+    thinkingLevel: 'low',
+    onChunk: async () => {},
+    onFirstText: (ms) => firstTextLatencies.push(ms),
+  });
+  const resWithSearch = await f.generate({
+    messages: [{ role: 'user', content: 'Fransanın prezidenti kimdir?' }],
+    enableSearch: true,
+    thinkingLevel: 'low',
+    onChunk: async () => {},
+  });
+
+  const sysNoSearch = f.calls[0].config.systemInstruction;
+  const sysWithSearch = f.calls[1].config.systemInstruction;
+  assert.equal(sysNoSearch, sysWithSearch);
+  assert.match(sysNoSearch, /\[SMART SEARCH OFFER DIRECTIVE\]/);
+  assert.match(sysNoSearch, /When current evidence is unavailable/);
+  assert.match(sysNoSearch, /The application handles offers to verify current facts/);
+
+  assert.equal(firstTextLatencies.length, 1);
+  assert.equal(typeof firstTextLatencies[0], 'number');
+  assert.ok(firstTextLatencies[0] >= 0);
+  assert.equal(typeof resNoSearch.geminiFirstTextMs, 'number');
+  assert.equal(resNoSearch.geminiFirstTextMs, firstTextLatencies[0]);
+  assert.equal(typeof resWithSearch.geminiFirstTextMs, 'number');
 });

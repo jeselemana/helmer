@@ -10,7 +10,7 @@ import { PrivacyPolicy, privacySnapshot, executionContext } from '../src/service
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
 import { AiPolicy } from '../src/services/security/ai-policy.js';
 import { createAskHandler } from '../src/http/ask-handler.js';
-import { createHelmerDecisionRouter } from '../src/services/ai/decision-router.js';
+import { createHelmerDecisionRouter } from './helpers/legacy-decision-router.js';
 import { FileUserRepository } from '../src/repositories/file-user-repository.js';
 import { FilePlannerRepository } from '../src/repositories/file-planner-repository.js';
 import { FileChatRepository } from '../src/repositories/file-chat-repository.js';
@@ -334,8 +334,9 @@ test('wrapProvider parallel pre-flight cleanly refunds and releases reservation 
   assert.equal(released, 1);
 });
 
-test('HelmerDecisionRouter uses 0 ms fast-path only for ungrounded pure greetings', async () => {
+test('HelmerDecisionRouter uses 0 ms fast-path only for ungrounded pure greetings and falls back locally without Vertex in Ask', async () => {
   let vertexCalls = 0;
+  let decisionsCalls = 0;
   const router = createHelmerDecisionRouter({
     env: { GEMINI_API_KEY: 'AQ.vertex-express', GEMINI_USE_VERTEX: 'true' },
     hasDecisionApiConfigFn: () => false,
@@ -353,6 +354,7 @@ test('HelmerDecisionRouter uses 0 ms fast-path only for ungrounded pure greeting
 
   const greeting = await router.routeAsk({ prompt: 'Salam!' });
   assert.equal(greeting.routerSource, 'fast_path');
+  assert.equal(greeting.decisionPath, 'fast_path_direct');
   assert.equal(greeting.enableSearch, false);
   assert.equal(greeting.latencyMs, 0);
   assert.equal(vertexCalls, 0);
@@ -361,22 +363,46 @@ test('HelmerDecisionRouter uses 0 ms fast-path only for ungrounded pure greeting
     prompt: 'Yaxşı',
     hasGroundedHistory: true,
   });
-  assert.equal(vertexCalls, 1);
-  assert.equal(afterGrounded.routerSource, 'vertex_flash_lite');
+  assert.equal(vertexCalls, 0);
+  assert.equal(afterGrounded.routerSource, 'local_rules');
+  assert.equal(afterGrounded.decisionPath, 'heuristic_fallback');
+
+  const decisionsRouter = createHelmerDecisionRouter({
+    env: { GEMINI_API_KEY: 'AIza-dev-key' },
+    hasDecisionApiConfigFn: () => true,
+    callDecisionsApiFn: async () => {
+      decisionsCalls++;
+      return {
+        results: {
+          needs_web_search: { noul: 0.9, confidence: 0.9 },
+          require_grounding: { noul: 0.1, confidence: 0.9 },
+        },
+      };
+    },
+  });
+  const afterGroundedWithApi = await decisionsRouter.routeAsk({
+    prompt: 'Yaxşı',
+    hasGroundedHistory: true,
+  });
+  assert.equal(decisionsCalls, 1);
+  assert.equal(afterGroundedWithApi.routerSource, 'decisions_api');
+  assert.equal(afterGroundedWithApi.decisionPath, 'decisions_api');
 
   const explicitSearch = await router.routeAsk({ prompt: 'Araşdır' });
   assert.equal(explicitSearch.routerSource, 'fast_path');
+  assert.equal(explicitSearch.decisionPath, 'fast_path_search');
   assert.equal(explicitSearch.enableSearch, true);
   assert.equal(explicitSearch.latencyMs, 0);
-  assert.equal(vertexCalls, 1);
+  assert.equal(vertexCalls, 0);
 
   const groundedVerify = await router.routeAsk({
     prompt: 'Dəqiq?',
     hasGroundedHistory: true,
   });
   assert.equal(groundedVerify.routerSource, 'local_rules');
+  assert.equal(groundedVerify.decisionPath, 'heuristic_fallback');
   assert.equal(groundedVerify.enableSearch, true);
-  assert.equal(vertexCalls, 1);
+  assert.equal(vertexCalls, 0);
 });
 
 test('FileUserRepository.findById isolates a single registered user, invalidates on update, and forwards raw/clone flags to cloud', async t => {

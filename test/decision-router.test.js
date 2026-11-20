@@ -10,13 +10,7 @@ import {
 } from "../src/services/security/ai-policy.js";
 import { PrivacyPolicy } from "../src/services/security/privacy-policy.js";
 import { getPricingForModel, calculateEstimatedCost } from "../src/services/telemetry/pricing.js";
-import {
-  callDecisionsApi,
-  getDecisionsApiStatus,
-  hasDecisionApiConfiguration,
-  resolveDecisionApiKey,
-  resolveDecisionVertexConfig,
-} from "../src/services/ai/client.js";
+import { callDecisionsApi, getDecisionsApiStatus, hasDecisionApiConfiguration, resolveDecisionApiKey, resolveDecisionVertexConfig } from "./helpers/legacy-google-inference.js";
 import { evaluateSearchRoute } from "../src/services/ai/search-router.js";
 import {
   DECISION_MODEL,
@@ -26,9 +20,10 @@ import {
   VERTEX_CIRCUIT_KEYS,
   HelmerDecisionRouter,
   createHelmerDecisionRouter,
+  classifyAskFastPath,
   resolveDecisionTimeoutMs,
   serializeDecisionContext,
-} from "../src/services/ai/decision-router.js";
+} from "./helpers/legacy-decision-router.js";
 import { createAskHandler } from "../src/http/ask-handler.js";
 import { createStrategyRouter } from "../src/http/strategy-router.js";
 
@@ -375,9 +370,10 @@ test("HTTP 400 safety/content_blocked blocks explicitly without tripping Redis c
   assert.equal(redis.store.get(REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN), undefined);
 });
 
-test("503 / timeout fallback to gemini-3.5-flash-lite (MINIMAL thinking) + strict Zod schema", async () => {
+test("503 / timeout fallback: Ask falls back in 0ms to local heuristics (no Vertex LLM), Build falls back to gemini-3.5-flash-lite", async () => {
   const redis = createMockRedis();
   let vertexParams = null;
+  let askVertexCalls = 0;
 
   const router = createHelmerDecisionRouter({
     redis,
@@ -386,10 +382,12 @@ test("503 / timeout fallback to gemini-3.5-flash-lite (MINIMAL thinking) + stric
     getVertexClientFn: () => ({
       models: {
         generateContent: async (params) => {
+          const isBuild = String(params.config?.systemInstruction || params.contents[0].parts[0].text).includes('"draft_brief"');
+          if (!isBuild) askVertexCalls += 1;
           vertexParams = params;
           return {
             text: JSON.stringify(
-              String(params.config?.systemInstruction || params.contents[0].parts[0].text).includes('"draft_brief"')
+              isBuild
                 ? { a: "refine_brief", d: 0, m: true, c: true }
                 : { s: true, r: false }
             ),
@@ -399,24 +397,26 @@ test("503 / timeout fallback to gemini-3.5-flash-lite (MINIMAL thinking) + stric
     }),
   });
 
-  const askRes = await router.routeAsk({ prompt: "Baku coffee shop prices 2026" });
-  assert.equal(askRes.enableSearch, true);
-  assert.equal(askRes.requireGrounding, false);
-  assert.equal(askRes.routerSource, "vertex_flash_lite");
-  assert.equal(vertexParams.model, DECISION_FALLBACK_MODEL);
-  assert.deepEqual(vertexParams.config.thinkingConfig, { thinkingLevel: "MINIMAL" });
-  assert.equal(vertexParams.config.temperature, 0.0);
-  assert.equal(vertexParams.config.maxOutputTokens, 64);
-  assert.equal(vertexParams.config.responseMimeType, "application/json");
+  const askRes = await router.routeAsk({ prompt: "Müəmmalı bazar sualı" });
+  assert.equal(askRes.routerSource, "local_rules");
+  assert.equal(askRes.decisionPath, "heuristic_fallback");
+  assert.equal(askRes.fallbackReason, "decision_http_503");
+  assert.equal(askVertexCalls, 0);
 
   const buildRes = await router.routeBuild({ prompt: "Cut scope to MVP only", hasExistingBrief: true });
   assert.equal(buildRes.briefAction, "refine_brief");
   assert.equal(buildRes.briefDepth, 0);
   assert.equal(buildRes.needsMarketSearch, true);
   assert.equal(buildRes.routerSource, "vertex_flash_lite");
+  assert.equal(vertexParams.model, DECISION_FALLBACK_MODEL);
+  assert.deepEqual(vertexParams.config.thinkingConfig, { thinkingLevel: "MINIMAL" });
+  assert.equal(vertexParams.config.temperature, 0.0);
+  assert.equal(vertexParams.config.maxOutputTokens, 64);
+  assert.equal(vertexParams.config.responseMimeType, "application/json");
 
-  // AQ. Vertex key bypasses AI Studio fetch in 0 ms straight to Fallback 1
+  // AQ. Vertex key bypasses AI Studio fetch in 0 ms; Ask routes locally without Vertex
   let studioCalled = false;
+  let aqVertexCalls = 0;
   const aqRouter = createHelmerDecisionRouter({
     env: { GEMINI_API_KEY: "AQ.vertex-express", GOOGLE_CLOUD_PROJECT: "helmer-prod-123" },
     fetcher: async () => {
@@ -425,14 +425,26 @@ test("503 / timeout fallback to gemini-3.5-flash-lite (MINIMAL thinking) + stric
     },
     getVertexClientFn: () => ({
       models: {
-        generateContent: async () => ({ text: '{"s":false,"r":false}' }),
+        generateContent: async () => {
+          aqVertexCalls += 1;
+          return { text: '{"s":false,"r":false}' };
+        },
       },
     }),
   });
-  const aqRes = await aqRouter.routeAsk({ prompt: "Write a short slogan" });
+  const aqDirectRes = await aqRouter.routeAsk({ prompt: "Write a short slogan" });
   assert.equal(studioCalled, false);
-  assert.equal(aqRes.routerSource, "vertex_flash_lite");
-  assert.equal(aqRes.enableSearch, false);
+  assert.equal(aqVertexCalls, 0);
+  assert.equal(aqDirectRes.routerSource, "fast_path");
+  assert.equal(aqDirectRes.decisionPath, "fast_path_direct");
+  assert.equal(aqDirectRes.enableSearch, false);
+
+  const aqGreyRes = await aqRouter.routeAsk({ prompt: "Azərbaycan bazarında rəqabət mühiti necədir?" });
+  assert.equal(studioCalled, false);
+  assert.equal(aqVertexCalls, 0);
+  assert.equal(aqGreyRes.routerSource, "local_rules");
+  assert.equal(aqGreyRes.decisionPath, "heuristic_fallback");
+  assert.equal(aqGreyRes.enableSearch, true);
 });
 
 test("Redis circuit breaker opens after >= 3 failures with 60s TTL and bypasses Decisions API in 0 ms", async () => {
@@ -470,10 +482,12 @@ test("Redis circuit breaker opens after >= 3 failures with 60s TTL and bypasses 
   assert.equal(redis.store.get(REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN), "1");
   assert.equal(redis.ttls.get(REDIS_CIRCUIT_KEYS.CIRCUIT_OPEN), 60);
 
-  // 4th call while circuit is open must NOT invoke fetch
+  // 4th call while circuit is open must NOT invoke fetch and routes locally in 0ms
   const res4 = await router.routeAsk({ prompt: "q4" });
   assert.equal(fetchCalls, 3);
-  assert.equal(res4.routerSource, "vertex_flash_lite");
+  assert.equal(res4.routerSource, "local_rules");
+  assert.equal(res4.decisionPath, "heuristic_fallback");
+  assert.equal(res4.fallbackReason, "circuit_open");
 });
 
 test("Fallback 2 local rules handle Ask ('Dəqiq?' with grounded history) and Build when Vertex fails", async () => {
@@ -719,12 +733,12 @@ test("HelmerDecisionRouter bounds Vertex fallback timeout, trips circuit on 404/
   await primaryRouter.routeAsk({ prompt: "Query while open" });
   assert.equal(primaryCalls, 3);
 
-  // 2. Bounded Vertex fallback timeout + Vertex circuit breaker opening on 404/500/TypeError
+  // 2. Bounded Vertex fallback timeout + Vertex circuit breaker opening on 404/500/TypeError (Build mode)
   const vertexRedis = createMockRedis();
   const vertexErrors = [
     Object.assign(new Error("Model missing"), { status: 404 }),
     Object.assign(new Error("Vertex 500"), { status: 500 }),
-    null, // 3rd call hangs cleanly until bounded abortSignal fires (~800 ms, << 2500 ms)
+    null, // 3rd call hangs cleanly until bounded abortSignal fires (~850-1200 ms, << 2500 ms)
   ];
   const vertexRouter = createHelmerDecisionRouter({
     redis: vertexRedis,
@@ -750,10 +764,10 @@ test("HelmerDecisionRouter bounds Vertex fallback timeout, trips circuit on 404/
     }),
   });
 
-  const r1 = await vertexRouter.routeAsk({ prompt: "First ask" });
-  const r2 = await vertexRouter.routeAsk({ prompt: "Second ask" });
+  const r1 = await vertexRouter.routeBuild({ prompt: "First build brief" });
+  const r2 = await vertexRouter.routeBuild({ prompt: "Second build brief" });
   const startTimeout = Date.now();
-  const r3 = await vertexRouter.routeAsk({ prompt: "Third slow ask" });
+  const r3 = await vertexRouter.routeBuild({ prompt: "Third slow build brief" });
   const timeoutElapsed = Date.now() - startTimeout;
   assert.equal(r1.routerSource, "local_rules");
   assert.equal(r2.routerSource, "local_rules");
@@ -762,9 +776,9 @@ test("HelmerDecisionRouter bounds Vertex fallback timeout, trips circuit on 404/
   assert.equal(vertexCalls, 3);
   assert.equal(vertexRedis.store.get(VERTEX_CIRCUIT_KEYS.CIRCUIT_OPEN), "1");
 
-  // 4th Ask must skip Vertex fallback in 0 calls and route locally
+  // 4th Build must skip Vertex fallback in 0 calls and route locally
   const startOpen = Date.now();
-  const r4 = await vertexRouter.routeAsk({ prompt: "Fourth ask with open vertex circuit" });
+  const r4 = await vertexRouter.routeBuild({ prompt: "Fourth build with open vertex circuit" });
   assert.equal(r4.routerSource, "local_rules");
   assert.equal(vertexCalls, 3);
   assert.ok(Date.now() - startOpen < 100);
@@ -1047,18 +1061,198 @@ test("DECISIONS_API_KEY alias, low-confidence (< 0.70) fallback, and router getD
   assert.equal(diagBefore.keySource, "DECISIONS_API_KEY");
   assert.doesNotMatch(JSON.stringify(diagBefore), /AIzaSy|AQ\.AbCd/);
 
-  // Ask confidence 0.58 (< 0.70) falls back to vertex_flash_lite
+  // Ask confidence 0.58 (< 0.70) falls back directly in 0ms to heuristic_fallback (0 Vertex calls)
   const askRes = await router.routeAsk({ prompt: "Müəmmalı bazar sualı" });
   assert.equal(decisionCalls, 1);
-  assert.equal(fallbackCalls, 1);
-  assert.equal(askRes.routerSource, "vertex_flash_lite");
+  assert.equal(fallbackCalls, 0);
+  assert.equal(askRes.routerSource, "local_rules");
+  assert.equal(askRes.decisionPath, "heuristic_fallback");
   assert.equal(askRes.fallbackReason, "decision_low_confidence");
-  assert.equal(askRes.enableSearch, true);
+  assert.equal(askRes.enableSearch, false);
 
   // Build confidence < 0.70 falls back to vertex_flash_lite
   const buildRes = await router.routeBuild({ prompt: "Launch SaaS platform" });
   assert.equal(decisionCalls, 2);
-  assert.equal(fallbackCalls, 2);
+  assert.equal(fallbackCalls, 1);
   assert.equal(buildRes.routerSource, "vertex_flash_lite");
   assert.equal(buildRes.fallbackReason, "decision_low_confidence");
+});
+
+
+test("Expanded 0ms local fast-path routes live/AI queries to search and offline tasks to direct without calling Decisions API or Vertex", async () => {
+  let fetchCalls = 0;
+  let vertexCalls = 0;
+  const router = createHelmerDecisionRouter({
+    env: { GEMINI_API_KEY: "AIza-dev-key", GOOGLE_CLOUD_PROJECT: "helmer-prod-123" },
+    fetcher: async () => {
+      fetchCalls++;
+      throw new Error("Decisions API must not be called on 0ms fast-path");
+    },
+    getVertexClientFn: () => ({
+      models: {
+        generateContent: async () => {
+          vertexCalls++;
+          throw new Error("Vertex must not be called on 0ms fast-path");
+        },
+      },
+    }),
+  });
+
+  const searchPrompts = [
+    "https://openai.com/api/pricing",
+    "vebdə bax Bakıda yeni kafelar",
+    "mənbə göstər",
+    "search online for latest inflation",
+    "2026 vergi dəyişiklikləri",
+    "Bugün Bakıda hava necədir?",
+    "Hazırkı dollar məzənnəsi",
+    "Son xəbərlər",
+    "Bitcoin qiyməti nə qədərdir?",
+    "Qarabağ FK oyun nəticəsi",
+    "GPT-5 xüsusiyyətləri",
+    "OpenAI API qiyməti",
+    "Claude vs Gemini müqayisəsi",
+    "DeepSeek benchmark nəticələri",
+    "Anthropic yeni model versiyası",
+    "Llama 4 relizi",
+    "Mistral və Grok qiyməti",
+  ];
+
+  for (const prompt of searchPrompts) {
+    const res = await router.routeAsk({ prompt });
+    assert.equal(res.enableSearch, true, `Expected enableSearch=true for: ${prompt}`);
+    assert.equal(res.routerSource, "fast_path", `Expected routerSource=fast_path for: ${prompt}`);
+    assert.equal(res.decisionPath, "fast_path_search", `Expected fast_path_search for: ${prompt}`);
+    assert.equal(res.latencyMs, 0, `Expected 0ms latency for: ${prompt}`);
+  }
+
+  const directPrompts = [
+    "Python-da binary search alqoritmini yaz",
+    "Bu JavaScript kodundakı TypeError xətasını düzəlt",
+    "Bu mətni ingiliscəyə tərcümə et: Salam dünya",
+    "Bu mətni redaktə et və qısalt",
+    "245 * 18 + 320 hesabla",
+    "x^2 - 5x + 6 = 0 tənliyini həll et",
+    "Kofe mağazası üçün 5 brend adı ideyası ver",
+    "REST API necə işləyir? Sadə dildə izah et",
+    "Sən GPT-sən?",
+  ];
+
+  for (const prompt of directPrompts) {
+    const res = await router.routeAsk({ prompt });
+    assert.equal(res.enableSearch, false, `Expected enableSearch=false for: ${prompt}`);
+    assert.equal(res.requireGrounding, false, `Expected requireGrounding=false for: ${prompt}`);
+    assert.equal(res.routerSource, "fast_path", `Expected routerSource=fast_path for: ${prompt}`);
+    assert.equal(res.decisionPath, "fast_path_direct", `Expected fast_path_direct for: ${prompt}`);
+    assert.equal(res.latencyMs, 0, `Expected 0ms latency for: ${prompt}`);
+  }
+
+  assert.equal(fetchCalls, 0);
+  assert.equal(vertexCalls, 0);
+});
+
+test("Grey-zone Ask queries reach gemini-decision-1 with <=6 turns and <16K token context, 950ms timeout & 400/429/5xx fall back in 0ms without Vertex", async () => {
+  assert.equal(DECISION_TIMEOUTS_MS.ASK_DECISIONS_API, 950);
+  assert.equal(DECISION_TIMEOUTS_MS.SHORT_TEXT, 950);
+  assert.equal(classifyAskFastPath({ lastUserMsg: "Fransanın prezidenti kimdir?" }), null);
+  assert.equal(classifyAskFastPath({ lastUserMsg: "Müəmmalı bazar sualı" }), null);
+
+  // 1. Grey-zone hits Decisions API with <=6 turns and <16K token context
+  let capturedInput = "";
+  let vertexCalls = 0;
+  const greyHistory = Array.from({ length: 16 }, (_, idx) => ({
+    role: idx % 2 === 0 ? "user" : "assistant",
+    content: `History turn ${idx}: ${"x".repeat(900)}`,
+  }));
+  const apiRouter = createHelmerDecisionRouter({
+    env: { GEMINI_API_KEY: "AIza-dev-key", GOOGLE_CLOUD_PROJECT: "helmer-prod-123" },
+    fetcher: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      capturedInput = body.input;
+      return new Response(
+        JSON.stringify({
+          answers: {
+            needs_web_search: { type: "noul", noul: 0.91, confidence: 0.91 },
+            require_grounding: { type: "noul", noul: 0.1, confidence: 0.9 },
+          },
+        }),
+        { status: 200 },
+      );
+    },
+    getVertexClientFn: () => ({
+      models: {
+        generateContent: async () => {
+          vertexCalls++;
+          throw new Error("Vertex must not be called");
+        },
+      },
+    }),
+  });
+
+  const greyRes = await apiRouter.routeAsk({
+    prompt: "Fransanın prezidenti kimdir?",
+    messages: [...greyHistory, { role: "user", content: "Fransanın prezidenti kimdir?" }],
+  });
+  assert.equal(greyRes.routerSource, "decisions_api");
+  assert.equal(greyRes.decisionPath, "decisions_api");
+  assert.equal(greyRes.enableSearch, true);
+  assert.ok(!capturedInput.includes("History turn 0:"));
+  assert.ok(capturedInput.includes("History turn 11:"));
+  assert.ok(Math.ceil(capturedInput.length / 4) < 16000);
+
+  // 2. Hanging Decisions API aborts at 950ms and falls back locally without Vertex
+  const slowRouter = createHelmerDecisionRouter({
+    env: { GEMINI_API_KEY: "AIza-dev-key", GOOGLE_CLOUD_PROJECT: "helmer-prod-123" },
+    fetcher: (_url, init) =>
+      new Promise((_, reject) => {
+        const keepAlive = setTimeout(() => {
+          reject(new Error("Mock test safety timeout"));
+        }, 5000);
+        init.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(keepAlive);
+            reject(init.signal.reason || Object.assign(new Error("Aborted"), { name: "TimeoutError" }));
+          },
+          { once: true },
+        );
+      }),
+    getVertexClientFn: () => ({
+      models: {
+        generateContent: async () => {
+          vertexCalls++;
+          throw new Error("Vertex must not be called on Ask timeout");
+        },
+      },
+    }),
+  });
+  const startedAt = Date.now();
+  const timeoutRes = await slowRouter.routeAsk({ prompt: "Fransanın prezidenti kimdir?" });
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs >= 850 && elapsedMs < 1400, `Expected ~950ms Ask timeout, got ${elapsedMs}ms`);
+  assert.equal(timeoutRes.routerSource, "local_rules");
+  assert.equal(timeoutRes.decisionPath, "heuristic_fallback");
+  assert.equal(timeoutRes.fallbackReason, "decision_timeout");
+
+  // 3. Non-safety HTTP 400, 429, 5xx fall back in 0ms without Vertex, while safety 400 still blocks
+  for (const status of [400, 429, 502]) {
+    const errRouter = createHelmerDecisionRouter({
+      env: { GEMINI_API_KEY: "AIza-dev-key", GOOGLE_CLOUD_PROJECT: "helmer-prod-123" },
+      fetcher: async () => new Response(JSON.stringify({ error: { message: `HTTP ${status}` } }), { status }),
+      getVertexClientFn: () => ({
+        models: {
+          generateContent: async () => {
+            vertexCalls++;
+            throw new Error("Vertex must not be called");
+          },
+        },
+      }),
+    });
+    const fb = await errRouter.routeAsk({ prompt: "Fransanın prezidenti kimdir?" });
+    assert.equal(fb.routerSource, "local_rules");
+    assert.equal(fb.decisionPath, "heuristic_fallback");
+    assert.equal(fb.fallbackReason, `decision_http_${status}`);
+  }
+
+  assert.equal(vertexCalls, 0);
 });

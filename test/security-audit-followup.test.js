@@ -16,7 +16,7 @@ import { FilePlannerRepository } from '../src/repositories/file-planner-reposito
 import { FileStrategyRepository } from '../src/repositories/file-strategy-repository.js';
 import { createPluginRegistry } from '../src/services/plugins/registry.js';
 import { exportStrategyToPDF } from '../public/exporters.js';
-import { callDecisionsApi } from '../src/services/ai/client.js';
+import { callDecisionsApi } from "./helpers/legacy-google-inference.js";
 import { DistributedResearchService } from '../src/services/ai/distributed-research.js';
 import { clearOwnerProvenance, MAX_GROUNDED_CHAT_RETENTION_MS } from '../src/services/ai/grounded-chat-retention.js';
 import { executeTargetedSearch } from '../src/services/ai/research-service.js';

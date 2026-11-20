@@ -18,12 +18,13 @@ import { createBuildOrchestrator } from '../src/services/ai/build-orchestrator.j
 import { FileStrategyRepository } from '../src/repositories/file-strategy-repository.js';
 import { LearningLoopService } from '../src/services/learning/learning-loop-service.js';
 import { FileAiLearningRepository } from '../src/repositories/file-ai-learning-repository.js';
-import { createStrategyRouter, strategyErrorHandler } from '../src/http/strategy-router.js';
+import { strategyErrorHandler } from '../src/http/strategy-router.js';
 import { resolveBuildOutputReservation } from '../src/services/ai/build-config.js';
 import { StrategySchema } from '../src/domain/strategy.js';
 import { strategyFixture } from './helpers/build-fixtures.js';
-import { installBuildRoutingFixture } from './helpers/build-routing-fixture.js';
-import { getBuildVertexClient, getGeminiClient } from '../src/services/ai/client.js';
+import { createFixtureStrategyRouter as createStrategyRouter, installBuildRoutingFixture } from './helpers/build-routing-fixture.js';
+import { getBuildVertexClient } from "./helpers/legacy-google-inference.js";
+import { getGeminiClient } from "../src/services/ai/research-google-client.js";
 
 installBuildRoutingFixture();
 
@@ -452,7 +453,12 @@ test('HTTP idempotency & conflicts: header vs body key mismatch, /estimate & /as
   assert.equal(refineModelCalls, callsBefore + 1, 'Refine retry must not invoke provider a second time');
 });
 
-test('Shared activeRefinements on /refine and /:id/refine keep work alive when first subscriber disconnects, and abort when last subscriber disconnects', async t => {
+test('Shared activeRefinements on /refine and /:id/refine keep work alive when first subscriber disconnects, and abort when last subscriber disconnects', { timeout: 15000 }, async t => {
+  const waitFor = async (condition, message) => {
+    const deadline = Date.now() + 3000;
+    while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.ok(condition(), message);
+  };
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'helmer-sec4-refshare-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
@@ -474,6 +480,8 @@ test('Shared activeRefinements on /refine and /:id/refine keep work alive when f
 
   const userObj = { id: ownerId, status: 'active', emailVerifiedAt: new Date().toISOString(), authVersion: 1, settings: { modelImprovement: false } };
   let routerEnteredCount = 0;
+  const enteredRequests = [];
+  const subscriberAttached = index => enteredRequests[index]?.listeners('close').some(listener => listener.name === 'onReqClose');
   let lastTransferReleaseCount = 0;
   const makeServer = async () => {
     const app = express();
@@ -483,6 +491,7 @@ test('Shared activeRefinements on /refine and /:id/refine keep work alive when f
     app.use(aiPolicy.middleware());
     app.use((req, _res, next) => {
       routerEnteredCount++;
+      enteredRequests.push(req);
       if (req.securityContext?.transferToBackground) {
         const origTransfer = req.securityContext.transferToBackground.bind(req.securityContext);
         req.securityContext.transferToBackground = () => {
@@ -552,7 +561,7 @@ test('Shared activeRefinements on /refine and /:id/refine keep work alive when f
       signal: sub1Ctrl.signal,
     }).catch(e => e);
 
-    while (!releaseProvider) await new Promise(r => setTimeout(r, 10));
+    await waitFor(() => releaseProvider, `${mode}: initial refinement reached provider`);
 
     const enteredBefore = routerEnteredCount;
     const sub2Ctrl = new AbortController();
@@ -563,8 +572,7 @@ test('Shared activeRefinements on /refine and /:id/refine keep work alive when f
       signal: sub2Ctrl.signal,
     });
 
-    while (routerEnteredCount < enteredBefore + 1) await new Promise(r => setTimeout(r, 5));
-    await new Promise(r => setTimeout(r, 25));
+    await waitFor(() => subscriberAttached(enteredBefore), `${mode}: second subscriber attached`);
     // Disconnect subscriber 1 -> provider signal MUST NOT abort while subscriber 2 is active
     const releasesBeforeDisconnect = lastTransferReleaseCount;
     sub1Ctrl.abort();
@@ -579,8 +587,7 @@ test('Shared activeRefinements on /refine and /:id/refine keep work alive when f
     assert.equal(res2.status, 200);
     const json2 = await res2.json();
     assert.ok(json2.strategy);
-    await new Promise(r => setTimeout(r, 25));
-    assert.ok(lastTransferReleaseCount > releasesBeforeDisconnect, `${mode}: lease must release after shared completion`);
+    await waitFor(() => lastTransferReleaseCount > releasesBeforeDisconnect, `${mode}: lease released after shared completion`);
 
     // Part 2: both subscribers join and BOTH disconnect -> last disconnect aborts provider & cleans lease without saving partial version
     releaseProvider = null;
@@ -609,7 +616,7 @@ test('Shared activeRefinements on /refine and /:id/refine keep work alive when f
       signal: cA.signal,
     }).catch(e => e);
 
-    while (!releaseProvider) await new Promise(r => setTimeout(r, 10));
+    await waitFor(() => releaseProvider, `${mode}: second refinement reached provider`);
 
     const enteredPart2 = routerEnteredCount;
     const cB = new AbortController();
@@ -620,8 +627,7 @@ test('Shared activeRefinements on /refine and /:id/refine keep work alive when f
       signal: cB.signal,
     }).catch(e => e);
 
-    while (routerEnteredCount < enteredPart2 + 1) await new Promise(r => setTimeout(r, 5));
-    await new Promise(r => setTimeout(r, 25));
+    await waitFor(() => subscriberAttached(enteredPart2), `${mode}: final subscriber attached`);
     cA.abort();
     await pA;
     await new Promise(r => setTimeout(r, 20));
@@ -630,7 +636,7 @@ test('Shared activeRefinements on /refine and /:id/refine keep work alive when f
 
     cB.abort();
     await pB;
-    await new Promise(r => setTimeout(r, 35));
+    await waitFor(() => observedSignal.aborted && lastTransferReleaseCount > releasesBeforePart2, `${mode}: final disconnect aborted the provider and released the lease`);
     assert.equal(observedSignal.aborted, true, `${mode}: disconnecting LAST subscriber must abort provider`);
     assert.ok(lastTransferReleaseCount > releasesBeforePart2, `${mode}: lease cleanup must run when last subscriber disconnects`);
     assert.equal((await repo.getById(saved.id, ownerId)).versions.length, versionsBefore, 'No partial version may be saved after abort');

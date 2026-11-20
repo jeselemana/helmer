@@ -61,7 +61,7 @@ const researchSourceHistory = z.object({
   isHighSignal: z.boolean().optional(), score: z.number().finite().optional(),
 }).strict();
 
-// Existing Ask UI fields are accepted explicitly. Persisted artifact and source provenance always comes from the server.
+// Existing Ask UI fields are accepted explicitly (including 1-message delta payloads when chatId is set). Persisted artifact and source provenance always comes from the server.
 export const askRequestSchema = z.object({
   messages: z.array(z.object({
     role: z.enum(["user", "assistant", "model"]), content: z.string().max(40000), file: upload.optional(),
@@ -81,6 +81,7 @@ export const askRequestSchema = z.object({
   strategyId: uuid.optional(), briefId: uuid.optional(), taskId: uuid.optional(), chatId: uuid.optional(),
   pluginIds: z.array(z.string().regex(/^[a-z][a-z0-9-]{0,40}$/)).max(6).optional(),
   chatRevision: z.number().int().positive().optional(),
+  regenerateFromIndex: z.number().int().min(1).max(200).optional(),
   artifactId: uuid.optional(), stream: z.boolean().optional(),
 }).strict().refine(
   (data) => {

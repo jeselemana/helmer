@@ -170,9 +170,9 @@ export function alignNextStepsLogic(nextSteps = [], language = "az") {
   });
 }
 
-export async function estimateBuildPreparation({ brief, buildMode = "auto", fasterThinkingLevel = "medium", buildDecision = null, ownerId, signal }) {
+export async function estimateBuildPreparation({ brief, buildMode = "auto", fasterThinkingLevel = "medium", buildDecision = null, ownerId, signal, orchestrate = runBuildOrchestration }) {
   const routingInput = buildRoutingInput({ brief, buildMode, fasterThinkingLevel });
-  return runBuildOrchestration({
+  return orchestrate({
     schema: StrategyAssessmentSchema, assessment: true, estimateOnly: true,
     name: "build_estimate", instructions: "", input: routingInput, routingInput, ownerId, signal,
     buildMode, fasterThinkingLevel, buildDecision,
@@ -193,6 +193,7 @@ export async function assessBrief({
   onChunk,
   onUsage,
   onEstimate,
+  orchestrate = runBuildOrchestration,
 }) {
   const isEn = language === "en";
   const sufficiency = evaluateBriefSufficiency(brief, { round, answers });
@@ -226,7 +227,7 @@ export async function assessBrief({
 
   const instructions = buildAssessorPrompt({ brief, answers });
 
-  const data = await runBuildOrchestration({
+  const data = await orchestrate({
     schema: StrategyAssessmentSchema, name: "strategy_assessment",
     instructions, input, personalizationContext, ownerId, signal, onChunk, onUsage,
     routingInput: buildRoutingInput({ brief, answers, buildMode, fasterThinkingLevel }), onEstimate,
@@ -318,6 +319,7 @@ export async function generateStrategy({
   personalizationContext = "",
   onChunk,
   onUsage,
+  orchestrate = runBuildOrchestration,
 }) {
   const isEn = language === "en";
   const normalizedMode = buildMode === "faster" ? "faster" : "auto";
@@ -328,9 +330,10 @@ export async function generateStrategy({
 
   const input = JSON.stringify({ brief, answers, assumptions, languageDirective });
   const instructions = buildStrategyPrompt({ brief, answers, buildMode: normalizedMode });
-  const rawStrategyData = await runBuildOrchestration({
+  const rawStrategyData = await orchestrate({
     schema: StrategySchema, name: "helmer_strategy", instructions, input,
     personalizationContext, ownerId, signal, onChunk, onUsage,
+    searchIntentInput: brief,
     routingInput: buildRoutingInput({ brief, answers, assumptions, buildMode: normalizedMode, fasterThinkingLevel: normalizedFasterThinking }),
     onEstimate: preparationEstimate => onChunk?.({ preparationEstimate }),
     buildMode: normalizedMode,
@@ -346,7 +349,7 @@ export async function generateStrategy({
   return strategyData;
 }
 
-export async function refineStrategy(payload, ownerId, signal, personalizationContext = "", onChunk, onUsage) {
+export async function refineStrategy(payload, ownerId, signal, personalizationContext = "", onChunk, onUsage, orchestrate = runBuildOrchestration) {
   if (isGroundedStrategyRecord(payload.strategy)) {
     throw Object.assign(new Error("Grounded strategy is restricted"), { code: "GROUNDED_STRATEGY_RESTRICTED", status: 422 });
   }
@@ -365,7 +368,7 @@ export async function refineStrategy(payload, ownerId, signal, personalizationCo
     strategy: payload.strategy,
     buildMode: effectiveBuildMode,
   });
-  const rawStrategyData = await runBuildOrchestration({
+  const rawStrategyData = await orchestrate({
     schema: StrategySchema, name: "helmer_refined_strategy", instructions, refinement: true,
     input: `${buildRefinementInput(payload)}\n${languageDirective}`,
     searchIntentInput: `${payload.action} ${payload.request || ""}`,

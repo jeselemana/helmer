@@ -1,3 +1,4 @@
+import { researchUnavailable } from './research-availability.js';
 import { assertPlatformEnabled } from '../security/provider-policy.js';
 import { ResearchService } from './research-service.js';
 import { PrivacyPolicy, executionContext } from '../security/privacy-policy.js';
@@ -123,6 +124,7 @@ export class DistributedResearchService extends ResearchService {
   }
 
   async createResearchJob(args) {
+    if (!this.enabled) throw researchUnavailable();
     if (this.stopping || this.pendingOwners.has(args.ownerId) || this.hasActiveJobForOwner(args.ownerId)) throw Object.assign(new Error('Execution busy'), { code: 'EXECUTION_BUSY', status: 429 });
     this.pendingOwners.add(args.ownerId);
     const controller = new AbortController();
@@ -296,7 +298,7 @@ export class DistributedResearchService extends ResearchService {
       for (const entry of page.records) {
         if (this.stopping) break;
         const saved = entry.value;
-        if (!saved || !isWithinGroundedRetention(saved.createdAt) ||
+        if (!saved || (!this.enabled && !saved.completionPending) || !isWithinGroundedRetention(saved.createdAt) ||
             (terminal(saved.status) && !saved.completionPending) || this.activeJobs.has(saved.id)) continue;
         if (this.redis?.isReady && await this.redis.get(`helmer:research:lease:${saved.id}`)) continue;
         if (this.pendingOwners.has(saved.ownerId) || this.hasActiveJobForOwner(saved.ownerId)) continue;

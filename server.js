@@ -4,7 +4,8 @@ import { sanitizeAskGroundingMetadata } from './src/services/ai/ask-grounding.js
 import { createAskHandler, createAskCancelHandler } from './src/http/ask-handler.js';
 import { createAskService } from './src/services/ai/ask-service.js';
 import { createAskRunManager } from './src/services/ai/ask-run-manager.js';
-import { DECISION_MODEL, createHelmerDecisionRouter } from './src/services/ai/decision-router.js';
+import { createLocalAiRouter } from './src/services/ai/local-ai-routing.js';
+import { deepResearchEnabled } from './src/services/ai/research-availability.js';
 import { readTenantObject } from "./src/http/r2-storage.js";
 import { z } from "zod";
 import { EmptyBodySchema } from "./src/domain/strategy.js";
@@ -48,6 +49,7 @@ import {
   validateSecurityConfig,
   ensureStartupRedisConnection,
   guestAskPerMinuteLimit,
+  guestAskDailyLimit,
   guestAskIpPerMinuteLimit,
   guestBuildPerMinuteLimit,
 } from "./src/services/security/config.js";
@@ -98,7 +100,18 @@ app.use((req, res, next) => {
     req.askTimings = { startedAt: Date.now() };
     res.once("finish", () => {
       const { startedAt, ...timings } = req.askTimings;
-      console.log("[Ask timing]", JSON.stringify({ ...timings, authenticated: Boolean(req.user), status: res.statusCode, totalMs: Date.now() - startedAt }));
+      console.log("[Ask timing]", JSON.stringify({
+        ...timings,
+        decisionWaitMs: timings.decisionWaitMs ?? null,
+        decisionPath: timings.decisionPath ?? null,
+        provider: timings.provider ?? null,
+        model: timings.model ?? null,
+        reasoningEffort: timings.reasoningEffort ?? null,
+        firstTextMs: timings.firstTextMs ?? null,
+        authenticated: Boolean(req.user),
+        status: res.statusCode,
+        totalMs: Date.now() - startedAt,
+      }));
     });
   }
   next();
@@ -201,15 +214,34 @@ app.get("/manifest.json", (req, res) => {
 });
 
 // 🩺 Health & Storage Diagnostics
-app.get("/api/health", (req, res) => {
+app.get("/api/features", (_req, res) => res.set("Cache-Control", "no-store").json({ deepResearch: deepResearchEnabled() }));
+
+let lastR2CheckAt = 0;
+let r2Ready = false;
+let r2ReadinessCheck = null;
+async function refreshR2Readiness() {
+  if (!r2ReadinessCheck) {
+    r2ReadinessCheck = testR2Connection()
+      .then(({ accessible, pingSuccess }) => { r2Ready = Boolean(accessible && pingSuccess); })
+      .catch(() => { r2Ready = false; })
+      .finally(() => { lastR2CheckAt = Date.now(); r2ReadinessCheck = null; });
+  }
+  await r2ReadinessCheck;
+  return r2Ready;
+}
+
+app.get("/api/health", async (req, res) => {
   const redisRequired = Boolean(process.env.REDIS_URL || process.env.REQUIRE_REDIS === "true");
-  if (process.env.NODE_ENV === "production" && redisRequired && !redis?.isReady) res.status(503);
+  if (isProduction && lastR2CheckAt <= Date.now() - 30000) await refreshR2Readiness();
+  const ready = !isProduction || ((!redisRequired || redis?.isReady) && r2Ready);
+  if (!ready) res.status(503);
   const decisionDiag = sharedDecisionRouter.getSyncStatus();
   return res.json({
-    status: process.env.NODE_ENV !== "production" || !redisRequired || redis?.isReady ? "ok" : "unavailable",
+    status: ready ? "ok" : "unavailable",
     app: "Helmer",
     storage: {
       r2Configured: isR2Configured(),
+      r2Ready,
       redisReady: Boolean(redis?.isReady),
     },
     decisionRouter: {
@@ -274,7 +306,7 @@ const TELEMETRY_PATH = path.join(DATA_DIR, "telemetry.json");
 const strategyRepository = new FileStrategyRepository(STRATEGIES_PATH, redis);
 const chatRepository = new FileChatRepository(CHATS_PATH, redis);
 const askRunManager = createAskRunManager({ redis });
-const sharedDecisionRouter = createHelmerDecisionRouter({ redis });
+const sharedDecisionRouter = createLocalAiRouter();
 const durableStore = new DurableStore(path.join(DATA_DIR, 'security-v4'));
 const researchJobStore = new ResearchJobStore(path.join(DATA_DIR, 'research-jobs-v1'));
 const artifactRepository = new ArtifactRepository(path.join(DATA_DIR, "artifacts"), redis);
@@ -509,7 +541,7 @@ app.get('/api/security/config', (req, res) => {
   res.json({
     guest: !req.user,
     turnstileSiteKey: process.env.TURNSTILE_SITE_KEY || process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || null,
-    guestAiDailyLimit: null,
+    guestAiDailyLimit: guestAskDailyLimit(),
     guestBuildDailyLimit: null,
     guestAskPerMinuteLimit: guestAskPerMinuteLimit(),
     guestBuildPerMinuteLimit: guestBuildPerMinuteLimit(),
@@ -914,12 +946,19 @@ app.get("/api/ask/chats/:id", async (req, res) => {
     if (!/^[0-9a-f-]{36}$/i.test(id)) {
       return res.status(400).json({ error: "Söhbət ID-si düzgün deyil.", code: "VALIDATION_ERROR" });
     }
-    const [chat, activeRun] = await Promise.all([
-      chatRepository.getById(id, req.ownerId),
+    const [chat, activeRun, lastRunError] = await Promise.all([
+      chatRepository.getById(id, req.ownerId, { coalesce: false, force: true }),
       askRunManager.getActiveRunForChat(req.ownerId, id),
+      typeof askRunManager.getLastRunErrorForChat === "function"
+        ? askRunManager.getLastRunErrorForChat(req.ownerId, id)
+        : Promise.resolve(null),
     ]);
-    if (!chat && !activeRun) return res.status(404).json({ error: "Söhbət tapılmadı." });
-    return res.json({ chat: chat || null, activeRun: activeRun || null });
+    if (!chat && !activeRun && !lastRunError) return res.status(404).json({ error: "Söhbət tapılmadı." });
+    return res.json({
+      chat: chat || null,
+      activeRun: activeRun || null,
+      lastRunError: activeRun ? null : (lastRunError || null),
+    });
   } catch (error) {
     console.error("Ask chat get error:", { code: publicAskErrorCode(error) });
     return res.status(500).json({ error: "Söhbəti yükləmək mümkün olmadı." });
@@ -1043,11 +1082,12 @@ function foregroundAskRateLimit(req, res, next) {
 
 const generateAsk = createAskService({ sanitizeGroundingMetadata: sanitizeAskGroundingMetadata });
 
+
 const capabilityWorkflow = new CapabilityWorkflow({
   registry: pluginRegistry, artifacts: artifactRepository,
   research: createWebResearch({
-    geminiResearch: async ({ messages, instructions, signal, onChunk }) => {
-      const researchInstructions = `${ASK_INSTRUCTIONS}\nResearch the user's request with live Google Search. Cite sources; never fabricate unavailable statistics.`;
+    openaiResearch: async ({ messages, instructions, signal, onChunk }) => {
+      const researchInstructions = `${ASK_INSTRUCTIONS}\nResearch the user's request with live web search. Cite sources; never fabricate unavailable statistics.`;
       return generateAsk({ messages, instructions: researchInstructions, referenceContext: instructions,
         enableSearch: true, requireGrounding: true, onChunk, signal,
         ownerId: executionContext.getStore()?.ownerId,
@@ -1056,7 +1096,7 @@ const capabilityWorkflow = new CapabilityWorkflow({
   }),
 });
 const researchService = new ResearchService({
-  jobStore: researchJobStore, redis, userRepository, authStore,
+  jobStore: researchJobStore, redis, userRepository, authStore, enabled: deepResearchEnabled(),
   chatRepository,
   strategyRepository,
   plannerRepository,
@@ -1220,7 +1260,9 @@ const PORT = APP_PORT;
 
 async function startServer() {
   try {
+    if (isProduction && !await refreshR2Readiness()) throw new Error("Required R2 read/write probe failed");
     await syncAllStores();
+    if (isProduction && !await refreshR2Readiness()) throw new Error("Required R2 read/write probe failed");
   } catch (err) {
     if (isProduction) throw err;
     console.error("Initial storage initialization failed", { code: err.code });
@@ -1230,7 +1272,7 @@ async function startServer() {
     console.log(`✅ Helmer is live on port ${PORT}`);
     const decisionStatus = sharedDecisionRouter.getSyncStatus();
     console.info(
-      `[DecisionRouter] model=${DECISION_MODEL} status=${decisionStatus.mode} configured=${decisionStatus.configured} keySource=${decisionStatus.keySource}`
+      `[DecisionRouter] status=${decisionStatus.mode}`
     );
   });
 

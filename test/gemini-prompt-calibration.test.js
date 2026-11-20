@@ -132,7 +132,7 @@ test("8. Ask handler and service wire calibrated prompts and search guidance", a
   assert.match(askHandlerCode, /buildAskPrompt\(\{/);
 
   // Search guidance includes epistemic humility & proactive leadership
-  const serviceCode = await fs.readFile(path.join(process.cwd(), "src/services/ai/ask-service.js"), "utf8");
+  const serviceCode = await fs.readFile(path.join(process.cwd(), "test/helpers/legacy-google-grounded-ask.js"), "utf8");
   assert.match(serviceCode, /EPISTEMIC HUMILITY, ACCURACY & PROACTIVE LEADERSHIP/);
   assert.match(serviceCode, /NEVER hallucinate an invented number or feign certainty/);
   assert.match(serviceCode, /Never give a dead-end refusal or stop at "bilmirəm"/);

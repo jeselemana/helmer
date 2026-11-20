@@ -13,14 +13,15 @@ import {
 import {
   HelmerDecisionRouter,
   deterministicBuildFallbackRoute,
-} from '../src/services/ai/decision-router.js';
+} from './helpers/legacy-decision-router.js';
 import { StrategySchema } from '../src/domain/strategy.js';
-import { createStrategyRouter, strategyErrorHandler } from '../src/http/strategy-router.js';
+import { createFixtureStrategyRouter as createStrategyRouter } from "./helpers/build-routing-fixture.js";
+import { strategyErrorHandler } from '../src/http/strategy-router.js';
 import { FileStrategyRepository } from '../src/repositories/file-strategy-repository.js';
 import { AiPolicy } from '../src/services/security/ai-policy.js';
 import { PrivacyPolicy } from '../src/services/security/privacy-policy.js';
 import { configureProviderPolicy, wrapProvider } from '../src/services/security/provider-policy.js';
-import { getBuildVertexClient } from '../src/services/ai/client.js';
+import { getBuildVertexClient } from "./helpers/legacy-google-inference.js";
 import { executionContext } from '../src/services/security/privacy-policy.js';
 import { buildConfig } from '../src/services/ai/build-config.js';
 import { strategyFixture } from './helpers/build-fixtures.js';

@@ -10,7 +10,6 @@ set -euo pipefail
 
 PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${GOOGLE_CLOUD_REGION:-us-central1}"
-LOCATION="${GOOGLE_CLOUD_LOCATION:-us}"
 SERVICE_NAME="${SERVICE_NAME:-marketify-ai}"
 
 if [[ ! "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,61}[a-z0-9]$ ]]; then
@@ -26,23 +25,24 @@ if [[ ! "$SERVICE_ACCOUNT" =~ ^[a-zA-Z0-9._-]+@${PROJECT_ID}\.iam\.gserviceaccou
 fi
 gcloud iam service-accounts describe "$SERVICE_ACCOUNT" --project "$PROJECT_ID" >/dev/null
 
-echo "Cloud Run servisinə Vertex AI və əməliyyat limitləri tətbiq edilir (${SERVICE_NAME})..."
+echo "Cloud Run servisinə icra limitləri tətbiq edilir (${SERVICE_NAME})..."
 
-# Build always uses ADC; Vertex Express/API key authentication is prohibited for Build.
+# Production credentials are bound from Secret Manager.
 gcloud run services update "${SERVICE_NAME}" \
   --project "${PROJECT_ID}" \
   --region "${REGION}" \
   --service-account "${SERVICE_ACCOUNT}" \
-  --update-env-vars "^##^NODE_ENV=production##PORT=8080##GEMINI_USE_VERTEX=true##GOOGLE_CLOUD_LOCATION=${LOCATION}##GOOGLE_CLOUD_REGION=${REGION}##GOOGLE_CLOUD_PROJECT=${PROJECT_ID}##AI_PLATFORM_DAILY_USD=${AI_PLATFORM_DAILY_USD:-100}##AI_USER_DAILY_USD=${AI_USER_DAILY_USD:-5}##AI_MAX_GLOBAL_CONCURRENCY=${AI_MAX_GLOBAL_CONCURRENCY:-32}"
+  --update-env-vars "^##^NODE_ENV=production##PORT=8080##DEEP_RESEARCH_ENABLED=false##AI_PLATFORM_DAILY_USD=${AI_PLATFORM_DAILY_USD:-100}##AI_USER_DAILY_USD=${AI_USER_DAILY_USD:-5}##ASK_MAX_CONCURRENT=${ASK_MAX_CONCURRENT:-100}##AI_MAX_PROVIDER_SLOTS=${AI_MAX_PROVIDER_SLOTS:-32}"
 
 echo ""
 echo "=== DİQQƏT: Məcburi Production Secret və Bağlantıları əlavə etmək üçün: ==="
-echo "Aşağıdakı əmri öz açarlarınızla icra edin (Vertex AI istifadə edərkən GEMINI_API_KEY təyin etməyin):"
+echo "Hər regionda Secret Manager binding-lərini uyğun secret adları və versiyaları ilə təyin edin."
 echo ""
 cat << 'EOF'
 gcloud run services update helmer \
   --region us-central1 \
-  --update-env-vars "^##^SESSION_SECRET=YOUR_SESSION_SECRET##AUTH_SECRET=YOUR_AUTH_SECRET##REDIS_URL=YOUR_REDIS_URL##OPENAI_API_KEY=YOUR_OPENAI_KEY##GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID##R2_ENDPOINT=YOUR_R2_ENDPOINT##R2_ACCESS_KEY_ID=YOUR_R2_ACCESS_KEY##R2_SECRET_ACCESS_KEY=YOUR_R2_SECRET_KEY##R2_BUCKET_NAME=innovagrp##RESEND_API_KEY=YOUR_RESEND_KEY##EMAIL_FROM=Helmer <no-reply@helmeros.com>##APP_URL=https://helmeros.com"
+  --update-secrets "SESSION_SECRET=helmer-session-secret:1,AUTH_SECRET=helmer-auth-secret:1,REDIS_URL=helmer-redis-url:1,OPENAI_API_KEY=helmer-openai-key:1,R2_ACCESS_KEY_ID=helmer-r2-access-key-id:1,R2_SECRET_ACCESS_KEY=helmer-r2-secret-access-key:1,RESEND_API_KEY=helmer-resend-key:1" \
+  --update-env-vars "^##^R2_ENDPOINT=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com##R2_BUCKET_NAME=YOUR_BUCKET##GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID##EMAIL_FROM=Helmer <no-reply@helmeros.com>##APP_URL=https://helmeros.com"
 EOF
 
 echo ""

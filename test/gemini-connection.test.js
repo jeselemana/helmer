@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { checkGeminiConnection } from '../scripts/check-gemini.js';
-import { resolveGeminiClientOptions } from '../src/services/ai/client.js';
+import { resolveGeminiClientOptions } from "../src/services/ai/research-google-client.js";
 
 test('Gemini health check uses supported generation, never Express-incompatible model metadata', async () => {
   const signal = new AbortController().signal;

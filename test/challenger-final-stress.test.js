@@ -1,4 +1,4 @@
-import { installBuildRoutingFixture } from "./helpers/build-routing-fixture.js";
+import { createFixtureStrategyRouter as createStrategyRouter, installBuildRoutingFixture } from "./helpers/build-routing-fixture.js";
 installBuildRoutingFixture();
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -8,9 +8,9 @@ import path from "node:path";
 import express from "express";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { createStrategyRouter, strategyErrorHandler } from "../src/http/strategy-router.js";
+import { strategyErrorHandler } from "../src/http/strategy-router.js";
 import { FileStrategyRepository } from "../src/repositories/file-strategy-repository.js";
-import { getGeminiClient } from "../src/services/ai/client.js";
+import { getGeminiClient } from "../src/services/ai/research-google-client.js";
 import { extractGroundingSources } from "../src/services/ai/strategy-service.js";
 
 // Ensure Gemini client exists for mocking

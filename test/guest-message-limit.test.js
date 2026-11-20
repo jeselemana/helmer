@@ -75,11 +75,11 @@ test('Guest Ask rate limit: guests can exceed legacy 5-message daily count and a
     return { nextCalled, statusCode, payload, headers, req };
   };
 
-  // 7 requests succeed in the first minute (> old 5/day limit)
+  // Admission applies per-minute limits independently of daily reservation in the Ask handler.
   for (let i = 1; i <= 7; i++) {
     const out = await sendRequest('guest_test_actor_1', `r1-${i}`);
     assert.equal(out.nextCalled, true);
-    assert.equal(out.req.remainingGuestMessages, null);
+    assert.equal(typeof out.req.securityContext.reserveGuestAsk, 'function');
     assert.equal(out.req.remainingGuestBriefs, null);
   }
 

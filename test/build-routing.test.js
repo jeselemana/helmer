@@ -445,7 +445,7 @@ test("StrategySchema validates orchestration metadata and defaults correctly", a
 test("Brief source card is conditional and renders safe links", async () => {
   const fs = (await import("node:fs/promises")).default;
   const script = await fs.readFile("public/script.js", "utf8");
-  assert.match(script, /if \(!sources\.length && !searchSuggestions\.length\) return null/);
+  assert.match(script, /if \(!sources\.length && !searchSuggestions\.length && strategy\?\.orchestration\?\.groundingUnavailable !== true\) return null/);
   assert.match(script, /link\.rel = "noopener noreferrer"/);
   assert.match(script, /if \(metaPanel\) container\.appendChild\(metaPanel\)/);
 });

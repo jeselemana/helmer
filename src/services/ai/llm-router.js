@@ -1,8 +1,11 @@
 import { assertExecutionActive } from '../security/execution-control.js';
 import { createHash } from "node:crypto";
-import { zodTextFormat, zodResponseFormat } from "openai/helpers/zod";
-import { getGeminiClient, getOpenAIClient } from "./client.js";
-import { aiConfig, hasGeminiConfiguration, hasOpenAIConfiguration } from "./config.js";
+import { responseInput } from "./openai-input.js";
+import { normalizeOpenAIAskError, responseText } from "./openai-client.js";
+import { zodTextFormat } from "openai/helpers/zod";
+import { z } from "zod";
+import { getOpenAIClient } from "./client.js";
+import { aiConfig, hasOpenAIConfiguration } from "./config.js";
 
 export class LLMProviderError extends Error {
   constructor(message, { code = "AI_PROVIDER_ERROR", status = 502, model, provider, details = null } = {}) {
@@ -293,9 +296,8 @@ export function normalizeStructuredOutput(parsed, name) {
   return parsed;
 }
 
-export function formatGeminiResponseSchema(schema, name) {
-  const jsonFormat = zodResponseFormat(schema, name);
-  const rawSchema = jsonFormat.json_schema?.schema || jsonFormat;
+export function formatGeminiResponseSchema(schema) {
+  const rawSchema = z.toJSONSchema(schema, { target: "draft-7", io: "input" });
   const definitions = rawSchema.definitions || {};
 
   function resolve(obj) {
@@ -365,192 +367,47 @@ export async function streamOpenAIContent({ model = aiConfig.strategyFallbackMod
   }
 }
 
-export async function routeStructuredGeneration({ schema, name, instructions, input, fallbackInput = null, maxOutputTokens, reasoning = "medium", ownerId, signal, onChunk, onUsage, askRoute = null, attachments = [] }) {
-  const primaryModel = askRoute ? aiConfig.askGeminiModel : aiConfig.strategyModel;
-  const fallbackModel = askRoute ? null : aiConfig.strategyFallbackModel;
-  if (attachments.length && !hasGeminiConfiguration()) {
-    throw new LLMProviderError("Binary attachment processing requires the configured Gemini multimodal route.", {
-      code: "AI_ATTACHMENT_UNAVAILABLE", status: 503, model: primaryModel, provider: "gemini",
-    });
-  }
-
-  if (askRoute && !hasGeminiConfiguration()) {
-    throw new LLMProviderError("Gemini xidməti konfiqurasiya edilməyib. Zəhmət olmasa .env faylında GEMINI_API_KEY əlavə edin.", {
-      code: "GEMINI_NOT_CONFIGURED",
-      status: 503,
-      model: primaryModel,
-      provider: "google",
-    });
-  }
-
-  // 1. Primary: Try Gemini via Vertex AI / Google GenAI
-  if (hasGeminiConfiguration() && (!askRoute || askRoute === "gemini-3.8-flash" || askRoute === "gemini-4-hydrogen")) {
-    try {
-      const gemini = getGeminiClient();
-      const geminiSchema = formatGeminiResponseSchema(schema, name);
-
-      const response = await gemini.models.generateContent(
-        {
-          model: primaryModel,
-          contents: attachments.length ? [{ role: "user", parts: [{ text: input }, ...attachments.map(file => ({ inlineData: { mimeType: file.mimeType || file.type, data: file.data } }))] }] : input,
-          config: {
-            systemInstruction: instructions || undefined,
-            responseMimeType: "application/json",
-            responseSchema: geminiSchema,
-            abortSignal: signal,
-            maxOutputTokens: maxOutputTokens || aiConfig.strategyMaxOutputTokens,
-            thinkingConfig: {
-              thinkingLevel: aiConfig.strategyThinkingLevel || "HIGH",
-            },
-          },
-        },
-        signal ? { signal } : undefined,
-      );
-
-      const rawText = response.text?.trim() || "";
-      if (!rawText) {
-        throw new LLMProviderError("Gemini 3.8 Flash boş cavab qaytardı.", {
-          code: "AI_INVALID_OUTPUT",
-          status: 502,
-          model: primaryModel,
-          provider: "google",
-          details: response,
-        });
-      }
-
-      let parsedJson;
-      try {
-        parsedJson = extractJsonFromText(rawText);
-      } catch (parseError) {
-        throw new LLMProviderError("Gemini 3.8 Flash JSON formatı etibarsızdır.", {
-          code: "AI_INVALID_OUTPUT",
-          status: 502,
-          model: primaryModel,
-          provider: "google",
-          details: parseError,
-        });
-      }
-
-      const data = schema.parse(normalizeStructuredOutput(parsedJson, name));
-      const finalRawText = JSON.stringify(data);
-
-      let usage = null;
-      if (response.usageMetadata) {
-        const promptTokens = response.usageMetadata.promptTokenCount || 0;
-        const candidateTokens = response.usageMetadata.candidatesTokenCount || 0;
-        const thoughtsTokens = response.usageMetadata.thoughtsTokenCount || 0;
-        const completionTokens = candidateTokens + thoughtsTokens;
-        usage = {
-          prompt_tokens: promptTokens || null,
-          completion_tokens: completionTokens || null,
-          thoughts_tokens: thoughtsTokens || 0,
-          total_tokens: response.usageMetadata.totalTokenCount || (promptTokens + completionTokens) || null,
-        };
-      }
-
-      onChunk?.({ chunk: finalRawText, finishReason: "STOP", model: primaryModel });
-      onUsage?.({ usage, model: primaryModel, provider: "google" });
-
-      return {
-        data,
-        model: primaryModel,
-        provider: "google",
-        usage,
-        finishReason: "STOP",
-        rawText: finalRawText,
-      };
-    } catch (geminiError) {
-      assertExecutionActive(geminiError, signal);
-      if (askRoute) {
-        // Ask mode must never fall back to GPT models.
-        throw geminiError;
-      }
-      console.warn(`[Build Route] ${primaryModel} xətası baş verdi, fallback modelinə (${fallbackModel}) yönləndirilir:`, geminiError.message || geminiError);
-      if (attachments.length) throw geminiError;
-    }
-  }
-
-  // 2. Fallback for Build: GPT-6.1 Sol (medium reasoning) via the Responses API.
-  if (askRoute) {
-    throw new LLMProviderError("Ask rejimində GPT fallback icazə verilmir.", {
-      code: "AI_PROVIDER_ERROR",
-      status: 503,
-      model: primaryModel,
-      provider: "google",
-    });
-  }
-  if (attachments.length) throw new LLMProviderError("Binary attachment processing requires the configured Gemini multimodal route.", {
-    code: "AI_ATTACHMENT_UNAVAILABLE", status: 503, model: primaryModel, provider: "gemini",
-  });
+export async function routeStructuredGeneration({ schema, name, instructions, input, fallbackInput = null,
+  maxOutputTokens, reasoning = "medium", ownerId, signal, onChunk, onUsage, askRoute = null, attachments = [] }) {
+  const model = askRoute ? aiConfig.askModel : "gpt-6.2-sol";
   if (!hasOpenAIConfiguration()) {
-    throw new LLMProviderError("OpenAI xidməti hələ konfiqurasiya edilməyib. OPENAI_API_KEY əlavə et və yenidən yoxla.", {
-      code: "AI_NOT_CONFIGURED",
-      status: 503,
-      model: fallbackModel,
-      provider: "openai",
-    });
+    throw new LLMProviderError("OpenAI xidməti əlçatmazdır.", { code: "AI_NOT_CONFIGURED", status: 503, model, provider: "openai" });
   }
-
   try {
-    const response = await getOpenAIClient().responses.parse(
-      {
-        model: fallbackModel,
-        instructions,
-        input: fallbackInput || input,
-        text: { format: zodTextFormat(schema, name) },
-        reasoning: { effort: reasoning || "medium" },
-        max_output_tokens: maxOutputTokens || aiConfig.strategyMaxOutputTokens,
-        safety_identifier: privacySafeIdentifier(ownerId),
-      },
-      signal ? { signal } : undefined,
-    );
-
-    if (!response.output_parsed) {
-      throw new LLMProviderError("OpenAI cavabı doğrulana bilmədi.", {
-        code: "AI_INVALID_OUTPUT",
-        status: 502,
-        model: fallbackModel,
-        provider: "openai",
-        details: response,
+    assertExecutionActive(undefined, signal);
+    const response = await getOpenAIClient().responses.create({
+      model, instructions, store: false,
+      input: responseInput([{
+        role: "user", parts: [{ text: fallbackInput || input }, ...attachments.map(file => ({
+          inlineData: {
+            mimeType: file.mimeType || file.type,
+            data: String(file.data).replace(/^data:[^;]+;base64,/, ""),
+          },
+        }))],
+      }], signal),
+      text: { format: zodTextFormat(schema, name) },
+      reasoning: { effort: reasoning },
+      max_output_tokens: maxOutputTokens || aiConfig.strategyMaxOutputTokens,
+      safety_identifier: privacySafeIdentifier(ownerId),
+    }, { signal });
+    const output = responseText(response);
+    if (response.status !== "completed" || !output) {
+      throw new LLMProviderError("Model cavabı doğrulana bilmədi.", {
+        code: "AI_INVALID_OUTPUT", status: 502, model, provider: "openai",
       });
     }
-
-    const data = schema.parse(normalizeStructuredOutput(response.output_parsed, name));
+    const data = schema.parse(normalizeStructuredOutput(JSON.parse(output), name));
     const rawText = JSON.stringify(data);
-    onChunk?.({ chunk: rawText, finishReason: "STOP", model: fallbackModel });
-    onUsage?.({ usage: response.usage || null, model: fallbackModel, provider: "openai" });
-
-    return {
-      data,
-      model: fallbackModel,
-      provider: "openai",
-      usage: response.usage || null,
-      finishReason: "STOP",
-      rawText,
-    };
+    await onChunk?.({ chunk: rawText, finishReason: "STOP", model });
+    onUsage?.({ usage: response.usage || null, model, provider: "openai" });
+    return { data, model, provider: "openai", usage: response.usage || null, finishReason: "STOP", rawText };
   } catch (error) {
-    if (error instanceof LLMProviderError) throw error;
     assertExecutionActive(error, signal);
-
-    if (error.name === "ZodError") throw new LLMProviderError("Model output did not match the artifact schema.", { code: "AI_INVALID_OUTPUT", status: 502, model: fallbackModel, provider: "openai", details: error.issues });
-
-    const httpStatus = error.status || 500;
-    if (httpStatus === 429 || error.code === "rate_limit_exceeded") {
-      throw new LLMProviderError("GPT-6.1 Sol xidmətində sorğu limiti aşılıb (429). Zəhmət olmasa bir az sonra yenidən cəhd edin.", {
-        code: "AI_RATE_LIMITED",
-        status: 429,
-        model: fallbackModel,
-        provider: "openai",
-        details: error,
-      });
+    if (error instanceof LLMProviderError) throw error;
+    if (error.name === "ZodError" || error instanceof SyntaxError) {
+      throw new LLMProviderError("Model output did not match the artifact schema.", { code: "AI_INVALID_OUTPUT", status: 502, model, provider: "openai" });
     }
-
-    throw new LLMProviderError(`OpenAI generasiya xətası: ${error.message}`, {
-      code: error.code || "AI_PROVIDER_ERROR",
-      status: httpStatus >= 500 ? 503 : httpStatus,
-      model: fallbackModel,
-      provider: "openai",
-      details: error,
-    });
+    const failure = normalizeOpenAIAskError(error, signal);
+    throw new LLMProviderError(failure.message, { code: failure.code, status: failure.status, model, provider: "openai" });
   }
 }

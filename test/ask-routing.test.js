@@ -6,13 +6,13 @@ import fs from "node:fs/promises";
 import { isComplexAskQuery, resolveAskModelRoute, resolveAskThinkingLevel } from "../src/services/ai/ask-routing.js";
 import { FileChatRepository } from "../src/repositories/file-chat-repository.js";
 
-test("all Ask queries route exclusively to Gemini 4 Hydrogen (GPT models eliminated from Ask)", () => {
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Instagram üçün 3 qısa başlıq yaz" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Hərtərəfli dərin analiz və SWOT matrisi qur" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Bunu necə tətbiq edim?", hasStrategyContext: true }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ requestedModel: "terra", lastUserMsg: "qısa sual" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ requestedModel: "luna", lastUserMsg: "dərin analiz" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ requestedModel: "auto", lastUserMsg: "sual" }), "gemini-4-hydrogen");
+test("Ask Default and legacy model identifiers route to Terra", () => {
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Instagram üçün 3 qısa başlıq yaz" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Hərtərəfli dərin analiz və SWOT matrisi qur" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Bunu necə tətbiq edim?", hasStrategyContext: true }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ requestedModel: "gpt-6.1-terra", lastUserMsg: "qısa sual" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ requestedModel: "luna", lastUserMsg: "dərin analiz" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ requestedModel: "auto", lastUserMsg: "sual" }), "gpt-6.1-terra");
 });
 
 test("isComplexAskQuery accurately identifies complex queries and strategy context", () => {
@@ -42,25 +42,25 @@ test("resolveAskThinkingLevel routes auto thinking levels (low, medium, high) an
   assert.equal(resolveAskThinkingLevel({ requestedThinkingLevel: "off" }), "off");
 });
 
-test("real-time search, pricing, and AI model queries in auto mode route to Gemini 4 Hydrogen", () => {
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Bakı bazarında hazırkı qiymətlər nə qədərdir?" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Rəqib analizi və 2026 trendləri" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "Gemini 4 Hydrogen haqqında nə bilirsən?" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ lastUserMsg: "GPT-6 Astra nə vaxt çıxacaq?" }), "gemini-4-hydrogen");
+test("real-time search, pricing, and AI model queries in auto mode route to GPT-6.1 Terra", () => {
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Bakı bazarında hazırkı qiymətlər nə qədərdir?" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Rəqib analizi və 2026 trendləri" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "Gemini 4 Hydrogen haqqında nə bilirsən?" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ lastUserMsg: "GPT-6 Astra nə vaxt çıxacaq?" }), "gpt-6.1-terra");
 });
 
-test("Gemini configuration exposes default Ask model gemini-4-hydrogen", async () => {
+test("OpenAI configuration exposes the default Ask model", async () => {
   const { aiConfig, hasGeminiConfiguration, hasOpenAIConfiguration } = await import("../src/services/ai/config.js");
-  assert.equal(aiConfig.askGeminiModel, "gemini-4-hydrogen");
+  assert.equal(aiConfig.askModel, "gpt-6.1-terra");
   assert.equal(typeof hasGeminiConfiguration(), "boolean");
   assert.equal(typeof hasOpenAIConfiguration(), "boolean");
 });
 
-test("Ask queries with file attachments route exclusively to Gemini 4 Hydrogen", () => {
-  assert.equal(resolveAskModelRoute({ hasAttachment: true, lastUserMsg: "Bu sənədi analiz et" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "terra", lastUserMsg: "swot analizi" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "luna", lastUserMsg: "qısa başlıq" }), "gemini-4-hydrogen");
-  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "auto", hasStrategyContext: true }), "gemini-4-hydrogen");
+test("Ask queries with file attachments always use the Default Responses model", () => {
+  assert.equal(resolveAskModelRoute({ hasAttachment: true, lastUserMsg: "Bu sənədi analiz et" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "gpt-6.1-terra", lastUserMsg: "swot analizi" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "luna", lastUserMsg: "qısa başlıq" }), "gpt-6.1-terra");
+  assert.equal(resolveAskModelRoute({ hasAttachment: true, requestedModel: "auto", hasStrategyContext: true }), "gpt-6.1-terra");
 });
 
 test("AbortController for Ask stream stays active after request body consumption and only aborts if response closes prematurely", async () => {
@@ -229,7 +229,11 @@ test("askRequestSchema strictly accepts follow-up messages containing assistant 
 
   const scriptContent = await fs.readFile(path.join(process.cwd(), "public/script.js"), "utf8");
   assert.ok(scriptContent.includes("sanitizeAskMessageForApi"), "script.js must define sanitizeAskMessageForApi");
-  assert.ok(scriptContent.includes("messages: state.askMessages.slice(0, -1).map(sanitizeAskMessageForApi)"), "script.js must map outgoing messages through sanitizeAskMessageForApi");
+  assert.ok(
+    scriptContent.includes("[sanitizeAskMessageForApi(lastOutgoingUserMsg)]") &&
+      scriptContent.includes("outgoingMessages.map(sanitizeAskMessageForApi)"),
+    "script.js must map outgoing delta and full-history messages through sanitizeAskMessageForApi"
+  );
 });
 
 test("personal-context caches tenant indexes, revalidates content and invalidates on mutation", async () => {

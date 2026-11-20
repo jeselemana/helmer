@@ -5,6 +5,17 @@ import { assertExecutionActive } from '../security/execution-control.js';
 import { executionContext } from '../security/privacy-policy.js';
 import { GenerationSchema, EvaluationSchema, fail } from './domain.js';
 
+const generationFields = GenerationSchema.shape;
+const ModelGenerationSchema = GenerationSchema.extend({
+  options: generationFields.options.unwrap().nullable(),
+  insider_insight: generationFields.insider_insight.unwrap().nullable(),
+  question: generationFields.question.unwrap().nullable(),
+  secondarySkills: generationFields.secondarySkills.removeDefault().unwrap().nullable(),
+  type: generationFields.type.removeDefault().unwrap().nullable(),
+  topicKey: generationFields.topicKey.unwrap().nullable(),
+  rubric: generationFields.rubric.unwrap().nullable(),
+});
+
 export function upLog(event, details = {}) {
   console.info(JSON.stringify({ module: 'up', event, ...details }));
 }
@@ -26,7 +37,7 @@ export class UpAI {
         max_output_tokens: aiConfig.upMaxOutputTokens,
         reasoning: { effort: 'low' },
         input: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(data) }],
-        text: { format: zodTextFormat(schema, `up_${kind}`) },
+        text: { format: zodTextFormat(schema === GenerationSchema ? ModelGenerationSchema : schema, `up_${kind}`) },
       }, { timeout: 45000, maxRetries: 0, ...(signal ? { signal } : {}) });
     } catch (error) {
       assertExecutionActive(error, signal);
@@ -46,6 +57,11 @@ export class UpAI {
     });
     try {
       const value = JSON.parse(response.output_text);
+      if (schema === GenerationSchema && value && typeof value === 'object' && !Array.isArray(value)) {
+        for (const [key, field] of Object.entries(generationFields)) {
+          if (field.isOptional() && value[key] === null) delete value[key];
+        }
+      }
       return schema.parse(value);
     } catch {
       upLog('malformed_output', { workload: kind, responseId: response.id });

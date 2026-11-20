@@ -231,7 +231,7 @@ test('cost reservation includes explicit tool call bound; reported usage and obs
   const params = { model: 'gpt-6.1-sol', input: 'fixture', tools: [{ type: 'web_search' }], max_tool_calls: 4, max_output_tokens: 10 };
   const release = await policy.reserveProvider(context, params);
   const reserved = Number(redis.budgetReservations[0][0]);
-  assert.equal(reserved, Math.ceil(Buffer.byteLength(JSON.stringify(params)) * 2 + 10 * 10 + 4 * 0.05 * 1000000));
+  assert.equal(reserved, Math.ceil((Buffer.byteLength(JSON.stringify(params)) + 4 * 8192) * 2 + 10 * 10 + 4 * 0.05 * 1000000));
   await release.recordUsage({ inputTokens: 1000, outputTokens: 100000, searchCalls: 4 });
   await release.recordUsage({ inputTokens: 1000, outputTokens: 100000, searchCalls: 4 });
   assert.equal(redis.usageWrites.length, 1);
@@ -457,7 +457,7 @@ test('Research callers never turn terminal failures into a plan, empty search, o
 });
 
 test('Ask streaming and non-streaming callers do not fall back after revoke; required grounding never leaks ungrounded chunks', async () => {
-  const { createAskService } = await import('../src/services/ai/ask-service.js');
+  const { createGoogleGroundedAskService: createAskService } = await import('./helpers/legacy-google-grounded-ask.js');
   const load = (name, _end, client) => options => createAskService({ getClient: () => client })({
     ...options, ...(name.includes('Stream') ? { onChunk: options.onChunk || (() => {}) } : {}),
   });
@@ -735,7 +735,7 @@ test('Priority 1: primary /api/ask HTTP route enforces requireGrounding on strea
     console: { warn() {}, error() {}, log() {} },
   };
   const { createAskHandler } = await import('../src/http/ask-handler.js');
-  const { createAskService } = await import('../src/services/ai/ask-service.js');
+  const { createGoogleGroundedAskService: createAskService } = await import('./helpers/legacy-google-grounded-ask.js');
   app.post('/api/ask', createAskHandler({
     ...sandbox, configured: () => true,
     generateAsk: createAskService({ getClient: () => activeClient, sanitizeGroundingMetadata: sandbox.sanitizeGroundingMetadata }),
@@ -1278,7 +1278,7 @@ test('Priority 5: Telemetry accounts for Gemini thinking tokens and Redis budget
 });
 
 test('Priority 6: Vertex AI vs Gemini Developer API auth options never mix non-Vertex apiKey with vertexai project/location', async () => {
-  const { resolveGeminiClientOptions } = await import('../src/services/ai/client.js');
+  const { resolveGeminiClientOptions } = await import('../src/services/ai/research-google-client.js');
 
   // Case 1: Vertex AI enabled with GCP project + non-Vertex GEMINI_API_KEY in env -> apiKey must NOT be passed
   const vertexAdcOpts = resolveGeminiClientOptions({

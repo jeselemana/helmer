@@ -6,7 +6,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import express from "express";
 import { createAskHandler } from "../src/http/ask-handler.js";
-import { createAskService } from "../src/services/ai/ask-service.js";
+import { createGoogleGroundedAskService as createAskService } from "./helpers/legacy-google-grounded-ask.js";
 import { sanitizeAskGroundingMetadata } from "../src/services/ai/ask-grounding.js";
 import { createAskExecutionGuard } from "../src/http/ask-execution-guard.js";
 import { createCapabilityRouter } from "../src/http/capability-router.js";
